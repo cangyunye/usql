@@ -194,6 +194,41 @@ func TestParseContext(t *testing.T) {
 	}
 }
 
+// TestParseContextParensAndTableListed covers the fields the candidate
+// generators branch on: OpenParens distinguishes INSERT INTO column lists,
+// and TableListed distinguishes INSERT INTO film <cursor> (decline) from
+// FROM film JOIN <cursor> (still offer tables).
+func TestParseContextParensAndTableListed(t *testing.T) {
+	cases := []struct {
+		name           string
+		line           string
+		start          int
+		expOpenParens  int
+		expTableListed bool
+	}{
+		{"insert into paren", "INSERT INTO film (", 18, 1, true},
+		{"insert into column list", "INSERT INTO film (a", 19, 1, true},
+		{"insert into values paren", "INSERT INTO film (a, b) VALUES (", 32, 1, false},
+		{"from table listed", "SELECT * FROM film ", 19, 0, true},
+		{"from before table", "SELECT * FROM ", 14, 0, false},
+		{"join after from table", "SELECT * FROM film JOIN ", 24, 0, false},
+		{"closed parens", "SELECT count(*) FROM film WHERE ", 31, 0, true},
+		{"unclosed subquery", "SELECT * FROM (SELECT id FROM film WHERE ", 41, 1, false},
+		{"after semicolon", "SELECT 1; SELECT * FROM fi", 26, 0, false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := parseContext([]rune(test.line), test.start)
+			if ctx.OpenParens != test.expOpenParens {
+				t.Errorf("OpenParens = %d, want %d", ctx.OpenParens, test.expOpenParens)
+			}
+			if ctx.TableListed != test.expTableListed {
+				t.Errorf("TableListed = %v, want %v", ctx.TableListed, test.expTableListed)
+			}
+		})
+	}
+}
+
 // ctxMockReader is intentionally separate from mockReader in completer_test.go
 // so these tests do not depend on it while the main code is in flux.
 type ctxMockReader struct{}
@@ -213,7 +248,7 @@ func (r ctxMockReader) Columns(f metadata.Filter) (*metadata.ColumnSet, error) {
 // TestContextCandidates exercises the plan B pipeline end-to-end:
 // parseContext -> alias/table resolution -> reader query -> fuzzy completion.
 func TestContextCandidates(t *testing.T) {
-	r := ctxMockReader{}
+	c := completer{reader: ctxMockReader{}, logger: discardLogger()}
 
 	cases := []struct {
 		name  string
@@ -240,42 +275,13 @@ func TestContextCandidates(t *testing.T) {
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := parseContext([]rune(test.line), test.start)
-
-			// resolve the qualifier to a table reference, then ask the
-			// reader for that table's columns; an unqualified word
-			// resolves against every table in scope
-			var refs []TableRef
-			if name := ctx.Qualifier; name != "" {
-				if ref, ok := ctx.Aliases[name[:len(name)-1]]; ok {
-					refs = []TableRef{ref}
-				}
-			} else {
-				refs = ctx.Tables
-			}
-
-			var cols []string
-			for _, ref := range refs {
-				if ref.Name == "" {
-					continue
-				}
-				set, err := r.Columns(metadata.Filter{Parent: ref.Name})
-				if err != nil {
-					t.Fatalf("Columns(%q): %v", ref.Name, err)
-				}
-				for set.Next() {
-					cols = append(cols, set.Get().Name)
-				}
-				set.Close()
-			}
-
-			got := completeFuzzy([]rune(ctx.Object), cols...)
+			got := c.completeFromContext(parseContext([]rune(test.line), test.start))
 			if len(got) != len(test.want) {
-				t.Fatalf("completeFuzzy(%q, %v) = %q, want %q", ctx.Object, cols, got, test.want)
+				t.Fatalf("completeFromContext(%q, %d) = %q, want %q", test.line, test.start, got, test.want)
 			}
 			for i := range got {
 				if string(got[i]) != test.want[i] {
-					t.Errorf("got[%d] = %q, want %q", i, got[i], test.want[i])
+					t.Errorf("got[%d] = %q, want %q", i, string(got[i]), test.want[i])
 				}
 			}
 		})

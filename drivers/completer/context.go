@@ -34,10 +34,18 @@ type Context struct {
 	// cursor is '(' — e.g. the column list of INSERT INTO, or function
 	// arguments.
 	AfterParen bool
+	// OpenParens is the number of '(' before the cursor word that are not
+	// yet closed — the cursor is inside a column list, function call or
+	// subquery.
+	OpenParens int
 	// Tables lists the table references in scope, in order of appearance.
 	// Derived tables and CTE bodies only appear when the cursor is inside
 	// them.
 	Tables []TableRef
+	// TableListed reports whether a table reference was seen after the
+	// current clause keyword — INSERT INTO film <cursor> lists one, while
+	// FROM film JOIN <cursor> does not for the JOIN.
+	TableListed bool
 	// Aliases maps each alias (and each table's own name) to its reference.
 	// The alias of a derived table maps to the zero TableRef, because its
 	// columns cannot be resolved without evaluating the subquery.
@@ -63,9 +71,11 @@ func parseContext(line []rune, start int) Context {
 
 	// The clause scan sees only the tokens before the word, so a partial
 	// identifier never influences the detected clause.
-	ctx := scanClauses(tokenize(line, ws))
+	tokens := tokenize(line, ws)
+	ctx := scanClauses(tokens)
 	ctx.Qualifier, ctx.Object = splitWord(word)
 	ctx.AfterParen = afterOpenParen(line, start)
+	ctx.OpenParens = openParens(tokens)
 	return ctx
 }
 
@@ -90,12 +100,19 @@ func scanClauses(tokens []token) Context {
 			}
 			continue
 		}
+		if t.kind == tokSemicolon {
+			// a new statement starts with an empty scope
+			ctx = Context{Aliases: map[string]TableRef{}}
+			tableMode, derivedTable = false, false
+			continue
+		}
 		if t.kind != tokIdent {
 			continue
 		}
 		up := strings.ToUpper(t.text)
 		if clause, ok := contextClauses[up]; ok {
 			ctx.Clause = clause
+			ctx.TableListed = false
 			tableMode = tableClauses[clause]
 			derivedTable = false
 			continue
@@ -105,6 +122,7 @@ func scanClauses(tokens []token) Context {
 		}
 		if derivedTable {
 			ctx.Aliases[t.text] = TableRef{}
+			ctx.TableListed = true
 			derivedTable = false
 			continue
 		}
@@ -121,6 +139,7 @@ func scanClauses(tokens []token) Context {
 		}
 		ctx.Aliases[ref.Name] = ref
 		ctx.Tables = append(ctx.Tables, ref)
+		ctx.TableListed = true
 		i = next - 1
 	}
 	return ctx
@@ -169,6 +188,23 @@ func matchParens(tokens []token) map[int]int {
 		}
 	}
 	return match
+}
+
+// openParens counts '(' tokens that have no matching ')' before the cursor
+// word.
+func openParens(tokens []token) int {
+	depth := 0
+	for _, t := range tokens {
+		switch t.kind {
+		case tokLparen:
+			depth++
+		case tokRparen:
+			if depth > 0 {
+				depth--
+			}
+		}
+	}
+	return depth
 }
 
 // splitWord splits a possibly qualified identifier into its dotted qualifier

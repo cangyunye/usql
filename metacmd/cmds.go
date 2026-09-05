@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/xo/dburl"
+	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/text"
@@ -394,6 +395,27 @@ func ConnectionInfo(p *Params) error {
 	}
 	fmt.Fprintln(p.Handler.IO().Stdout(), s)
 	return nil
+}
+
+// Encoding is a Connection meta command (\encoding). Shows the client encoding
+// used to decode database output and the console output encoding, or sets the
+// client encoding to the named encoding.
+//
+// Descs:
+//
+//	encoding	[ENCODING]	show or set the client encoding used to decode database output (utf-8, gbk, gb2312, gb18030)
+func Encoding(p *Params) error {
+	name, ok, err := p.NextOK(true)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		stdout := p.Handler.IO().Stdout()
+		fmt.Fprintf(stdout, text.ClientEncodingIs+"\n", p.Handler.EncodingName())
+		fmt.Fprintf(stdout, text.ConsoleEncodingIs+"\n", charset.ConsoleEncodingName())
+		return nil
+	}
+	return p.Handler.SetEncoding(name)
 }
 
 // Edit is a Query Buffer meta command (\e \edit). Opens the query buffer for

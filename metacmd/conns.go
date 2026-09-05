@@ -30,6 +30,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/xo/dburl"
+	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/text"
@@ -45,9 +46,13 @@ var fileScheme = map[string]bool{
 	"duckdb": true, "csvq": true,
 }
 
+// connsEncDefault is the encoding shown as the default in the connection
+// form's encoding field.
+const connsEncDefault = "utf-8"
+
 // connTable renders the named-connection list as a bordered table.
 func connTable(names []string) string {
-	headers := []string{"#", "name", "source", "driver", "user", "host", "port", "database", "password"}
+	headers := []string{"#", "name", "source", "driver", "user", "host", "port", "database", "encoding", "password"}
 	rows := make([][]string, 0, len(names))
 	for i, name := range names {
 		comps, _ := env.ConnComponents(name)
@@ -56,7 +61,7 @@ func connTable(names []string) string {
 			src = "session"
 		}
 		_, hasPw := env.Vars().GetSecret(name)
-		row := []string{strconv.Itoa(i + 1), name, src, "-", "", "", "", "", ""}
+		row := []string{strconv.Itoa(i + 1), name, src, "-", "", "", "", "", "", ""}
 		if v, ok := comps["protocol"]; ok {
 			row[3] = fmt.Sprint(v)
 		}
@@ -72,8 +77,11 @@ func connTable(names []string) string {
 		if v, ok := comps["database"]; ok {
 			row[7] = fmt.Sprint(v)
 		}
+		if enc, ok := env.Vars().GetConnEncoding(name); ok && enc != "" {
+			row[8] = enc
+		}
 		if hasPw {
-			row[8] = "set"
+			row[9] = "set"
 		}
 		rows = append(rows, row)
 	}
@@ -316,6 +324,24 @@ func connsForm(h Handler, name string, editing bool) error {
 		default:
 			components["database"] = db
 		}
+	}
+
+	// encoding: client-side decoding of database output; validated here so a
+	// typo doesn't fail later at connect time
+	encDef, _ := env.Vars().GetConnEncoding(name)
+	enc, err := askField(h, "encoding (utf-8, gbk, gb2312, gb18030)", encDef, false)
+	if err != nil {
+		return err
+	}
+	enc = strings.ToLower(strings.TrimSpace(enc))
+	if enc == connsEncDefault {
+		enc = ""
+	}
+	if enc != "" {
+		if _, err := charset.ParseEncoding(enc); err != nil {
+			return err
+		}
+		components["encoding"] = enc
 	}
 	if err := env.SaveConn(name, components, pw); err != nil {
 		return err

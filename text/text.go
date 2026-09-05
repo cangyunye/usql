@@ -35,6 +35,8 @@ var (
 	RowCount                 = `(%d rows)`
 	AvailableDrivers         = `Available Drivers:`
 	ConnInfo                 = `Connected with driver %s (%s)`
+	ClientEncodingIs         = `Client encoding is %s.`
+	ConsoleEncodingIs        = `Console encoding is %s.`
 	EnterPassword            = `Enter password: `
 	EnterPreviousPassword    = `Enter previous password: `
 	PasswordsDoNotMatch      = `Passwords do not match, trying again ...`

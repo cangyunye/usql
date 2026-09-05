@@ -495,7 +495,7 @@ interactively on a terminal:
 ```
 
 A bordered table shows each connection's name, source, driver, user, host,
-port, database, and whether a password is stored. The menu line accepts:
+port, database, configured encoding, and whether a password is stored. The menu line accepts:
 
 | input          | action                                            |
 | -------------- | ------------------------------------------------- |
@@ -603,6 +603,52 @@ $ usql pg://
 
 See the relevant documentation [on database drivers][databases] for more
 information.
+
+#### Character Encoding
+
+`usql` processes all text internally as UTF-8. When a database returns text
+in a non-UTF-8 character set (for example, an openGauss database created with
+`ENCODING 'GBK'`, a MySQL server configured with `character_set_server=gbk`,
+or an Oracle database accessed with `NLS_LANG=ZHS16GBK`), set the client
+encoding so `usql` decodes database output correctly. Chinese text displays
+correctly and table borders stay aligned.
+
+The encoding can be set three ways:
+
+```sh
+# 1. on the command line
+$ usql 'mysql://user:pass@host/db?charset=gbk' --encoding gbk
+
+# 2. inside a session
+=> \encoding gbk
+Client encoding is gbk.
+
+# 3. in a named connection config (config.yaml or connections.yaml)
+connections:
+  og_gbk:
+    protocol: opengauss
+    username: gaussdb
+    hostname: 127.0.0.1
+    port: 5432
+    database: postgres
+    encoding: gbk   # client-side decoding of database output
+```
+
+The named connection's encoding is applied when connecting with `\c NAME`, and
+can be set interactively through the [`\conns` entry form][commands]. Valid
+encodings are `utf-8` (the default), `gbk`, `gb2312`, and `gb18030`.
+
+The encoding must match the bytes the database actually sends. For MySQL-style
+servers this means the DSN's `charset` parameter (which controls `SET NAMES`)
+and `--encoding`/`\encoding` must agree. Values that cannot be decoded as the
+configured encoding (e.g. binary data) are displayed as `\xNN` escapes, as
+with `utf-8`.
+
+On Linux, console output is transcoded to match the terminal's character set,
+taken from `LC_ALL`, `LC_CTYPE`, or `LANG` (e.g. `zh_CN.GBK`, `zh_CN.GB2312`,
+`zh_CN.GB18030`, `zh_CN.UTF-8`). Under a `GBK`/`GB2312` locale, characters not
+representable in GBK are rendered as `?`. Output redirected to files or pipes
+is always UTF-8.
 
 ### Connection Examples
 
@@ -777,6 +823,7 @@ Connection
   \password [USER]                  change password for user
   \passwd                           alias for \password
   \conninfo                         display information about the current database connection
+  \encoding [ENCODING]              show or set the client encoding used to decode database output
 
 Query Execute
   \g [(OPTIONS)] [FILE] or ;        execute query (and send results to file or |pipe)

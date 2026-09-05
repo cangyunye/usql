@@ -167,6 +167,7 @@ func New(cliargs []string) ContextExecutor {
 	flags.BoolVarP(&args.ForcePassword, "password", "W", false, "force password prompt (should happen automatically)")
 	flags.StringVar(&args.Name, "name", "", "save the connected DSN under NAME (default: <scheme>_<user>_<host>_<port>_<dbname>)")
 	flags.BoolVarP(&args.SingleTransaction, "single-transaction", "1", false, "execute as a single transaction (if non-interactive)")
+	flags.StringVarP(&args.Encoding, "encoding", "e", "", "set client encoding for decoding database output (utf-8, gbk, gb2312, gb18030)")
 
 	// set
 	sf(flags, &args.Vars, "set", "v", `set variable NAME to VALUE (see \set command, aliases: --var --variable)`, "NAME=VALUE")
@@ -315,6 +316,12 @@ func Run(ctx context.Context, args *Args) error {
 	defer l.Close()
 	// create handler
 	h := handler.New(l, u, wd, args.Charts, args.NoPassword)
+	// set client encoding for decoding database output
+	if args.Encoding != "" {
+		if err := h.SetEncoding(args.Encoding); err != nil {
+			return err
+		}
+	}
 	// force password
 	dsn := args.DSN
 	if args.ForcePassword {
@@ -385,6 +392,7 @@ type Args struct {
 	NoInit            bool
 	SingleTransaction bool
 	Name              string
+	Encoding          string
 	Vars              []string
 	Cvars             []string
 	Pvars             []string
@@ -527,6 +535,13 @@ func setConn(name string, value interface{}) error {
 	case []interface{}:
 		return env.Vars().SetConn(name, convSlice(x)...)
 	case map[string]interface{}:
+		// encoding is usql client config, not a URL component
+		if enc, ok := x["encoding"]; ok {
+			delete(x, "encoding")
+			if s, ok := enc.(string); ok && strings.TrimSpace(s) != "" {
+				env.Vars().SetConnEncoding(name, strings.TrimSpace(s))
+			}
+		}
 		urlstr, err := dburl.BuildURL(x)
 		if err != nil {
 			return err

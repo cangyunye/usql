@@ -65,6 +65,11 @@ type Handler interface {
 	GetTiming() bool
 	// SetTiming mode.
 	SetTiming(bool)
+	// EncodingName returns the name of the client encoding used to decode
+	// database output.
+	EncodingName() string
+	// SetEncoding sets the client encoding used to decode database output.
+	SetEncoding(string) error
 	// GetOutput writer.
 	GetOutput() io.Writer
 	// SetOutput writer.

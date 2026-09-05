@@ -20,6 +20,15 @@ connections:
   ore: oracle://system:P4ssw0rd@localhost:1522/db1
   pgs: postgres://postgres:P4ssw0rd@localhost
   pgx: pgx://postgres:P4ssw0rd@localhost
+  # "encoding" is a usql client option: the character set used to decode this
+  # connection's output (utf-8, gbk, gb2312, gb18030)
+  og_gbk:
+    protocol: opengauss
+    username: gaussdb
+    hostname: localhost
+    port: 5432
+    database: postgres
+    encoding: gbk
   vrt:
     proto: vertica
     user: vertica

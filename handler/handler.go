@@ -34,6 +34,7 @@ import (
 	"github.com/xo/dburl/passfile"
 	"github.com/xo/echartsgoja"
 	"github.com/xo/tblfmt"
+	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/completer"
 	"github.com/xo/usql/drivers/metadata"
@@ -44,6 +45,7 @@ import (
 	"github.com/xo/usql/stmt"
 	ustyles "github.com/xo/usql/styles"
 	"github.com/xo/usql/text"
+	"golang.org/x/text/encoding"
 )
 
 // Handler is a input process handler.
@@ -93,6 +95,11 @@ type Handler struct {
 	tx *sql.Tx
 	// out file or pipe
 	out io.WriteCloser
+	// encName is the name of the encoding used to decode database output
+	// ("" means UTF-8).
+	encName string
+	// enc decodes database output to UTF-8 (nil means UTF-8 passthrough).
+	enc encoding.Encoding
 }
 
 // New creates a new input handler.
@@ -133,6 +140,29 @@ func (h *Handler) GetTiming() bool {
 // SetTiming sets the timing toggle.
 func (h *Handler) SetTiming(timing bool) {
 	h.timing = timing
+}
+
+// SetEncoding sets the encoding used to decode database output to UTF-8.
+// Valid names are utf-8 (the default), gbk, gb2312, and gb18030.
+func (h *Handler) SetEncoding(name string) error {
+	enc, err := charset.ParseEncoding(name)
+	if err != nil {
+		return err
+	}
+	h.encName, h.enc = strings.ToLower(strings.TrimSpace(name)), enc
+	if h.encName == "" || h.encName == "utf-8" || h.encName == "utf8" {
+		h.encName, h.enc = "utf-8", nil
+	}
+	return nil
+}
+
+// EncodingName returns the name of the encoding used to decode database
+// output.
+func (h *Handler) EncodingName() string {
+	if h.encName == "" {
+		return "utf-8"
+	}
+	return h.encName
 }
 
 // SetSingleLineMode sets the single line mode toggle.
@@ -775,6 +805,14 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 			cname, params = params[0], v
 		}
 	}
+	// apply the named connection's configured encoding, when set
+	if cname != "" {
+		if enc, ok := env.Vars().GetConnEncoding(cname); ok && enc != "" {
+			if err := h.SetEncoding(enc); err != nil {
+				return err
+			}
+		}
+	}
 	if len(params) < 2 {
 		dsn := params[0]
 		// parse dsn
@@ -1102,6 +1140,12 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 	if err != nil {
 		return err
 	}
+	// decode column names to UTF-8
+	if h.enc != nil {
+		for i := range cols {
+			cols[i] = charset.ToUTF8(cols[i], h.enc)
+		}
+	}
 	// process row(s)
 	transposed := make([][]string, len(cols))
 	clen, tfmt := len(cols), env.Vars().PrintTimeFormat()
@@ -1275,11 +1319,11 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	case drivers.UseColumnTypes(h.u):
 		extra = append(extra, tblfmt.WithUseColumnTypes(true))
 	}
-	resultSet := tblfmt.ResultSet(rows)
+	resultSet := charset.NewResultSet(tblfmt.ResultSet(rows), h.enc)
 	// wrap query with crosstab
 	if opt.Exec == metacmd.ExecCrosstab {
 		var err error
-		if resultSet, err = tblfmt.NewCrosstabView(rows, append(extra, tblfmt.WithParams(opt.Crosstab...))...); err != nil {
+		if resultSet, err = tblfmt.NewCrosstabView(resultSet, append(extra, tblfmt.WithParams(opt.Crosstab...))...); err != nil {
 			return err
 		}
 		extra = nil
@@ -1389,6 +1433,12 @@ func (h *Handler) scan(rows *sql.Rows, clen int, tfmt string) ([]string, error) 
 					return nil, err
 				}
 			}
+		}
+	}
+	// decode database output to UTF-8
+	if h.enc != nil {
+		for i := range row {
+			row[i] = charset.ToUTF8(row[i], h.enc)
 		}
 	}
 	return row, nil

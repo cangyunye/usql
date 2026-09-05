@@ -28,6 +28,9 @@ type Variables struct {
 	secrets map[string]string
 	// src holds the origin ("config" or "store") of each named connection.
 	src map[string]string
+	// connEnc holds the encoding configured for named connections, used to
+	// decode database output.
+	connEnc map[string]string
 }
 
 // NewVars creates a set of empty variables.
@@ -38,6 +41,7 @@ func NewVars() *Variables {
 		conn:    make(map[string][]string),
 		secrets: make(map[string]string),
 		src:     make(map[string]string),
+		connEnc: make(map[string]string),
 	}
 }
 
@@ -134,6 +138,7 @@ func NewDefaultVars() *Variables {
 		conn:    make(map[string][]string),
 		secrets: make(map[string]string),
 		src:     make(map[string]string),
+		connEnc: make(map[string]string),
 	}
 }
 
@@ -401,6 +406,22 @@ func (v *Variables) SetConnSource(name, source string) {
 // connection, or "" when the connection is not from a persisted source.
 func (v *Variables) GetConnSource(name string) string {
 	return v.src[name]
+}
+
+// SetConnEncoding sets the configured encoding of a named connection, used to
+// decode database output. An empty enc removes the setting.
+func (v *Variables) SetConnEncoding(name, enc string) {
+	if enc == "" {
+		delete(v.connEnc, name)
+		return
+	}
+	v.connEnc[name] = enc
+}
+
+// GetConnEncoding returns the configured encoding of a named connection.
+func (v *Variables) GetConnEncoding(name string) (string, bool) {
+	enc, ok := v.connEnc[name]
+	return enc, ok
 }
 
 // DumpConn dumps the connection variables to w. Passwords found embedded in

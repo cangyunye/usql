@@ -6,7 +6,11 @@ import (
 	"io"
 	"os"
 
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/transform"
+
 	"github.com/gohxs/readline"
+	"github.com/xo/usql/charset"
 )
 
 var (
@@ -162,6 +166,15 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 	if !cygwin {
 		stderr = readline.Stderr
 	}
+	// transcode console output to the terminal character set, when the
+	// locale requests a non-UTF-8 encoding (e.g. zh_CN.GBK); file and pipe
+	// output (-o) is left as UTF-8
+	if out == "" {
+		if enc := charset.OutputEncoding(); enc != nil {
+			stdout = newEncodedWriter(stdout, enc)
+			stderr = newEncodedWriter(stderr, enc)
+		}
+	}
 	if interactive {
 		// wrap it with cancelable stdin
 		stdin = readline.NewCancelableStdin(stdin)
@@ -222,4 +235,28 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 		S:  l.SaveHistory,
 		Pw: pw,
 	}, nil
+}
+
+// newEncodedWriter wraps w with a UTF-8 to enc transcoding writer. The
+// returned writer's Close is a no-op: ownership of the underlying writer
+// stays with the caller (readline handles terminal close, and closing
+// transform.Writer would close the underlying terminal).
+func newEncodedWriter(w io.Writer, enc encoding.Encoding) io.WriteCloser {
+	tw := transform.NewWriter(w, encoding.ReplaceUnsupported(enc.NewEncoder()))
+	return &encodedWriter{w: tw}
+}
+
+// encodedWriter transcodes UTF-8 writes to a console encoding.
+type encodedWriter struct {
+	w *transform.Writer
+}
+
+// Write satisfies io.Writer.
+func (e *encodedWriter) Write(p []byte) (int, error) {
+	return e.w.Write(p)
+}
+
+// Close satisfies io.WriteCloser without closing the underlying writer.
+func (e *encodedWriter) Close() error {
+	return nil
 }

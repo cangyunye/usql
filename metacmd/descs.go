@@ -54,6 +54,7 @@ func init() {
 			{Password, `password`, `[USER]`, `change password for user`, false, false},
 			{Password, `passwd`, ``, `alias for \password`, true, false},
 			{ConnectionInfo, `conninfo`, ``, `display information about the current database connection`, false, false},
+			{Encoding, `encoding`, `[ENCODING]`, `show or set the client encoding used to decode database output (utf-8, gbk, gb2312, gb18030)`, false, false},
 		},
 		// Query Execute
 		{

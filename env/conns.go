@@ -222,6 +222,15 @@ func LoadConns() error {
 		if _, ok := Vars().GetConn(name); ok {
 			return fmt.Errorf("connection %q is defined both in config.yaml and in %s; remove one of them", name, connStoreFile)
 		}
+		// encoding is usql client config, not a URL component
+		if m, ok := conns[name].(map[string]interface{}); ok {
+			if enc, ok := m["encoding"]; ok {
+				delete(m, "encoding")
+				if s, ok := enc.(string); ok && strings.TrimSpace(s) != "" {
+					Vars().SetConnEncoding(name, strings.TrimSpace(s))
+				}
+			}
+		}
 		urlstr, err := connEntryURL(name, conns[name])
 		if err != nil {
 			return err
@@ -279,6 +288,12 @@ func SaveConn(name string, components map[string]any, password string) error {
 	// make available in the session
 	if err := Vars().SetConn(name, urlstr); err != nil {
 		return err
+	}
+	// mirror the configured encoding into the session ("" clears it)
+	if enc, ok := components["encoding"].(string); ok {
+		Vars().SetConnEncoding(name, strings.TrimSpace(enc))
+	} else {
+		Vars().SetConnEncoding(name, "")
 	}
 	Vars().SetConnSource(name, "store")
 	if password != "" {

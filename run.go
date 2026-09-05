@@ -165,6 +165,7 @@ func New(cliargs []string) ContextExecutor {
 	flags.BoolVar(&args.NoInit, "no-"+text.CommandName+"rc", false, "do not read startup file")
 	flags.VarP(filevar{&args.Out}, "out", "o", "output file")
 	flags.BoolVarP(&args.ForcePassword, "password", "W", false, "force password prompt (should happen automatically)")
+	flags.StringVar(&args.Name, "name", "", "save the connected DSN under NAME (default: <scheme>_<user>_<host>_<port>_<dbname>)")
 	flags.BoolVarP(&args.SingleTransaction, "single-transaction", "1", false, "execute as a single transaction (if non-interactive)")
 
 	// set
@@ -325,6 +326,16 @@ func Run(ctx context.Context, args *Args) error {
 	if err = h.Open(ctx, dsn); err != nil {
 		return err
 	}
+	// save the connected DSN as a named connection
+	if args.DSN != "" && h.URL() != nil {
+		name := args.Name
+		if name == "" {
+			name = env.DefaultConnName(h.URL())
+		}
+		if err := env.SaveConnFromURL(name, h.URL()); err != nil {
+			fmt.Fprintln(os.Stderr, "save connection:", err)
+		}
+	}
 	// start transaction
 	if args.SingleTransaction {
 		if h.IO().Interactive() {
@@ -373,6 +384,7 @@ type Args struct {
 	NoPassword        bool
 	NoInit            bool
 	SingleTransaction bool
+	Name              string
 	Vars              []string
 	Cvars             []string
 	Pvars             []string

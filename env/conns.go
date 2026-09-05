@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/99designs/keyring"
 	"github.com/xo/dburl"
@@ -528,4 +529,58 @@ func ReadConnPassword(name string) (string, bool, error) {
 		return pw, true, nil
 	}
 	return readSecret(name)
+}
+
+// SaveConnFromURL stores a successfully connected URL as a named connection,
+// extracting the components and password. The URL's password (if any) is kept
+// in the secret store, never in the components file.
+func SaveConnFromURL(name string, u *dburl.URL) error {
+	components := map[string]any{"protocol": u.Scheme}
+	if u.User != nil && u.User.Username() != "" {
+		components["username"] = u.User.Username()
+	}
+	if host := u.Hostname(); host != "" {
+		components["hostname"] = host
+	}
+	if port := u.Port(); port != "" {
+		components["port"] = port
+	}
+	if db := strings.TrimPrefix(u.Path, "/"); db != "" {
+		components["database"] = db
+	}
+	password, _ := u.User.Password()
+	return SaveConn(name, components, password)
+}
+
+// DefaultConnName builds a default identifier for a connected URL from its
+// scheme, user, host, port, and database (when present), e.g.
+// postgres_kube_127.0.0.1_5432_dev. The result is always a valid connection
+// identifier (letters, digits, _), so characters like @, ., - are replaced
+// with _.
+func DefaultConnName(u *dburl.URL) string {
+	parts := []string{u.Scheme}
+	if u.User != nil && u.User.Username() != "" {
+		parts = append(parts, u.User.Username())
+	}
+	if host := u.Hostname(); host != "" {
+		parts = append(parts, host)
+	}
+	if port := u.Port(); port != "" {
+		parts = append(parts, port)
+	}
+	if db := strings.TrimPrefix(u.Path, "/"); db != "" {
+		parts = append(parts, db)
+	}
+	return sanitizeIdentifier(strings.Join(parts, "_"))
+}
+
+// sanitizeIdentifier replaces characters that are not letters, digits, or _
+// with _, so the result is a valid connection name.
+func sanitizeIdentifier(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return r
+		}
+		return '_'
+	}, s)
 }

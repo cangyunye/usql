@@ -858,7 +858,11 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	if err == nil {
 		if err = drivers.Ping(ctx, h.u, h.db); err == nil {
 			if h.l.Interactive() {
-				h.l.Completer(drivers.NewCompleter(ctx, h.u, h.db, readerOpts(), completer.WithConnStrings(h.connStrings())))
+				// the completer's default 3s metadata timeout is too tight
+				// for databases with slow catalogs (e.g. OceanBase), so
+				// raise it; applied after the defaults, so it wins
+				opts := append(readerOpts(), metadata.WithTimeout(10*time.Second))
+				h.l.Completer(drivers.NewCompleter(ctx, h.u, h.db, opts, completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion()))
 			}
 			return h.Version(ctx)
 		}

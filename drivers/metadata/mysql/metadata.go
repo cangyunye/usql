@@ -32,8 +32,11 @@ var (
 	// NewCompleter for MySQL databases
 	NewCompleter = func(db drivers.DB, opts ...completer.Option) readline.AutoCompleter {
 		readerOpts := []metadata.ReaderOption{
-			// this needs to be relatively low, since autocomplete is very interactive
-			metadata.WithTimeout(3 * time.Second),
+			// this needs to be relatively low, since autocomplete is very
+			// interactive — but low enough timeouts break column completion
+			// on wire-compatible databases with slow catalogs (OceanBase
+			// MySQL tenants take ~8s for the columns query)
+			metadata.WithTimeout(10 * time.Second),
 			metadata.WithLimit(1000),
 		}
 		reader := NewReader(db, readerOpts...)

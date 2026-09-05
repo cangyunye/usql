@@ -9,9 +9,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/gohxs/readline"
 	"github.com/xo/usql/drivers/metadata"
 	"github.com/xo/usql/env"
+	"github.com/xo/usql/rline/readline"
 	"github.com/xo/usql/text"
 )
 

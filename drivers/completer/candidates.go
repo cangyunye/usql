@@ -45,6 +45,11 @@ var clauseKeywords = map[string][]string{
 // their options before the caller's.
 func WithContextCompletion() Option {
 	return func(c *completer) {
+		// cache metadata queries, so typing-time completion stays responsive
+		// even when the catalog is slow (e.g. OceanBase)
+		if c.reader != nil {
+			c.reader = NewCachedReader(c.reader)
+		}
 		prev := c.beforeComplete
 		c.beforeComplete = func(previousWords []string, text []rune) [][]rune {
 			if result := c.completeWithContext(previousWords, text); result != nil {
@@ -142,17 +147,17 @@ func (c completer) qualifiedOptions(ctx Context) []string {
 	}
 	switch n := len(parts); {
 	case n == 1 && tableClauses[ctx.Clause]:
-		return c.namespaceTables("", parts[0], qual+ctx.Object, ctx.Clause == "INTO" || ctx.Clause == "UPDATE")
+		return c.namespaceTables("", parts[0], ctx.Clause == "INTO" || ctx.Clause == "UPDATE")
 	case n == 1:
 		// in a column position the qualifier is an alias or table name; if
 		// it is neither, it may still be a schema
 		if ref, ok := ctx.Aliases[parts[0]]; ok {
 			return appendColumns(ref)
 		}
-		return c.namespaceTables("", parts[0], qual+ctx.Object, true)
+		return c.namespaceTables("", parts[0], true)
 	case n == 2 && tableClauses[ctx.Clause]:
 		// remote.default.<cursor>
-		return c.namespaceTables(parts[0], parts[1], qual+ctx.Object, ctx.Clause == "INTO" || ctx.Clause == "UPDATE")
+		return c.namespaceTables(parts[0], parts[1], ctx.Clause == "INTO" || ctx.Clause == "UPDATE")
 	case n == 2:
 		// public.film.<cursor>
 		return appendColumns(TableRef{Schema: parts[0], Name: parts[1]})
@@ -195,9 +200,11 @@ func (c completer) tableColumns(ref TableRef) []string {
 // scopeTables completes the first table of a statement: namespaces to qualify
 // with, plus the tables themselves — all selectables for FROM and JOIN,
 // updatable tables only for INSERT INTO and UPDATE, mirroring
-// completeWithSelectables and completeWithUpdatables.
+// completeWithSelectables and completeWithUpdatables. The query filter is
+// stable (no typed text in it): per-keystroke matching happens client-side
+// in fuzzy ranking, so the cached query is reused while typing.
 func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
-	filter := parseIdentifier(ctx.Object)
+	filter := metadata.Filter{OnlyVisible: true}
 	if tablesOnly {
 		filter.Types = updatableTypes
 	}
@@ -237,14 +244,10 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 
 // namespaceTables completes the tables of a schema, or of a catalog and
 // schema — plus, unless tablesOnly, its functions and sequences — returning
-// fully qualified names that begin with pattern.
-func (c completer) namespaceTables(catalog, schema, pattern string, tablesOnly bool) []string {
+// fully qualified names. The filter is stable across keystrokes; the typed
+// object text is matched client-side by fuzzy ranking.
+func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []string {
 	filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
-	if i := strings.LastIndexByte(pattern, '.'); i >= 0 {
-		filter.Name = pattern[i+1:] + "%"
-	} else {
-		filter.Name = pattern + "%"
-	}
 	names := make([]string, 0, 10)
 	if r, ok := c.reader.(metadata.TableReader); ok {
 		if tablesOnly {

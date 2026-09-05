@@ -127,7 +127,7 @@ func New(l rline.IO, user *user.User, wd string, charts billy.Filesystem, nopw b
 	}
 	if iactive {
 		l.SetOutput(h.outputHighlighter)
-		l.Completer(completer.NewDefaultCompleter(completer.WithConnStrings(h.connStrings())))
+		l.Completer(completer.NewLive(completer.NewDefaultCompleter(completer.WithConnStrings(h.connStrings()))))
 	}
 	return h
 }
@@ -862,7 +862,9 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 				// for databases with slow catalogs (e.g. OceanBase), so
 				// raise it; applied after the defaults, so it wins
 				opts := append(readerOpts(), metadata.WithTimeout(10*time.Second))
-				h.l.Completer(drivers.NewCompleter(ctx, h.u, h.db, opts, completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion()))
+				c := drivers.NewCompleter(ctx, h.u, h.db, opts, completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion())
+				// NewLive adds the typing-time fast path on top
+				h.l.Completer(completer.NewLive(c))
 			}
 			return h.Version(ctx)
 		}

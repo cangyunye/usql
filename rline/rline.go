@@ -9,8 +9,8 @@ import (
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/transform"
 
-	"github.com/gohxs/readline"
 	"github.com/xo/usql/charset"
+	"github.com/xo/usql/rline/readline"
 )
 
 var (
@@ -188,6 +188,8 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 		Stdin:                  stdin,
 		Stdout:                 stdout,
 		Stderr:                 stderr,
+		// typing-time candidate menu (display-only); TAB still completes
+		LiveComplete: interactive || cygwin,
 		FuncIsTerminal: func() bool {
 			return interactive || cygwin
 		},
@@ -230,6 +232,11 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 		A: func(a readline.AutoCompleter) {
 			cfg := l.Config.Clone()
 			cfg.AutoComplete = a
+			// let the completer re-render the live menu when background
+			// queries land
+			if lc, ok := a.(readline.LiveAutoCompleter); ok {
+				lc.SetLiveKick(l.Operation.LiveKick)
+			}
 			l.SetConfig(cfg)
 		},
 		S:  l.SaveHistory,

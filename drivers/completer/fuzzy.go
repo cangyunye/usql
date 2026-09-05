@@ -62,24 +62,31 @@ func isBoundaryByte(b byte) bool {
 }
 
 // completeFuzzy returns the suffixes of options that fuzzily match text,
-// best matches first. Case handling mirrors CompleteFromList: when text
-// starts with a lower-case letter, suffixes are lower-cased.
+// best matches first. Candidates that start with the whole pattern rank
+// first, then fuzzy score, then length. Case handling mirrors
+// CompleteFromList: when text starts with a lower-case letter, suffixes are
+// lower-cased.
 func completeFuzzy(text []rune, options ...string) [][]rune {
 	if len(options) == 0 {
 		return nil
 	}
 	pattern := string(text)
+	lowerPattern := strings.ToLower(pattern)
 	type match struct {
 		option string
 		score  int
+		prefix bool
 	}
 	matches := make([]match, 0, len(options))
 	for _, o := range options {
 		if s := fuzzyScore(pattern, o); s >= 0 {
-			matches = append(matches, match{o, s})
+			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(o), lowerPattern)})
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].prefix != matches[j].prefix {
+			return matches[i].prefix
+		}
 		if matches[i].score != matches[j].score {
 			return matches[i].score > matches[j].score
 		}

@@ -40,7 +40,7 @@ func newReader(pf func(int) string) func(drivers.DB, ...metadata.ReaderOption) m
 	return func(db drivers.DB, opts ...metadata.ReaderOption) metadata.Reader {
 		return &metaReader{
 			LoggingReader: metadata.NewLoggingReader(db, opts...),
-			systemSchemas: "'CTXSYS', 'FLOWS_FILES', 'MDSYS', 'OUTLN', 'SYS', 'SYSTEM', 'XDB', 'XS$NULL'",
+			systemSchemas: "'CTXSYS', 'FLOWS_FILES', 'MDSYS', 'OUTLN', 'SYS', 'SYSTEM', 'XDB', 'XS$NULL', 'OCEANBASE'",
 			pf:            pf,
 		}
 	}
@@ -89,7 +89,7 @@ FROM all_users
 `
 	conds, vals := r.conditions(f, formats{
 		name:       "username LIKE %s",
-		notSchemas: "username NOT IN (%s)",
+		notSchemas: "UPPER(username) NOT IN (%s)",
 	})
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
@@ -130,7 +130,7 @@ FROM all_objects o
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
-		notSchemas: "o.owner NOT IN (%s)",
+		notSchemas: "UPPER(o.owner) NOT IN (%s)",
 		name:       "o.object_name LIKE %s",
 		types:      "o.object_type IN (%s)",
 	})
@@ -154,7 +154,7 @@ FROM all_synonyms s
 `
 		conds, seqVals := r.conditions(f, formats{
 			schema:     "s.owner LIKE %s",
-			notSchemas: "s.owner NOT IN (%s)",
+			notSchemas: "UPPER(s.owner) NOT IN (%s)",
 			name:       "s.synonym_name LIKE %s",
 		})
 		vals = append(vals, seqVals...)
@@ -209,7 +209,7 @@ FROM all_tab_columns c
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "c.owner LIKE %s",
-		notSchemas: "c.owner NOT IN (%s)",
+		notSchemas: "UPPER(c.owner) NOT IN (%s)",
 		parent:     "c.table_name LIKE %s",
 	})
 	if len(conds) != 0 {
@@ -267,7 +267,7 @@ JOIN all_objects b ON b.object_id = a.object_id AND a.sequence  = 1
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "b.owner LIKE %s",
-		notSchemas: "b.owner NOT IN (%s)",
+		notSchemas: "UPPER(b.owner) NOT IN (%s)",
 		name:       "b.object_name LIKE %s",
 		types:      "b.object_type IN (%s)",
 	})
@@ -321,7 +321,7 @@ JOIN all_arguments a ON b.object_id = a.object_id AND a.data_level = 0
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "a.owner LIKE %s",
-		notSchemas: "a.owner NOT IN (%s)",
+		notSchemas: "UPPER(a.owner) NOT IN (%s)",
 		parent:     "b.object_name LIKE %s",
 	})
 	conds = append(conds, "b.object_type = 'PROCEDURE' OR b.object_type = 'FUNCTION'")
@@ -372,7 +372,7 @@ FROM all_indexes o
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
-		notSchemas: "o.owner NOT IN (%s)",
+		notSchemas: "UPPER(o.owner) NOT IN (%s)",
 		parent:     "o.table_name LIKE %s",
 		name:       "o.index_name LIKE %s",
 	})
@@ -418,7 +418,7 @@ JOIN all_ind_columns b ON o.owner = b.index_owner AND o.index_name = b.index_nam
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
-		notSchemas: "o.owner NOT IN (%s)",
+		notSchemas: "UPPER(o.owner) NOT IN (%s)",
 		parent:     "o.table_name LIKE %s",
 		name:       "o.index_name LIKE %s",
 	})

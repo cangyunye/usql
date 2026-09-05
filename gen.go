@@ -14,6 +14,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -31,7 +32,7 @@ func main() {
 	licenseStart := flag.Int("license-start", 2015, "license start year")
 	licenseAuthor := flag.String("license-author", "Kenneth Shaw", "license author")
 	dburlGen := flag.Bool("dburl-gen", false, "enable dburl generation")
-	dburlDir := flag.String("dburl-dir", getDburlDir(), "dburl dir")
+	dburlDir := flag.String("dburl-dir", "", "dburl dir")
 	dburlLicenseStart := flag.Int("dburl-license-start", 2015, "dburl license start year")
 	flag.Parse()
 	if err := run(*licenseStart, *licenseAuthor, *dburlGen, *dburlDir, *dburlLicenseStart); err != nil {
@@ -64,6 +65,11 @@ func run(licenseStart int, licenseAuthor string, dburlGen bool, dburlDir string,
 		return err
 	}
 	if dburlGen {
+		if dburlDir == "" {
+			if dburlDir, err = getDburlDir(); err != nil {
+				return err
+			}
+		}
 		if err := writeReadme(dburlDir, false); err != nil {
 			return err
 		}
@@ -544,13 +550,25 @@ func buildTableLinks(drivers ...map[string]DriverInfo) string {
 	return s
 }
 
-func getDburlDir() string {
-	dir := filepath.Join(os.Getenv("GOPATH"), "src/github.com/xo/dburl")
-	var err error
-	if dir, err = realpath.Realpath(dir); err != nil {
-		panic(err)
+// getDburlDir returns the directory of the github.com/xo/dburl module.
+//
+// It prefers the module cache location reported by `go list -m`, falling back
+// to the legacy GOPATH/src layout.
+func getDburlDir() (string, error) {
+	// resolve via the go tool, which knows both the module cache and the
+	// vendor/local layouts
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/xo/dburl").Output()
+	if err == nil {
+		if dir := strings.TrimSpace(string(out)); dir != "" {
+			return dir, nil
+		}
 	}
-	return dir
+	// fall back to GOPATH/src layout
+	dir := filepath.Join(os.Getenv("GOPATH"), "src/github.com/xo/dburl")
+	if r, err := realpath.Realpath(dir); err == nil {
+		return r, nil
+	}
+	return "", fmt.Errorf("cannot locate github.com/xo/dburl module (run `go get github.com/xo/dburl` first)")
 }
 
 // decodeCommand decodes a command.

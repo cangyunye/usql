@@ -206,16 +206,29 @@ that will disable the driver:
 $ go install -tags 'most no_avatica no_couchbase no_postgres' github.com/xo/usql@main
 ```
 
-By specifying the build tags `most` or `all`, the build will include most, and
-all SQL drivers, respectively:
+#### Building Without CGO
+
+A CGO-free (`CGO_ENABLED=0`) build drops every binding to a C library: the
+default SQLite3 driver (mattn/go-sqlite3), DuckDB, ODBC, and the Oracle
+`godror` driver, plus the resvg terminal-chart renderer. The default SQLite3
+driver is replaced by the pure-Go ModernC transpilation (`moderncsqlite`); the
+`sqlite3` scheme and its aliases then route to it automatically:
 
 ```sh
-# build/install with most drivers (excludes CGO drivers and problematic drivers)
-$ go install -tags most github.com/xo/usql@main
+# CGO-free build of the base drivers (SQLite3 on ModernC, no resvg)
+$ CGO_ENABLED=0 go build -tags 'moderncsqlite no_sqlite3' .
 
-# build/install all drivers (includes CGO drivers and problematic drivers)
-$ go install -tags all github.com/xo/usql@main
+# CGO-free build with most drivers (includes OceanBase MySQL/oboracle, openGauss)
+$ CGO_ENABLED=0 go build -tags 'most no_duckdb no_odbc no_godror no_sqlite3 moderncsqlite' .
 ```
+
+Notes for CGO-free builds:
+
+- Named-connection passwords use the 0600-permission `secrets.json` fallback
+  file when no OS keyring backend is compiled in (see the
+  [`\conns` section](#managing-named-connections-conns)).
+- `\chart` terminal image output needs the cgo resvg binding; use
+  `\chart ... file=` to write the SVG to a file instead.
 
 ## Database Support
 
@@ -253,6 +266,10 @@ drivers.
 
 The following are the [Go SQL drivers][go-sql] that `usql` supports, the
 associated database, scheme / build tag, and scheme aliases:
+
+For the databases this fork adds — **OceanBase (MySQL-compatible)**,
+**OceanBase (Oracle-compatible)**, and **openGauss** — see the
+[connection examples](docs/CONNECTING.md) in `docs/CONNECTING.md`.
 
 <!-- DRIVER DETAILS START -->
 
@@ -468,8 +485,44 @@ connection strings (aka "data source name" or DSNs) have the same parsing rules
 as URLs, and can be passed to `usql` via command-line, or to the [`\connect`,
 `\c`, and `\copy` commands][commands].
 
-Database connections can be defined with [the `\cset` command][connection-vars]
-or in [the `config.yaml` configuration file][config].
+#### Managing Named Connections (`\conns`)
+
+The [`\conns` command][commands] lists the named connections and manages them
+interactively on a terminal:
+
+```sh
+(not connected)=> \conns
+```
+
+A bordered table shows each connection's name, source, driver, user, host,
+port, database, and whether a password is stored. The menu line accepts:
+
+| input          | action                                            |
+| -------------- | ------------------------------------------------- |
+| `a`            | add a connection via an entry form                |
+| `<row number>` | edit that connection via the same form            |
+| `c <name or #>`| connect to the named connection                   |
+| `d <name or #>`| delete the named connection (after confirmation)  |
+| `q`            | leave the manager                                 |
+
+The form asks for name (on add), driver (numbered picker of the compiled-in
+drivers or a scheme alias), user, host, port, database, URL parameters, and
+password. Password input is masked; when editing, leaving it empty keeps the
+stored password. In non-interactive or piped runs `\conns` only prints the
+table. All input goes through the normal line editor, so the manager defines
+no global shortcuts and nothing conflicts with readline bindings.
+
+Usql-managed connections are persisted to
+`$HOME/.config/usql/connections.yaml` (or the platform equivalent) in the same
+shape as [`connections:` in `config.yaml`][config] — as component maps or DSN
+strings. **Passwords are never written to that file.** They are kept in the OS
+keyring (Secret Service / Keychain / Windows Credential Manager) under service
+`usql`, or when no keyring is available in a fallback file
+`secrets.json` next to it, created with `0600` permissions. Stored passwords
+are injected only when connecting to the named connection, and `\cset` /
+`\conns` output masks any password embedded in a URL. Connections defined in
+`config.yaml` continue to work and are listed read-only with source `config`;
+a name defined in both places is reported at startup.
 
 #### Database Connection Strings
 

@@ -255,6 +255,11 @@ func Run(ctx context.Context, args *Args) error {
 		}
 	}
 
+	// usql-managed named connections (connections.yaml, password-free)
+	if err := env.LoadConns(); err != nil && !forceNonInteractive && interactive {
+		fmt.Fprintln(os.Stderr, err)
+	}
+
 	// fmt.Fprintf(os.Stdout, "VARS: %v\nCVARS: %v\nPVARS: %v\n", args.Vars, args.Cvars, args.Pvars)
 
 	// set vars

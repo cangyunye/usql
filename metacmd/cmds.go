@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -325,6 +326,25 @@ func Connect(p *Params) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	return p.Handler.Open(ctx, vals...)
+}
+
+// ConnList is a Connection meta command (\conns). Lists the stored named
+// connections, and manages them interactively when on a terminal.
+//
+// Descs:
+//
+//	conns	show named connections, or manage (add/edit/delete/connect) interactively
+func ConnList(p *Params) error {
+	if !p.Handler.IO().Interactive() {
+		names := make([]string, 0, len(env.Vars().Conn()))
+		for k := range env.Vars().Conn() {
+			names = append(names, k)
+		}
+		slices.Sort(names)
+		fmt.Fprintln(p.Handler.IO().Stdout(), connTable(names))
+		return nil
+	}
+	return connsManage(p.Handler)
 }
 
 // Disconnect is a Connection meta command (\Z). Closes (disconnects) the

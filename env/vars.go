@@ -23,14 +23,21 @@ type Variables struct {
 	prnt map[string]string
 	// conn holds connection variables.
 	conn map[string][]string
+	// secrets holds passwords for named connections, kept for the session
+	// only (never written to any configuration file).
+	secrets map[string]string
+	// src holds the origin ("config" or "store") of each named connection.
+	src map[string]string
 }
 
 // NewVars creates a set of empty variables.
 func NewVars() *Variables {
 	return &Variables{
-		vars: make(map[string]string),
-		prnt: make(map[string]string),
-		conn: make(map[string][]string),
+		vars:    make(map[string]string),
+		prnt:    make(map[string]string),
+		conn:    make(map[string][]string),
+		secrets: make(map[string]string),
+		src:     make(map[string]string),
 	}
 }
 
@@ -124,7 +131,9 @@ func NewDefaultVars() *Variables {
 			"unicode_column_linestyle": "single",
 			"unicode_header_linestyle": "single",
 		},
-		conn: make(map[string][]string),
+		conn:    make(map[string][]string),
+		secrets: make(map[string]string),
+		src:     make(map[string]string),
 	}
 }
 
@@ -357,10 +366,49 @@ func (v *Variables) GetConn(name string) ([]string, bool) {
 	return slices.Clone(vals), true
 }
 
-// DumpConn dumps the connection variables to w.
+// SetSecret stores a named connection's password for the session. The value
+// is kept only in memory and is never written to any configuration file.
+func (v *Variables) SetSecret(name, password string) {
+	if password == "" {
+		delete(v.secrets, name)
+		return
+	}
+	v.secrets[name] = password
+}
+
+// GetSecret returns the session password for a named connection.
+func (v *Variables) GetSecret(name string) (string, bool) {
+	password, ok := v.secrets[name]
+	return password, ok
+}
+
+// DelSecret removes a named connection's password from the session.
+func (v *Variables) DelSecret(name string) {
+	delete(v.secrets, name)
+}
+
+// SetConnSource records the origin ("config" or "store") of a named
+// connection.
+func (v *Variables) SetConnSource(name, source string) {
+	if source == "" {
+		delete(v.src, name)
+		return
+	}
+	v.src[name] = source
+}
+
+// GetConnSource returns the origin ("config" or "store") of a named
+// connection, or "" when the connection is not from a persisted source.
+func (v *Variables) GetConnSource(name string) string {
+	return v.src[name]
+}
+
+// DumpConn dumps the connection variables to w. Passwords found embedded in
+// connection URLs are masked.
 func (v *Variables) DumpConn(w io.Writer) error {
 	for _, k := range slices.Sorted(maps.Keys(v.conn)) {
-		fmt.Fprintln(w, k, "=", Quote(strings.Join(v.conn[k], " ")))
+		s := MaskURL(strings.Join(v.conn[k], " "))
+		fmt.Fprintln(w, k, "=", Quote(s))
 	}
 	return nil
 }

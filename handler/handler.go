@@ -33,7 +33,6 @@ import (
 	"github.com/xo/dburl"
 	"github.com/xo/dburl/passfile"
 	"github.com/xo/echartsgoja"
-	"github.com/xo/resvg"
 	"github.com/xo/tblfmt"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/completer"
@@ -770,9 +769,10 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	if h.tx != nil {
 		return text.ErrPreviousTransactionExists
 	}
+	var cname string
 	if len(params) == 1 {
 		if v, ok := env.Vars().GetConn(params[0]); ok {
-			params = v
+			cname, params = params[0], v
 		}
 	}
 	if len(params) < 2 {
@@ -785,6 +785,22 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 		h.u = u
 		// force parameters
 		h.forceParams(h.u)
+		// inject stored password for a named connection
+		if cname != "" {
+			if pw, ok := env.Vars().GetSecret(cname); ok && pw != "" {
+				if h.u.User == nil {
+					h.u.User = url.User(h.user.Username)
+				}
+				if _, has := h.u.User.Password(); !has {
+					h.u.User = url.UserPassword(h.u.User.Username(), pw)
+					// re-parse so driver-specific generators (GenMysql, etc.)
+					// rebuild the DSN with the injected password.
+					if z, err := dburl.Parse(h.u.String()); err == nil {
+						*h.u = *z
+					}
+				}
+			}
+		}
 	} else {
 		h.u = &dburl.URL{
 			Driver: params[0],
@@ -1116,11 +1132,7 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 		fmt.Println("writing to", cfg.File)
 		return os.WriteFile(cfg.File, []byte(res), 0o644)
 	}
-	img, err := resvg.Render([]byte(res), resvg.WithBackground(cfg.Background))
-	if err != nil {
-		return err
-	}
-	if err := typ.Encode(stdout, img); err != nil {
+	if err := renderChartImage(stdout, typ, res, cfg.Background); err != nil {
 		return err
 	}
 	if h.timing {

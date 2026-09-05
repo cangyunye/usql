@@ -269,7 +269,12 @@ func connsForm(h Handler, name string, editing bool) error {
 	for _, f := range []string{"username", "hostname", "port", "database", "parameters"} {
 		label := f
 		if f == "username" {
-			label = "username (e.g. user@tenant or root@obmysql)"
+			label = "username"
+			switch proto {
+			case "oboracle", "oceanbase":
+				// only OceanBase routes tenants by user@tenant on a shared port
+				label = "username (user@tenant, e.g. root@obmysql or sys@oratest)"
+			}
 		}
 		val, err := askField(h, label, comps[f], false)
 		if err != nil {

@@ -12,12 +12,13 @@ import (
 	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/metadata"
-	orameta "github.com/xo/usql/drivers/metadata/oracle"
 	"github.com/xo/usql/env"
 )
 
-// Register registers an oracle driver.
-func Register(name string, err func(error) (string, string), isPasswordErr func(error) bool) {
+// Register registers an oracle driver. newReader supplies the metadata reader
+// constructor (e.g. orameta.NewReader for the ":N" placeholder style used by
+// go-ora, or orameta.NewReaderQ for the "?" style used over the MySQL wire).
+func Register(name string, err func(error) (string, string), isPasswordErr func(error) bool, newReader func(db drivers.DB, opts ...metadata.ReaderOption) metadata.Reader) {
 	endRE := regexp.MustCompile(`;?\s*$`)
 	endAnchorRE := regexp.MustCompile(`(?i)\send\s*;\s*$`)
 	drivers.Register(name, drivers.Driver{
@@ -63,9 +64,9 @@ func Register(name string, err func(error) (string, string), isPasswordErr func(
 			typ, q := drivers.QueryExecType(prefix, sqlstr)
 			return typ, sqlstr, q, nil
 		},
-		NewMetadataReader: orameta.NewReader(),
+		NewMetadataReader: newReader,
 		NewMetadataWriter: func(db drivers.DB, w io.Writer, opts ...metadata.ReaderOption) metadata.Writer {
-			return metadata.NewDefaultWriter(orameta.NewReader()(db, opts...))(db, w)
+			return metadata.NewDefaultWriter(newReader(db, opts...))(db, w)
 		},
 		Copy: drivers.CopyWithInsert(func(n int) string {
 			return fmt.Sprintf(":%d", n)

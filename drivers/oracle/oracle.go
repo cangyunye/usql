@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	_ "github.com/sijms/go-ora/v2" // DRIVER
+	orameta "github.com/xo/usql/drivers/metadata/oracle"
 	"github.com/xo/usql/drivers/oracle/orshared"
 )
 
@@ -50,5 +51,6 @@ func init() {
 			}
 			return strings.Contains(err.Error(), "empty password")
 		},
+		orameta.NewReader(),
 	)
 }

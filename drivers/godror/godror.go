@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	_ "github.com/godror/godror" // DRIVER
+	orameta "github.com/xo/usql/drivers/metadata/oracle"
 	"github.com/xo/usql/drivers/oracle/orshared"
 )
 
@@ -56,5 +57,6 @@ func init() {
 			}
 			return false
 		},
+		orameta.NewReader(),
 	)
 }

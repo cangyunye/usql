@@ -100,11 +100,11 @@ var (
 
 func (r metaReader) Catalogs(metadata.Filter) (*metadata.CatalogSet, error) {
 	qstr := `SELECT d.datname as "Name",
-       pg_catalog.pg_get_userbyid(d.datdba) as "Owner",
+       COALESCE(pg_catalog.pg_get_userbyid(d.datdba), ' ') as "Owner",
        pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding",
        d.datcollate as "Collate",
        d.datctype as "Ctype",
-       COALESCE(pg_catalog.array_to_string(d.datacl, E'\n'),'') AS "Access privileges"
+       COALESCE(pg_catalog.array_to_string(d.datacl, E'\n'),' ') AS "Access privileges"
 FROM pg_catalog.pg_database d`
 	rows, closeRows, err := r.query(qstr, []string{}, "1")
 	if err != nil {
@@ -135,7 +135,7 @@ func (r metaReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
   CASE c.relkind WHEN 'r' THEN 'table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' WHEN 'i' THEN 'index' WHEN 'S' THEN 'sequence' WHEN 's' THEN 'special' WHEN 'f' THEN 'foreign table' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' ELSE 'unknown' END as "Type",
   COALESCE((c.reltuples / NULLIF(c.relpages, 0)) * (pg_catalog.pg_relation_size(c.oid) / current_setting('block_size')::int), 0)::bigint as "Rows",
   pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid)) as "Size",
-  COALESCE(pg_catalog.obj_description(c.oid, 'pg_class'), '') as "Description"
+  COALESCE(pg_catalog.obj_description(c.oid, 'pg_class'), ' ') as "Description"
 FROM pg_catalog.pg_class c
      LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 `

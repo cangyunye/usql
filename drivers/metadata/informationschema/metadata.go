@@ -240,6 +240,7 @@ func (s InformationSchema) Columns(f metadata.Filter) (*metadata.ColumnSet, erro
 	results := []metadata.Column{}
 	for rows.Next() {
 		rec := metadata.Column{}
+		var defaultNS sql.NullString
 		err = rows.Scan(
 			&rec.Catalog,
 			&rec.Schema,
@@ -247,7 +248,7 @@ func (s InformationSchema) Columns(f metadata.Filter) (*metadata.ColumnSet, erro
 			&rec.Name,
 			&rec.OrdinalPosition,
 			&rec.DataType,
-			&rec.Default,
+			&defaultNS,
 			&rec.IsNullable,
 			&rec.ColumnSize,
 			&rec.DecimalDigits,
@@ -257,6 +258,7 @@ func (s InformationSchema) Columns(f metadata.Filter) (*metadata.ColumnSet, erro
 		if err != nil {
 			return nil, err
 		}
+		rec.Default = defaultNS.String
 		rec.DataType = s.dataTypeFormatter(rec)
 		results = append(results, rec)
 	}
@@ -411,14 +413,15 @@ func (s InformationSchema) Functions(f metadata.Filter) (*metadata.FunctionSet, 
 	results := []metadata.Function{}
 	for rows.Next() {
 		rec := metadata.Function{}
+		var typ, resultType, source sql.NullString
 		err = rows.Scan(
 			&rec.SpecificName,
 			&rec.Catalog,
 			&rec.Schema,
 			&rec.Name,
-			&rec.Type,
-			&rec.ResultType,
-			&rec.Source,
+			&typ,
+			&resultType,
+			&source,
 			&rec.Language,
 			&rec.Volatility,
 			&rec.Security,
@@ -426,6 +429,7 @@ func (s InformationSchema) Functions(f metadata.Filter) (*metadata.FunctionSet, 
 		if err != nil {
 			return nil, err
 		}
+		rec.Type, rec.ResultType, rec.Source = typ.String, resultType.String, source.String
 		results = append(results, rec)
 	}
 	if rows.Err() != nil {
@@ -474,14 +478,15 @@ func (s InformationSchema) FunctionColumns(f metadata.Filter) (*metadata.Functio
 	results := []metadata.FunctionColumn{}
 	for rows.Next() {
 		rec := metadata.FunctionColumn{}
+		var name, typ, dataType sql.NullString
 		err = rows.Scan(
 			&rec.Catalog,
 			&rec.Schema,
 			&rec.FunctionName,
-			&rec.Name,
+			&name,
 			&rec.OrdinalPosition,
-			&rec.Type,
-			&rec.DataType,
+			&typ,
+			&dataType,
 			&rec.ColumnSize,
 			&rec.DecimalDigits,
 			&rec.NumPrecRadix,
@@ -490,6 +495,7 @@ func (s InformationSchema) FunctionColumns(f metadata.Filter) (*metadata.Functio
 		if err != nil {
 			return nil, err
 		}
+		rec.Name, rec.Type, rec.DataType = name.String, typ.String, dataType.String
 		results = append(results, rec)
 	}
 	if rows.Err() != nil {
@@ -559,6 +565,22 @@ func (s InformationSchema) IndexColumns(f metadata.Filter) (*metadata.IndexColum
 		return nil, text.ErrNotSupported
 	}
 
+	// Restrict the information_schema.columns side of the join with the same
+	// catalog/schema/table filters used below. Joining against the full
+	// columns view can be pathologically slow on some servers (e.g. OceanBase
+	// MySQL tenants materialize the entire statistics x columns product).
+	colsFormats := formats{
+		catalog:    "table_catalog LIKE %s",
+		schema:     "table_schema LIKE %s",
+		notSchemas: "table_schema NOT IN (%s)",
+		parent:     "table_name LIKE %s",
+	}
+	colsConds, colsVals := s.conditions(1, f, colsFormats)
+	colsSubq := "SELECT table_catalog, table_schema, table_name, column_name, data_type\n  FROM information_schema.columns"
+	if len(colsConds) != 0 {
+		colsSubq += "\n  WHERE " + strings.Join(colsConds, " AND ")
+	}
+
 	qstr := `SELECT
   i.table_catalog,
   i.table_schema,
@@ -569,20 +591,21 @@ func (s InformationSchema) IndexColumns(f metadata.Filter) (*metadata.IndexColum
   i.seq_in_index
 
 FROM information_schema.statistics i
-JOIN information_schema.columns c ON
+JOIN (` + colsSubq + `) c ON
   i.table_catalog = c.table_catalog AND
   i.table_schema = c.table_schema AND
   i.table_name = c.table_name AND
   i.column_name = c.column_name
 `
-	conds, vals := s.conditions(1, f, formats{
+	conds, vals := s.conditions(len(colsVals)+1, f, formats{
 		catalog:    "i.table_catalog LIKE %s",
 		schema:     "index_schema LIKE %s",
 		notSchemas: "index_schema NOT IN (%s)",
 		parent:     "i.table_name LIKE %s",
 		name:       "index_name LIKE %s",
 	})
-	rows, closeRows, err := s.query(qstr, conds, "i.table_catalog, index_schema, table_name, index_name, seq_in_index", vals...)
+	allVals := append(colsVals, vals...)
+	rows, closeRows, err := s.query(qstr, conds, "i.table_catalog, index_schema, table_name, index_name, seq_in_index", allVals...)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return metadata.NewIndexColumnSet([]metadata.IndexColumn{}), nil
@@ -667,6 +690,7 @@ LEFT JOIN information_schema.check_constraints c ON t.constraint_catalog = c.con
 	results := []metadata.Constraint{}
 	for rows.Next() {
 		rec := metadata.Constraint{}
+		var foreignCatalog, foreignSchema, foreignTable, foreignName, matchType, updateRule, deleteRule, checkClause sql.NullString
 		err = rows.Scan(
 			&rec.Catalog,
 			&rec.Schema,
@@ -675,18 +699,20 @@ LEFT JOIN information_schema.check_constraints c ON t.constraint_catalog = c.con
 			&rec.Type,
 			&rec.IsDeferrable,
 			&rec.IsInitiallyDeferred,
-			&rec.ForeignCatalog,
-			&rec.ForeignSchema,
-			&rec.ForeignTable,
-			&rec.ForeignName,
-			&rec.MatchType,
-			&rec.UpdateRule,
-			&rec.DeleteRule,
-			&rec.CheckClause,
+			&foreignCatalog,
+			&foreignSchema,
+			&foreignTable,
+			&foreignName,
+			&matchType,
+			&updateRule,
+			&deleteRule,
+			&checkClause,
 		)
 		if err != nil {
 			return nil, err
 		}
+		rec.ForeignCatalog, rec.ForeignSchema, rec.ForeignTable, rec.ForeignName = foreignCatalog.String, foreignSchema.String, foreignTable.String, foreignName.String
+		rec.MatchType, rec.UpdateRule, rec.DeleteRule, rec.CheckClause = matchType.String, updateRule.String, deleteRule.String, checkClause.String
 		results = append(results, rec)
 	}
 	if rows.Err() != nil {
@@ -946,14 +972,14 @@ func (s InformationSchema) PrivilegeSummaries(f metadata.Filter) (*metadata.Priv
 	defer closeRows()
 
 	type row struct {
-		Catalog       string
-		Schema        string
-		Name          string
-		ObjectType    string
-		Column        string
-		Grantee       string
-		Grantor       string
-		PrivilegeType string
+		Catalog       sql.NullString
+		Schema        sql.NullString
+		Name          sql.NullString
+		ObjectType    sql.NullString
+		Column        sql.NullString
+		Grantee       sql.NullString
+		Grantor       sql.NullString
+		PrivilegeType sql.NullString
 		IsGrantable   bool
 	}
 	// The rows need to be aggregated into one `metadata.PrivilegeSummary` object per table. The rows are ordered by table such that we can append
@@ -967,12 +993,12 @@ func (s InformationSchema) PrivilegeSummaries(f metadata.Filter) (*metadata.Priv
 			return nil, err
 		}
 
-		if curSummary.Catalog != r.Catalog || curSummary.Schema != r.Schema || curSummary.Name != r.Name {
+		if curSummary.Catalog != r.Catalog.String || curSummary.Schema != r.Schema.String || curSummary.Name != r.Name.String {
 			summary := metadata.PrivilegeSummary{
-				Catalog:          r.Catalog,
-				Schema:           r.Schema,
-				Name:             r.Name,
-				ObjectType:       r.ObjectType,
+				Catalog:          r.Catalog.String,
+				Schema:           r.Schema.String,
+				Name:             r.Name.String,
+				ObjectType:       r.ObjectType.String,
 				ObjectPrivileges: metadata.ObjectPrivileges{},
 				ColumnPrivileges: metadata.ColumnPrivileges{},
 			}
@@ -982,14 +1008,14 @@ func (s InformationSchema) PrivilegeSummaries(f metadata.Filter) (*metadata.Priv
 
 		switch {
 		// If the row specifies neither column nor table level privileges
-		case r.PrivilegeType == "":
+		case r.PrivilegeType.String == "":
 		// If row specifies table level privilege
-		case r.Column == "":
-			objPrivilege := metadata.ObjectPrivilege{Grantee: r.Grantee, Grantor: r.Grantor, PrivilegeType: r.PrivilegeType, IsGrantable: r.IsGrantable}
+		case r.Column.String == "":
+			objPrivilege := metadata.ObjectPrivilege{Grantee: r.Grantee.String, Grantor: r.Grantor.String, PrivilegeType: r.PrivilegeType.String, IsGrantable: r.IsGrantable}
 			curSummary.ObjectPrivileges = append(curSummary.ObjectPrivileges, objPrivilege)
 		// If row specifies column level privilege
 		default:
-			colPrivilege := metadata.ColumnPrivilege{Column: r.Column, Grantee: r.Grantee, Grantor: r.Grantor, PrivilegeType: r.PrivilegeType, IsGrantable: r.IsGrantable}
+			colPrivilege := metadata.ColumnPrivilege{Column: r.Column.String, Grantee: r.Grantee.String, Grantor: r.Grantor.String, PrivilegeType: r.PrivilegeType.String, IsGrantable: r.IsGrantable}
 			curSummary.ColumnPrivileges = append(curSummary.ColumnPrivileges, colPrivilege)
 		}
 	}

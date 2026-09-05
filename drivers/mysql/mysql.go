@@ -3,6 +3,7 @@
 // Alias: memsql, SingleStore MemSQL
 // Alias: vitess, Vitess Database
 // Alias: tidb, TiDB
+// Alias: oceanbase, OceanBase (MySQL compatible)
 //
 // See: https://github.com/go-sql-driver/mysql
 // Group: base
@@ -13,12 +14,20 @@ import (
 	"strconv"
 
 	"github.com/go-sql-driver/mysql" // DRIVER
+	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/metadata"
 	mymeta "github.com/xo/usql/drivers/metadata/mysql"
 )
 
 func init() {
+	// oceanbase:// URLs reach OceanBase MySQL-compatible tenants over the
+	// MySQL wire protocol, so they are treated as MySQL (wire compatible).
+	dburl.Register(dburl.Scheme{
+		Driver:    "oceanbase",
+		Generator: dburl.GenMysql,
+		Override:  "mysql",
+	})
 	drivers.Register("mysql", drivers.Driver{
 		AllowMultilineComments: true,
 		AllowHashComments:      true,
@@ -47,5 +56,5 @@ func init() {
 		},
 		Copy:         drivers.CopyWithInsert(func(int) string { return "?" }),
 		NewCompleter: mymeta.NewCompleter,
-	}, "memsql", "vitess", "tidb")
+	}, "memsql", "vitess", "tidb", "oceanbase")
 }

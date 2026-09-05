@@ -13,19 +13,36 @@ import (
 type metaReader struct {
 	metadata.LoggingReader
 	systemSchemas string
+	// pf generates the bind placeholder for the nth argument. Oracle drivers
+	// (go-ora) use ":N"; drivers speaking Oracle SQL over the MySQL wire
+	// protocol (e.g. OceanBase Oracle tenants via obconnector-go) use "?".
+	pf func(int) string
 }
 
 var _ metadata.BasicReader = &metaReader{}
 var _ metadata.IndexReader = &metaReader{}
 var _ metadata.IndexColumnReader = &metaReader{}
 
+// NewReader returns a metadata reader using ":N" bind placeholders, suitable
+// for Oracle native drivers (go-ora).
 func NewReader() func(drivers.DB, ...metadata.ReaderOption) metadata.Reader {
+	return newReader(func(n int) string { return fmt.Sprintf(":%d", n) })
+}
+
+// NewReaderQ returns a metadata reader using "?" bind placeholders, for
+// Oracle SQL spoken over the MySQL wire protocol (OceanBase Oracle tenants
+// via obconnector-go).
+func NewReaderQ() func(drivers.DB, ...metadata.ReaderOption) metadata.Reader {
+	return newReader(func(int) string { return "?" })
+}
+
+func newReader(pf func(int) string) func(drivers.DB, ...metadata.ReaderOption) metadata.Reader {
 	return func(db drivers.DB, opts ...metadata.ReaderOption) metadata.Reader {
-		r := &metaReader{
+		return &metaReader{
 			LoggingReader: metadata.NewLoggingReader(db, opts...),
 			systemSchemas: "'CTXSYS', 'FLOWS_FILES', 'MDSYS', 'OUTLN', 'SYS', 'SYSTEM', 'XDB', 'XS$NULL'",
+			pf:            pf,
 		}
-		return r
 	}
 }
 
@@ -71,7 +88,7 @@ func (r metaReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
 FROM all_users
 `
 	conds, vals := r.conditions(f, formats{
-		name:       "username LIKE :%d",
+		name:       "username LIKE %s",
 		notSchemas: "username NOT IN (%s)",
 	})
 	if len(conds) != 0 {
@@ -114,7 +131,7 @@ FROM all_objects o
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
 		notSchemas: "o.owner NOT IN (%s)",
-		name:       "o.object_name LIKE :%d",
+		name:       "o.object_name LIKE %s",
 		types:      "o.object_type IN (%s)",
 	})
 	if len(conds) != 0 {
@@ -138,7 +155,7 @@ FROM all_synonyms s
 		conds, seqVals := r.conditions(f, formats{
 			schema:     "s.owner LIKE %s",
 			notSchemas: "s.owner NOT IN (%s)",
-			name:       "s.synonym_name LIKE :%d",
+			name:       "s.synonym_name LIKE %s",
 		})
 		vals = append(vals, seqVals...)
 		if len(conds) != 0 {
@@ -193,7 +210,7 @@ FROM all_tab_columns c
 	conds, vals := r.conditions(f, formats{
 		schema:     "c.owner LIKE %s",
 		notSchemas: "c.owner NOT IN (%s)",
-		parent:     "c.table_name LIKE :%d",
+		parent:     "c.table_name LIKE %s",
 	})
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
@@ -251,7 +268,7 @@ JOIN all_objects b ON b.object_id = a.object_id AND a.sequence  = 1
 	conds, vals := r.conditions(f, formats{
 		schema:     "b.owner LIKE %s",
 		notSchemas: "b.owner NOT IN (%s)",
-		name:       "b.object_name LIKE :%d",
+		name:       "b.object_name LIKE %s",
 		types:      "b.object_type IN (%s)",
 	})
 	conds = append(conds, "(b.object_type = 'PROCEDURE' OR b.object_type = 'FUNCTION' OR b.object_type = 'PACKAGE')")
@@ -305,7 +322,7 @@ JOIN all_arguments a ON b.object_id = a.object_id AND a.data_level = 0
 	conds, vals := r.conditions(f, formats{
 		schema:     "a.owner LIKE %s",
 		notSchemas: "a.owner NOT IN (%s)",
-		parent:     "b.object_name LIKE :%d",
+		parent:     "b.object_name LIKE %s",
 	})
 	conds = append(conds, "b.object_type = 'PROCEDURE' OR b.object_type = 'FUNCTION'")
 	qstr += " WHERE " + strings.Join(conds, " AND ")
@@ -356,8 +373,8 @@ FROM all_indexes o
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
 		notSchemas: "o.owner NOT IN (%s)",
-		parent:     "o.table_name LIKE :%d",
-		name:       "o.index_name LIKE :%d",
+		parent:     "o.table_name LIKE %s",
+		name:       "o.index_name LIKE %s",
 	})
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
@@ -402,8 +419,8 @@ JOIN all_ind_columns b ON o.owner = b.index_owner AND o.index_name = b.index_nam
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
 		notSchemas: "o.owner NOT IN (%s)",
-		parent:     "o.table_name LIKE :%d",
-		name:       "o.index_name LIKE :%d",
+		parent:     "o.table_name LIKE %s",
+		name:       "o.index_name LIKE %s",
 	})
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
@@ -440,7 +457,7 @@ func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]strin
 	vals := []interface{}{}
 	if filter.Schema != "" && formats.schema != "" {
 		vals = append(vals, strings.ToUpper(filter.Schema))
-		conds = append(conds, fmt.Sprintf(formats.schema, fmt.Sprintf(":%d", baseParam)))
+		conds = append(conds, fmt.Sprintf(formats.schema, r.pf(baseParam)))
 		baseParam++
 	}
 
@@ -452,19 +469,19 @@ func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]strin
 	}
 	if filter.Parent != "" && formats.parent != "" {
 		vals = append(vals, strings.ToUpper(filter.Parent))
-		conds = append(conds, fmt.Sprintf(formats.parent, baseParam))
+		conds = append(conds, fmt.Sprintf(formats.parent, r.pf(baseParam)))
 		baseParam++
 	}
 	if filter.Name != "" && formats.name != "" {
 		vals = append(vals, strings.ToUpper(filter.Name))
-		conds = append(conds, fmt.Sprintf(formats.name, baseParam))
+		conds = append(conds, fmt.Sprintf(formats.name, r.pf(baseParam)))
 		baseParam++
 	}
 	if len(filter.Types) != 0 && formats.types != "" {
 		pholders := []string{}
 		for _, t := range filter.Types {
 			vals = append(vals, strings.ToUpper(t))
-			pholders = append(pholders, fmt.Sprintf(":%d", baseParam))
+			pholders = append(pholders, r.pf(baseParam))
 			baseParam++
 		}
 		if len(pholders) != 0 {

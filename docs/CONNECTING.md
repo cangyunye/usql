@@ -140,7 +140,18 @@ Then connect by name:
 ```
 
 Stored connections live in `connections.yaml` (no passwords) with passwords in
-the OS keyring, or in a `0600`-permission `secrets.json` fallback file. See the
-[`\conns` section][conns] of the README.
+the OS keyring, or in a `0600`-permission `secrets.json` fallback file. Both
+are in the usql configuration directory:
+
+- **Linux/Unix**: `$HOME/.config/usql/` (or `$XDG_CONFIG_HOME/usql/`)
+- **macOS**: `$HOME/Library/Application Support/usql/`
+- **Windows**: `%AppData%/usql/`
+
+So the two files are `connections.yaml` and `secrets.json` in that directory.
+
+Connecting from a command-line DSN also **saves** it automatically: pass
+`--name <name>` to choose the stored name, otherwise a default identifier is
+derived from `scheme_user_host_port_dbname` (database optional). The URL's
+password is kept in the secret store, never in `connections.yaml`.
 
 [conns]: https://github.com/xo/usql#managing-named-connections-conns

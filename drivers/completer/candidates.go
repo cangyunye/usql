@@ -47,12 +47,16 @@ func ScopeChanged(sqlstr string) bool {
 	return scopeRE.MatchString(sqlstr)
 }
 
-// Invalidate drops all cached completion metadata. The installed completer
-// (as wrapped by NewLive) satisfies interface{ Invalidate() }; the handler
-// calls it after statements that change the session scope.
+// Invalidate drops all cached completion metadata and schedules a snapshot
+// reload. The installed completer (as wrapped by NewLive) satisfies
+// interface{ Invalidate() }; the handler calls it after statements that
+// change the session scope.
 func (c *completer) Invalidate() {
 	if c.cache != nil {
 		c.cache.clear()
+	}
+	if c.snap != nil {
+		c.snap.Invalidate()
 	}
 }
 
@@ -70,10 +74,13 @@ func (c *completer) Invalidate() {
 func WithContextCompletion() Option {
 	return func(c *completer) {
 		// cache metadata queries, so typing-time completion stays responsive
-		// even when the catalog is slow (e.g. OceanBase)
+		// even when the catalog is slow (e.g. OceanBase), and snapshot the
+		// visible objects once per connection: keystroke-time queries for
+		// tables/functions/sequences/schemas filter the snapshot in memory
 		if c.reader != nil {
 			c.cache = NewCachedReader(c.reader).(*cachedReader)
-			c.reader = c.cache
+			c.snap = NewSnapshotReader(c.cache)
+			c.reader = c.snap
 		}
 		prev := c.beforeComplete
 		c.beforeComplete = func(previousWords []string, text []rune) [][]rune {

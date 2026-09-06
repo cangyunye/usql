@@ -91,7 +91,7 @@ func (h *tuiHistory) next(pos int, draft string) (int, string, bool) {
 }
 
 // search finds the previous history entry containing query (case-folded),
-// scanning from pos downwards. It returns the new position and line.
+// scanning from pos-1 downwards. It returns the new position and line.
 func (h *tuiHistory) search(query string, pos int) (int, string, bool) {
 	if query == "" {
 		return pos, "", false
@@ -101,6 +101,25 @@ func (h *tuiHistory) search(query string, pos int) (int, string, bool) {
 		pos = len(h.lines)
 	}
 	for i := pos - 1; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(h.lines[i]), q) {
+			return i, h.lines[i], true
+		}
+	}
+	return pos, "", false
+}
+
+// fwdSearch finds the next (newer) history entry containing query
+// (case-folded), scanning from pos+1 upwards. Searching forward from the
+// draft (pos == len(lines)) finds nothing until an older match is current.
+func (h *tuiHistory) fwdSearch(query string, pos int) (int, string, bool) {
+	if query == "" {
+		return pos, "", false
+	}
+	q := strings.ToLower(query)
+	if pos < -1 {
+		pos = -1
+	}
+	for i := pos + 1; i < len(h.lines); i++ {
 		if strings.Contains(strings.ToLower(h.lines[i]), q) {
 			return i, h.lines[i], true
 		}

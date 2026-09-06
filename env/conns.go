@@ -194,7 +194,7 @@ func connEntryURL(name string, v any) (string, error) {
 		if pass, ok := x["pass"]; ok && fmt.Sprintf("%v", pass) != "" {
 			return "", fmt.Errorf("connection %q in %s contains a plaintext password; remove it and store the password with `\\conns`", name, connStoreFile)
 		}
-		s, err := dburl.BuildURL(x)
+		s, err := buildConnURL(x)
 		if err != nil {
 			return "", fmt.Errorf("connection %q in %s: %w", name, connStoreFile, err)
 		}
@@ -248,6 +248,31 @@ func LoadConns() error {
 	return nil
 }
 
+// buildConnURL assembles the DSN for a named connection from its component
+// map. File-style databases store their location in the path component
+// without a hostname; dburl.BuildURL emits scheme:/path for those, whose
+// generators require an empty authority (scheme:///path), so rebuild that
+// form here.
+func buildConnURL(components map[string]any) (string, error) {
+	urlstr, err := dburl.BuildURL(components)
+	if err != nil {
+		return "", err
+	}
+	if p, ok := components["path"].(string); ok && p != "" && p != "/" {
+		if _, hasHost := components["hostname"]; !hasHost {
+			if _, hasHost = components["host"]; !hasHost {
+				if proto, ok := components["protocol"].(string); ok && proto != "" {
+					prefix := proto + ":" + p
+					if strings.HasPrefix(urlstr, prefix) {
+						urlstr = proto + ":///" + strings.TrimLeft(p, "/") + strings.TrimPrefix(urlstr, prefix)
+					}
+				}
+			}
+		}
+	}
+	return urlstr, nil
+}
+
 // SaveConn persists a named connection: components (never containing a
 // password) to connections.yaml and, when password is non-empty, the password
 // to the secret store. The connection becomes available in the current
@@ -260,7 +285,7 @@ func SaveConn(name string, components map[string]any, password string) error {
 	if _, ok := components["protocol"]; !ok {
 		return fmt.Errorf("connection %q is missing protocol", name)
 	}
-	urlstr, err := dburl.BuildURL(components)
+	urlstr, err := buildConnURL(components)
 	if err != nil {
 		return err
 	}
@@ -562,6 +587,9 @@ func SaveConnFromURL(name string, u *dburl.URL) error {
 	}
 	if db := strings.TrimPrefix(u.Path, "/"); db != "" {
 		components["database"] = db
+	} else if u.Opaque != "" {
+		// file-style schemes keep the raw path in the opaque component
+		components["path"] = u.Opaque
 	}
 	password, _ := u.User.Password()
 	return SaveConn(name, components, password)

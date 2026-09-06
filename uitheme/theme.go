@@ -4,11 +4,14 @@
 //
 // The theme is disabled automatically when color cannot be shown (NO_COLOR,
 // a color level below basic, or a non-terminal stderr); disabled styles
-// render plain text, so callers can apply styles unconditionally.
+// render plain text, so callers can apply styles unconditionally. A theme
+// can be switched at runtime with [Use] (the THEME variable).
 package uitheme
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/charmbracelet/lipgloss"
@@ -35,25 +38,77 @@ type Theme struct {
 }
 
 var (
-	once sync.Once
-	// theme is the process-wide theme, built on first use.
-	theme *Theme
+	once    sync.Once
+	mu      sync.RWMutex
+	theme   *Theme
+	themeNm string
 	// colorDisabled reports whether styling must render as plain text.
 	colorDisabled bool
 )
+
+// themeNames are the available themes, in preference order for display.
+var themeNames = []string{"default", "warm", "plain"}
+
+// ThemeNames returns the available theme names.
+func ThemeNames() []string {
+	return append([]string(nil), themeNames...)
+}
 
 // Current returns the process theme. It is safe for concurrent use; the
 // first call performs color capability detection.
 func Current() *Theme {
 	once.Do(detect)
+	mu.RLock()
+	defer mu.RUnlock()
 	return theme
+}
+
+// Enabled reports whether color output is active.
+func Enabled() bool {
+	Current()
+	mu.RLock()
+	defer mu.RUnlock()
+	return !colorDisabled
+}
+
+// Name returns the active theme's name.
+func Name() string {
+	Current()
+	mu.RLock()
+	defer mu.RUnlock()
+	return themeNm
+}
+
+// Use switches the active theme by name. An unknown name is an error.
+func Use(name string) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	ok := false
+	for _, n := range themeNames {
+		if n == name {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return fmt.Errorf("unknown theme %q (available: %s)", name, strings.Join(themeNames, ", "))
+	}
+	once.Do(detect)
+	mu.Lock()
+	defer mu.Unlock()
+	themeNm = name
+	theme = newTheme(name)
+	return nil
 }
 
 // detect performs the single color-capability check: NO_COLOR, the terminfo
 // color level, and whether stderr is a terminal (errors are the one output
 // that must never surprise a pipe or file).
 func detect() {
-	theme = newTheme()
+	mu.Lock()
+	defer mu.Unlock()
+	if themeNm == "" {
+		themeNm = "default"
+	}
 	enabled := !noColorEnv() && stderrIsTerminal()
 	if enabled {
 		if level, _ := terminfo.ColorLevelFromEnv(); level < terminfo.ColorLevelBasic {
@@ -65,6 +120,7 @@ func detect() {
 		// every style below renders as plain text under the Ascii profile
 		lipgloss.SetColorProfile(termenv.Ascii)
 	}
+	theme = newTheme(themeNm)
 }
 
 // noColorEnv mirrors env's NO_COLOR handling.
@@ -78,24 +134,49 @@ func stderrIsTerminal() bool {
 	return isatty.IsTerminal(os.Stderr.Fd())
 }
 
-// Enabled reports whether color output is active.
-func Enabled() bool {
-	Current()
-	return !colorDisabled
-}
-
-func newTheme() *Theme {
-	return &Theme{
-		Error:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")),
-		ErrorMsg: lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		Accent:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
-		Dim:      lipgloss.NewStyle().Faint(true),
-		Success:  lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
-		Warn:     lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-		Header:   lipgloss.NewStyle().Bold(true),
-		Border:   lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
-		Zebra:    lipgloss.NewStyle().Background(lipgloss.Color("235")),
-		Null:     lipgloss.NewStyle().Faint(true),
-		Selected: lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236")),
+// newTheme builds the named theme: default is the original usql palette,
+// warm trades the cyan accent for amber tones, and plain is a monochrome
+// theme that relies on weight only.
+func newTheme(name string) *Theme {
+	switch name {
+	case "warm":
+		return &Theme{
+			Error:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203")),
+			ErrorMsg: lipgloss.NewStyle().Foreground(lipgloss.Color("203")),
+			Accent:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")),
+			Dim:      lipgloss.NewStyle().Faint(true),
+			Success:  lipgloss.NewStyle().Foreground(lipgloss.Color("114")),
+			Warn:     lipgloss.NewStyle().Foreground(lipgloss.Color("179")),
+			Header:   lipgloss.NewStyle().Bold(true),
+			Border:   lipgloss.NewStyle().Foreground(lipgloss.Color("137")),
+			Zebra:    lipgloss.NewStyle().Background(lipgloss.Color("237")),
+			Null:     lipgloss.NewStyle().Faint(true),
+			Selected: lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("239")),
+		}
+	case "plain":
+		return &Theme{
+			Error:    lipgloss.NewStyle().Bold(true),
+			Accent:   lipgloss.NewStyle().Bold(true),
+			Dim:      lipgloss.NewStyle().Faint(true),
+			Success:  lipgloss.NewStyle().Bold(true),
+			Warn:     lipgloss.NewStyle().Faint(true),
+			Header:   lipgloss.NewStyle().Bold(true),
+			Null:     lipgloss.NewStyle().Faint(true),
+			Selected: lipgloss.NewStyle().Bold(true),
+		}
+	default:
+		return &Theme{
+			Error:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")),
+			ErrorMsg: lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+			Accent:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
+			Dim:      lipgloss.NewStyle().Faint(true),
+			Success:  lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+			Warn:     lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+			Header:   lipgloss.NewStyle().Bold(true),
+			Border:   lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
+			Zebra:    lipgloss.NewStyle().Background(lipgloss.Color("235")),
+			Null:     lipgloss.NewStyle().Faint(true),
+			Selected: lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236")),
+		}
 	}
 }

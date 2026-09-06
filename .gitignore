@@ -23,3 +23,6 @@
 /*.pc
 
 .vscode/
+
+# zcode session files
+.zcode/

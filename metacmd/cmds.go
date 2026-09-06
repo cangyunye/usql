@@ -384,7 +384,7 @@ func ConnList(p *Params) error {
 			names = append(names, k)
 		}
 		slices.Sort(names)
-		fmt.Fprintln(p.Handler.IO().Stdout(), connTable(names))
+		fmt.Fprintln(p.Handler.IO().Stdout(), connTable(names, -1))
 		return nil
 	}
 	return connsManage(p.Handler)

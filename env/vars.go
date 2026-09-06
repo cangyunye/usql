@@ -13,6 +13,7 @@ import (
 	syslocale "github.com/jeandeaual/go-locale"
 	"github.com/xo/terminfo"
 	"github.com/xo/usql/text"
+	"github.com/xo/usql/uitheme"
 )
 
 // Variables handles the standard, print, and connection variables.
@@ -91,6 +92,13 @@ func NewDefaultVars() *Variables {
 	if s, err := syslocale.GetLocale(); err == nil {
 		locale = s
 	}
+	// prompt — when color is available, the default PROMPT1 wraps the
+	// prompt in the theme's Accent color (bold cyan); %27 emits the ESC
+	// byte via Prompt's %<num> mechanism
+	prompt1 := "%S%N%m%/%R%# "
+	if !noColor && colorLevel >= terminfo.ColorLevelBasic {
+		prompt1 = "%27[1;36m%S%N%m%/%R%#%27[0m "
+	}
 	return &Variables{
 		vars: map[string]string{
 			// usql related logic
@@ -100,7 +108,8 @@ func NewDefaultVars() *Variables {
 			"QUIET":                 "off",
 			"ON_ERROR_STOP":         "off",
 			// prompts
-			"PROMPT1": "%S%N%m%/%R%# ",
+			"PROMPT1": prompt1,
+			"THEME":   "default",
 			// syntax highlighting variables
 			"SYNTAX_HL":             enableSyntaxHL,
 			"SYNTAX_HL_FORMAT":      colorLevel.ChromaFormatterName(),
@@ -178,6 +187,13 @@ func (v *Variables) Set(name, value string) error {
 			if value, err = ParseBool(value, name); err != nil {
 				return err
 			}
+		}
+	case "THEME":
+		if value == "" {
+			return fmt.Errorf("theme name required (available: %s)", strings.Join(uitheme.ThemeNames(), ", "))
+		}
+		if err := uitheme.Use(value); err != nil {
+			return err
 		}
 	}
 	v.vars[name] = value

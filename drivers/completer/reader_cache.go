@@ -80,6 +80,15 @@ func (c *cachedReader) load(op string, f metadata.Filter, fresh func() (any, err
 	return val, nil
 }
 
+// clear drops every cached query, e.g. when the session scope changed
+// (USE, SET search_path, ALTER SESSION SET CURRENT_SCHEMA).
+func (c *cachedReader) clear() {
+	c.mu.Lock()
+	c.entries = map[string]*cacheEntry{}
+	c.order = nil
+	c.mu.Unlock()
+}
+
 func (c *cachedReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 	inner, ok := c.inner.(metadata.TableReader)
 	if !ok {

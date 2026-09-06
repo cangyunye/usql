@@ -95,6 +95,10 @@ type Handler struct {
 	tx *sql.Tx
 	// out file or pipe
 	out io.WriteCloser
+	// completerInvalidate drops the completer's cached metadata, called
+	// when an executed statement changes the session scope (nil when no
+	// interactive completer is installed)
+	completerInvalidate func()
 	// encName is the name of the encoding used to decode database output
 	// ("" means UTF-8).
 	encName string
@@ -493,6 +497,11 @@ func (h *Handler) Execute(ctx context.Context, w io.Writer, opt metacmd.Option, 
 		}
 		return err
 	}
+	// a statement that changes the session scope invalidates the
+	// completer's cached metadata (USE, SET search_path, CURRENT_SCHEMA)
+	if h.completerInvalidate != nil && completer.ScopeChanged(sqlstr) {
+		h.completerInvalidate()
+	}
 	if forceTrans {
 		return h.Commit()
 	}
@@ -864,7 +873,11 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 				opts := append(readerOpts(), metadata.WithTimeout(10*time.Second))
 				c := drivers.NewCompleter(ctx, h.u, h.db, opts, completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion())
 				// NewLive adds the typing-time fast path on top
-				h.l.Completer(completer.NewLive(c))
+				live := completer.NewLive(c)
+				if inv, ok := live.(interface{ Invalidate() }); ok {
+					h.completerInvalidate = inv.Invalidate
+				}
+				h.l.Completer(live)
 			}
 			return h.Version(ctx)
 		}

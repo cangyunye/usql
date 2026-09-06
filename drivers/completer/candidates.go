@@ -1,6 +1,7 @@
 package completer
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 
@@ -32,6 +33,26 @@ var clauseKeywords = map[string][]string{
 	"HAVING": booleanKeywords,
 }
 
+// scopeRE matches statements that change the session's default scope: a
+// MySQL/OceanBase USE, a PostgreSQL search_path assignment, or an Oracle
+// CURRENT_SCHEMA change.
+var scopeRE = regexp.MustCompile(`(?is)^\s*(use\s|set\s+.*search_path|alter\s+session\s+set\s+current_schema)`)
+
+// ScopeChanged reports whether executing sqlstr can change the session's
+// default database/schema, so cached completion metadata must be dropped.
+func ScopeChanged(sqlstr string) bool {
+	return scopeRE.MatchString(sqlstr)
+}
+
+// Invalidate drops all cached completion metadata. The installed completer
+// (as wrapped by NewLive) satisfies interface{ Invalidate() }; the handler
+// calls it after statements that change the session scope.
+func (c *completer) Invalidate() {
+	if c.cache != nil {
+		c.cache.clear()
+	}
+}
+
 // WithContextCompletion returns an Option that tries context-aware candidate
 // generation — clause scanning, alias resolution and fuzzy ranking — before
 // the tail-matching heuristics run. Whenever the statement context does not
@@ -48,7 +69,8 @@ func WithContextCompletion() Option {
 		// cache metadata queries, so typing-time completion stays responsive
 		// even when the catalog is slow (e.g. OceanBase)
 		if c.reader != nil {
-			c.reader = NewCachedReader(c.reader)
+			c.cache = NewCachedReader(c.reader).(*cachedReader)
+			c.reader = c.cache
 		}
 		prev := c.beforeComplete
 		c.beforeComplete = func(previousWords []string, text []rune) [][]rune {

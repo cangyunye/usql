@@ -183,6 +183,13 @@ func Open(ctx context.Context, u *dburl.URL, stdout, stderr func() io.Writer) (*
 	if err != nil {
 		return nil, WrapErr(u.Driver, err)
 	}
+	// pin the pool to a single connection: session state (MySQL USE,
+	// PostgreSQL search_path, Oracle CURRENT_SCHEMA) applied on one pooled
+	// connection would otherwise be invisible to statements served by
+	// another — a CLI drives statements sequentially, so one connection
+	// costs nothing and keeps the session consistent
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	return db, nil
 }
 

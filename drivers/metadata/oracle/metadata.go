@@ -465,7 +465,9 @@ func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]strin
 		conds = append(conds, fmt.Sprintf(formats.notSchemas, r.systemSchemas))
 	}
 	if filter.OnlyVisible && formats.schema != "" {
-		conds = append(conds, fmt.Sprintf(formats.schema, "user"))
+		// follow the session's current schema (defaults to the login user,
+		// changes with ALTER SESSION SET CURRENT_SCHEMA)
+		conds = append(conds, fmt.Sprintf(formats.schema, "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"))
 	}
 	if filter.Parent != "" && formats.parent != "" {
 		vals = append(vals, strings.ToUpper(filter.Parent))

@@ -205,7 +205,9 @@ func NewDefaultCompleter(opts ...Option) readline.AutoCompleter {
 	for _, o := range opts {
 		o(&c)
 	}
-	return c
+	// return a pointer so Invalidate (pointer receiver) is reachable
+	// through the AutoCompleter interface
+	return &c
 }
 
 // Option to configure the reader
@@ -270,6 +272,8 @@ type completer struct {
 	backslashCommands []string
 	connStrings       []string
 	beforeComplete    CompleteFunc
+	// cache is the metadata query cache installed by WithContextCompletion.
+	cache *cachedReader
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context

@@ -250,7 +250,7 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 		WithReader(candMockReader{}),
 		WithLogger(discardLogger()),
 		WithContextCompletion(),
-	).(completer)
+	).(*completer)
 
 	cases := []struct {
 		name    string

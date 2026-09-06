@@ -47,6 +47,18 @@ func (l *liveCompleter) SetLiveKick(kick func()) {
 	l.kick = kick
 }
 
+// Invalidate drops remembered typing-time results and forwards to the
+// wrapped completer, dropping its cached metadata queries too.
+func (l *liveCompleter) Invalidate() {
+	l.mu.Lock()
+	l.keys, l.cache = nil, nil
+	inner, _ := l.inner.(interface{ Invalidate() })
+	l.mu.Unlock()
+	if inner != nil {
+		inner.Invalidate()
+	}
+}
+
 // Do is the synchronous completion path (TAB), delegated unchanged.
 func (l *liveCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	return l.inner.Do(line, pos)

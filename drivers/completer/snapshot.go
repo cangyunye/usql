@@ -221,6 +221,11 @@ func filterMatches(f metadata.Filter, catalog, schema, typ string) bool {
 	if !patternMatches(f.Catalog, catalog) || !patternMatches(f.Schema, schema) {
 		return false
 	}
+	if typ == "" {
+		// rows without a type (sequences, schemas): the inner readers ignore
+		// Types for them, so the snapshot must too
+		return true
+	}
 	for _, t := range f.Types {
 		if strings.EqualFold(t, typ) {
 			return true

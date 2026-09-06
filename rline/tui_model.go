@@ -617,6 +617,7 @@ func (m *lineModel) resize(h int) {
 	case h-m.topRow-1 >= minBelowRows:
 		// enough room below: open the menu under the input line
 		m.menuAbove = false
+		m.menuMax = menuHeight
 		if below := h - m.topRow - 1; below < m.menuMax {
 			m.menuMax = below
 		}

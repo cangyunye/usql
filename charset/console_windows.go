@@ -21,13 +21,22 @@ func consoleOutputCharset() string {
 }
 
 // consoleInputCharset reports the charset implied by the console input code
-// page ("" when redirected or non-GBK family).
+// page: "" when redirected (no console), "utf-8" for a console with any
+// other input code page (bytes pass through unchanged — the least-wrong
+// decoding for single-byte pages, and exact for 65001), or the GBK-family
+// charset name.
 func consoleInputCharset() string {
 	cp, err := windows.GetConsoleCP()
-	if err != nil {
+	if err != nil || cp == 0 {
 		return ""
 	}
-	return codePageCharset(cp)
+	switch cp {
+	case 936:
+		return "cp936"
+	case 54936:
+		return "gb18030"
+	}
+	return "utf-8"
 }
 
 // codePageCharset maps a console code page to a charset name.

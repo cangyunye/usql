@@ -20,6 +20,7 @@ package metacmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/signal"
@@ -112,7 +113,9 @@ func connTable(names []string, selected int) string {
 // the line-oriented loop below.
 func connsManage(h Handler) error {
 	if t, ok := h.IO().(interface{ IsTUI() bool }); ok && t.IsTUI() {
-		return connsModal(h)
+		if cr, ok := h.IO().(interface{ ConsoleReader() io.Reader }); ok {
+			return connsModal(h, cr.ConsoleReader())
+		}
 	}
 	stdout, stderr := h.IO().Stdout(), h.IO().Stderr()
 	for {

@@ -991,6 +991,9 @@ func Describe(p *Params) error {
 	if err != nil {
 		return err
 	}
+	// strip a trailing statement separator the user habitually types
+	// ("\dt src_og;"), psql-style
+	pattern = strings.TrimRight(pattern, "; \t")
 	switch name {
 	case "d":
 		if pattern != "" {

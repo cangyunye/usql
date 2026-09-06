@@ -145,7 +145,7 @@ FROM pg_catalog.pg_class c
 		conds = append(conds, "pg_catalog.pg_table_is_visible(c.oid)")
 	}
 	if !f.WithSystem {
-		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'information_schema')")
+		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'information_schema', 'db4ai', 'dbe_pldebugger', 'dbe_pldeveloper', 'pkg_service', 'sqladvisor', 'cstore', 'perf', 'llvm_orc')")
 	}
 	if f.Schema != "" {
 		vals = append(vals, f.Schema)
@@ -297,7 +297,7 @@ FROM pg_catalog.pg_class c
 	}
 	vals := []interface{}{}
 	if !f.WithSystem {
-		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'information_schema')")
+		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'information_schema', 'db4ai', 'dbe_pldebugger', 'dbe_pldeveloper', 'pkg_service', 'sqladvisor', 'cstore', 'perf', 'llvm_orc')")
 	}
 	if f.Schema != "" {
 		vals = append(vals, f.Schema)
@@ -361,7 +361,7 @@ FROM pg_catalog.pg_class c
 	}
 	vals := []interface{}{}
 	if !f.WithSystem {
-		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema')")
+		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'pg_toast', 'information_schema', 'db4ai', 'dbe_pldebugger', 'dbe_pldeveloper', 'pkg_service', 'sqladvisor', 'cstore', 'perf', 'llvm_orc')")
 	}
 	if f.Schema != "" {
 		vals = append(vals, f.Schema)

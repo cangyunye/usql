@@ -33,8 +33,9 @@ type liveCompleter struct {
 }
 
 type liveResult struct {
-	cands  [][]rune
-	length int
+	cands   [][]rune
+	length  int
+	replace bool
 }
 
 var _ readline.LiveAutoCompleter = &liveCompleter{}
@@ -64,32 +65,43 @@ func (l *liveCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	return l.inner.Do(line, pos)
 }
 
+// DoRepl forwards the wrapped completer's replace-style candidates, so TAB
+// through the live wrapper still replaces the word at the cursor.
+func (l *liveCompleter) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
+	if rp, ok := l.inner.(readline.Replacer); ok {
+		return rp.DoRepl(line, pos)
+	}
+	return nil, 0, false
+}
+
 // DoLive is the typing-time path: serve from memory when possible and never
-// block the input loop on a query.
-func (l *liveCompleter) DoLive(line []rune, pos int) ([][]rune, int) {
+// block the input loop on a query. The replace result reports whether the
+// candidates replace the word at the cursor (full names) or append after it
+// (suffixes).
+func (l *liveCompleter) DoLive(line []rune, pos int) ([][]rune, int, bool) {
 	key := liveKey(line, pos)
 	l.mu.Lock()
 	if res, ok := l.cache[key]; ok {
 		l.mu.Unlock()
-		return res.cands, res.length
+		return res.cands, res.length, res.replace
 	}
 	if l.computing {
 		// a query is already in flight; its kick will re-render, and the
 		// next keystroke re-requests whatever is still missing
 		l.mu.Unlock()
-		return nil, 0
+		return nil, 0, false
 	}
 	l.computing = true
 	l.mu.Unlock()
 
 	lineCopy := append([]rune(nil), line...)
 	go func() {
-		cands, length := l.inner.Do(lineCopy, pos)
+		cands, length, replace := l.compute(lineCopy, pos)
 		l.mu.Lock()
 		if l.cache == nil {
 			l.cache = make(map[string]liveResult, liveCacheSize)
 		}
-		l.cache[key] = liveResult{cands, length}
+		l.cache[key] = liveResult{cands, length, replace}
 		l.keys = append(l.keys, key)
 		for len(l.keys) > liveCacheSize {
 			delete(l.cache, l.keys[0])
@@ -102,7 +114,19 @@ func (l *liveCompleter) DoLive(line []rune, pos int) ([][]rune, int) {
 			kick()
 		}
 	}()
-	return nil, 0
+	return nil, 0, false
+}
+
+// compute runs the wrapped completer's replace-aware path when available,
+// falling back to plain Do.
+func (l *liveCompleter) compute(line []rune, pos int) ([][]rune, int, bool) {
+	if rp, ok := l.inner.(readline.Replacer); ok {
+		if cands, length, replace := rp.DoRepl(line, pos); replace {
+			return cands, length, true
+		}
+	}
+	cands, length := l.inner.Do(line, pos)
+	return cands, length, false
 }
 
 // liveKey identifies a completion request: the line up to the cursor plus

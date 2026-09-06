@@ -69,7 +69,7 @@ func TestLiveInvalidateDropsTypedResults(t *testing.T) {
 	live.DoLive(line, 16)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if cands, _ := live.DoLive(line, 16); cands != nil {
+		if cands, _, _ := live.DoLive(line, 16); cands != nil {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -77,12 +77,12 @@ func TestLiveInvalidateDropsTypedResults(t *testing.T) {
 	before := stub.callCount()
 
 	inv.Invalidate()
-	if cands, _ := live.DoLive(line, 16); cands != nil {
+	if cands, _, _ := live.DoLive(line, 16); cands != nil {
 		t.Errorf("DoLive right after Invalidate = %q, want nil (recomputing)", cands)
 	}
 	deadline = time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if cands, _ := live.DoLive(line, 16); cands != nil {
+		if cands, _, _ := live.DoLive(line, 16); cands != nil {
 			if stub.callCount() != before+1 {
 				t.Errorf("inner called %d -> %d, want +1 after invalidate", before, stub.callCount())
 			}

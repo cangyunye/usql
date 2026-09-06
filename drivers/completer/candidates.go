@@ -2,7 +2,6 @@ package completer
 
 import (
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/xo/usql/drivers/metadata"
@@ -109,17 +108,40 @@ func reconstructLine(previousWords []string, text []rune) []rune {
 }
 
 // completeFromContext generates the candidates for a parsed context: tables
-// in table positions, columns in column positions, fuzzy-ranked against the
-// full word being completed (qualifier included). It returns nil when the
-// context does not determine a candidate set, so callers can fall back to
-// the heuristics.
+// in table positions (fully qualified as schema.table, so candidates are
+// self-describing), columns in column positions. Candidates are full words
+// that replace the word at the cursor (see readline.Replacer), ranked
+// fuzzily — prefix matches first. It returns nil when the context does not
+// determine a candidate set, so callers can fall back to the heuristics.
 func (c completer) completeFromContext(ctx Context) [][]rune {
 	options, ok := c.contextOptions(ctx)
 	if !ok || len(options) == 0 {
 		return nil
 	}
-	sort.Strings(options)
-	return completeFuzzy([]rune(ctx.Qualifier+ctx.Object), options...)
+	return completeFuzzyFull(ctx.Qualifier+ctx.Object, options)
+}
+
+// DoRepl provides the fork's replace-style completion: the context path's
+// candidates are full words replacing the word at the cursor. When the
+// context is inconclusive it returns ok=false, and the readline layer falls
+// back to Do (append-style heuristics).
+func (c *completer) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
+	var i int
+	for i = pos - 1; i > 0; i-- {
+		if strings.ContainsRune(WORD_BREAKS, line[i]) {
+			i++
+			break
+		}
+	}
+	if i == -1 {
+		i = 0
+	}
+	previousWords := getPreviousWords(pos, line)
+	text := line[i:pos]
+	if res := c.completeWithContext(previousWords, text); res != nil {
+		return res, len(text), true
+	}
+	return nil, 0, false
 }
 
 // contextOptions returns the candidate options for the context, or ok=false
@@ -236,7 +258,9 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 			func() (iterator, error) { return r.Tables(filter) },
 			func(res interface{}) string {
 				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name)
+				// schema.table (catalog.schema.table) — full names tell
+				// similarly-named objects apart
+				return fullIdentifier(t.Catalog, t.Schema, t.Name)
 			},
 		)...)
 	}
@@ -248,7 +272,7 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 			func() (iterator, error) { return r.Functions(filter) },
 			func(res interface{}) string {
 				f := res.(*metadata.FunctionSet).Get()
-				return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name)
+				return fullIdentifier(f.Catalog, f.Schema, f.Name)
 			},
 		)...)
 	}
@@ -257,7 +281,7 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 			func() (iterator, error) { return r.Sequences(filter) },
 			func(res interface{}) string {
 				s := res.(*metadata.SequenceSet).Get()
-				return qualifiedIdentifier(filter, s.Catalog, s.Schema, s.Name)
+				return fullIdentifier(s.Catalog, s.Schema, s.Name)
 			},
 		)...)
 	}
@@ -291,7 +315,7 @@ func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []st
 			func() (iterator, error) { return r.Functions(filter) },
 			func(res interface{}) string {
 				f := res.(*metadata.FunctionSet).Get()
-				return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name)
+				return fullIdentifier(f.Catalog, f.Schema, f.Name)
 			},
 		)...)
 	}
@@ -300,7 +324,7 @@ func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []st
 			func() (iterator, error) { return r.Sequences(filter) },
 			func(res interface{}) string {
 				s := res.(*metadata.SequenceSet).Get()
-				return qualifiedIdentifier(filter, s.Catalog, s.Schema, s.Name)
+				return fullIdentifier(s.Catalog, s.Schema, s.Name)
 			},
 		)...)
 	}

@@ -25,8 +25,17 @@ type AutoCompleter interface {
 // are available to re-render the menu. (usql fork)
 type LiveAutoCompleter interface {
 	AutoCompleter
-	DoLive(line []rune, pos int) (newLine [][]rune, length int)
+	DoLive(line []rune, pos int) (newLine [][]rune, length int, replace bool)
 	SetLiveKick(kick func())
+}
+
+// Replacer is an optional AutoCompleter extension for candidates that
+// REPLACE the word at the cursor (e.g. fully qualified schema.table names)
+// instead of appending a suffix to it. When DoRepl returns ok, the last
+// length runes before the cursor are replaced by the chosen candidate, and
+// the menu lists candidates in full. (usql fork)
+type Replacer interface {
+	DoRepl(line []rune, pos int) (newLine [][]rune, length int, ok bool)
 }
 
 type TabCompleter struct{}
@@ -52,6 +61,9 @@ type opCompleter struct {
 	candidateOff    int
 	candidateChoise int
 	candidateColNum int
+	// replaceLen > 0 means candidates replace that many runes before the
+	// cursor instead of being appended
+	replaceLen int
 }
 
 func newOpCompleter(w io.Writer, op *Operation, width int) *opCompleter {
@@ -64,6 +76,8 @@ func newOpCompleter(w io.Writer, op *Operation, width int) *opCompleter {
 
 func (o *opCompleter) doSelectLocked() {
 	if len(o.candidate) == 1 {
+		o.op.buf.EraseBefore(o.replaceLen)
+		o.replaceLen = 0
 		o.op.buf.WriteRunes(o.candidate[0])
 		o.exitCompleteModeLocked(false)
 		return
@@ -106,7 +120,7 @@ func (o *opCompleter) onCompleteLocked() bool {
 
 	o.exitCompleteSelectModeLocked()
 	o.candidateSource = rs
-	newLines, offset := o.op.cfg.AutoComplete.Do(rs, buf.idx)
+	newLines, offset, replace := o.doAutoComplete(rs, buf.idx)
 	if len(newLines) == 0 {
 		o.exitCompleteModeLocked(false)
 		return true
@@ -115,21 +129,50 @@ func (o *opCompleter) onCompleteLocked() bool {
 	// only Aggregate candidates in non-complete mode
 	if !o.IsInCompleteMode() {
 		if len(newLines) == 1 {
+			if replace {
+				buf.EraseBefore(offset)
+			}
 			buf.WriteRunes(newLines[0])
 			o.exitCompleteModeLocked(false)
 			return true
 		}
 
 		same, size := runes.Aggregate(newLines)
-		if size > 0 {
+		if replace {
+			// write the common prefix of the full candidates only when it
+			// covers the word being replaced
+			if size >= offset {
+				buf.EraseBefore(offset)
+				buf.WriteRunes(same)
+				o.exitCompleteModeLocked(false)
+				return true
+			}
+		} else if size > 0 {
 			buf.WriteRunes(same)
 			o.exitCompleteModeLocked(false)
 			return true
 		}
 	}
 
-	o.enterCompleteModeLocked(offset, newLines)
+	o.enterCompleteModeLocked(offset, newLines, replace)
 	return true
+}
+
+// doAutoComplete calls the best available completion path: a Replacer's
+// DoRepl when the completer produces full-word candidates, then a
+// LiveAutoCompleter's DoLive fast path, then the synchronous Do. The bool
+// result reports replace semantics. (usql fork)
+func (o *opCompleter) doAutoComplete(rs []rune, idx int) ([][]rune, int, bool) {
+	if rp, ok := o.op.cfg.AutoComplete.(Replacer); ok {
+		if newLines, offset, ok2 := rp.DoRepl(rs, idx); ok2 {
+			return newLines, offset, true
+		}
+	}
+	if lc, ok := o.op.cfg.AutoComplete.(LiveAutoCompleter); ok {
+		return lc.DoLive(rs, idx)
+	}
+	newLines, offset := o.op.cfg.AutoComplete.Do(rs, idx)
+	return newLines, offset, false
 }
 
 // LiveComplete refreshes the candidate menu for the current buffer without
@@ -144,22 +187,13 @@ func (o *opCompleter) LiveComplete() {
 	}
 	o.exitCompleteSelectModeLocked()
 	rs := o.op.buf.Runes()
-	newLines, offset := o.doAutoComplete(rs, o.op.buf.idx)
+	newLines, offset, replace := o.doAutoComplete(rs, o.op.buf.idx)
 	if len(newLines) == 0 {
 		o.exitCompleteModeLocked(false)
 		return
 	}
 	o.candidateSource = rs
-	o.enterCompleteModeLocked(offset, newLines)
-}
-
-// doAutoComplete calls the DoLive fast path when the configured completer
-// provides one, falling back to the synchronous Do. (usql fork)
-func (o *opCompleter) doAutoComplete(rs []rune, idx int) ([][]rune, int) {
-	if lc, ok := o.op.cfg.AutoComplete.(LiveAutoCompleter); ok {
-		return lc.DoLive(rs, idx)
-	}
-	return o.op.cfg.AutoComplete.Do(rs, idx)
+	o.enterCompleteModeLocked(offset, newLines, replace)
 }
 
 func (o *opCompleter) IsInCompleteSelectMode() bool {
@@ -181,6 +215,8 @@ func (o *opCompleter) handleCompleteSelectLocked(r rune) bool {
 	switch r {
 	case CharEnter, CharCtrlJ:
 		next = false
+		o.op.buf.EraseBefore(o.replaceLen)
+		o.replaceLen = 0
 		o.op.buf.WriteRunes(o.op.candidate[o.op.candidateChoise])
 		o.exitCompleteModeLocked(false)
 	case CharLineStart:
@@ -261,8 +297,13 @@ func (o *opCompleter) completeRefreshLocked() {
 			colWidth = w
 		}
 	}
-	colWidth += o.candidateOff + 1
-	same := o.op.buf.RuneSlice(-o.candidateOff)
+	// in replace mode the menu lists full candidates, not suffixes
+	// relative to the typed word
+	same := []rune(nil)
+	if o.replaceLen == 0 {
+		colWidth += o.candidateOff + 1
+		same = o.op.buf.RuneSlice(-o.candidateOff)
+	}
 
 	// -1 to avoid reach the end of line
 	width := o.width - 1
@@ -347,13 +388,18 @@ func (o *opCompleter) enterCompleteSelectModeLocked() {
 func (o *opCompleter) EnterCompleteMode(offset int, candidate [][]rune) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.enterCompleteModeLocked(offset, candidate)
+	o.enterCompleteModeLocked(offset, candidate, false)
 }
 
-func (o *opCompleter) enterCompleteModeLocked(offset int, candidate [][]rune) {
+func (o *opCompleter) enterCompleteModeLocked(offset int, candidate [][]rune, replace bool) {
 	o.inCompleteMode = true
 	o.candidate = candidate
 	o.candidateOff = offset
+	if replace {
+		o.replaceLen = offset
+	} else {
+		o.replaceLen = 0
+	}
 	o.completeRefreshLocked()
 }
 
@@ -369,6 +415,7 @@ func (o *opCompleter) exitCompleteSelectModeLocked() {
 	o.candidateChoise = -1
 	o.candidateOff = -1
 	o.candidateSource = nil
+	o.replaceLen = 0
 }
 
 func (o *opCompleter) ExitCompleteMode(revent bool) {

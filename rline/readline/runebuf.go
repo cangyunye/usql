@@ -347,6 +347,21 @@ func (r *RuneBuffer) Backspace() {
 	})
 }
 
+// EraseBefore removes the n runes immediately before the cursor, so a
+// completion candidate can replace the word being completed. (usql fork)
+func (r *RuneBuffer) EraseBefore(n int) {
+	if n <= 0 {
+		return
+	}
+	r.Refresh(func() {
+		if r.idx < n {
+			n = r.idx
+		}
+		r.buf = append(r.buf[:r.idx-n], r.buf[r.idx:]...)
+		r.idx -= n
+	})
+}
+
 func (r *RuneBuffer) MoveToLineEnd() {
 	r.Refresh(func() {
 		if r.idx == len(r.buf) {

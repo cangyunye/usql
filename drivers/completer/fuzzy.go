@@ -61,6 +61,45 @@ func isBoundaryByte(b byte) bool {
 	return false
 }
 
+// completeFuzzyFull returns the options that fuzzily match pattern as full
+// words — used by the replace-style context path, where candidates replace
+// the word at the cursor entirely (e.g. schema.table). Prefix matches rank
+// first, then fuzzy score, then length. When pattern starts with a
+// lower-case letter the whole candidate is lower-cased, mirroring
+// CompleteFromList's case behavior for keywords.
+func completeFuzzyFull(pattern string, options []string) [][]rune {
+	lowerPattern := strings.ToLower(pattern)
+	type match struct {
+		option string
+		score  int
+		prefix bool
+	}
+	matches := make([]match, 0, len(options))
+	for _, o := range options {
+		if s := fuzzyScore(pattern, o); s >= 0 {
+			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(o), lowerPattern)})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].prefix != matches[j].prefix {
+			return matches[i].prefix
+		}
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return len(matches[i].option) < len(matches[j].option)
+	})
+	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
+	result := make([][]rune, 0, len(matches))
+	for _, m := range matches {
+		if lower {
+			m.option = strings.ToLower(m.option)
+		}
+		result = append(result, []rune(m.option))
+	}
+	return result
+}
+
 // completeFuzzy returns the suffixes of options that fuzzily match text,
 // best matches first. Candidates that start with the whole pattern rank
 // first, then fuzzy score, then length. Case handling mirrors

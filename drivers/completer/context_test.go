@@ -259,12 +259,12 @@ func TestContextCandidates(t *testing.T) {
 		{
 			"unqualified column in where",
 			"SELECT * FROM film WHERE na", 27,
-			[]string{"me"},
+			[]string{"name"},
 		},
 		{
 			"alias qualified column",
 			"SELECT * FROM film f WHERE f.", 29,
-			[]string{"id", "name"},
+			[]string{"f.id", "f.name"},
 		},
 		{
 			"unknown alias yields nothing",

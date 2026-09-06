@@ -49,13 +49,13 @@ func TestLiveDoLiveServesFromCache(t *testing.T) {
 
 	line := []rune("SELECT * FROM fi")
 	// first request: background, returns nothing yet
-	if cands, _ := live.DoLive(line, 16); cands != nil {
+	if cands, _, _ := live.DoLive(line, 16); cands != nil {
 		t.Errorf("first DoLive = %q, want nil (computing)", cands)
 	}
 	// wait for the background query + kick bookkeeping
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if cands, length := live.DoLive(line, 16); cands != nil {
+		if cands, length, _ := live.DoLive(line, 16); cands != nil {
 			if string(cands[0]) != "ilm" || length != 2 {
 				t.Errorf("cached DoLive = %q,%d want [ilm],2", cands, length)
 			}
@@ -90,14 +90,14 @@ func TestLiveSkipsWhileComputing(t *testing.T) {
 
 	live.DoLive([]rune("SELECT * FROM f"), 15)
 	// different keystroke while the first query is in flight: declined
-	if cands, _ := live.DoLive([]rune("SELECT * FROM fi"), 16); cands != nil {
+	if cands, _, _ := live.DoLive([]rune("SELECT * FROM fi"), 16); cands != nil {
 		t.Errorf("DoLive while computing = %q, want nil", cands)
 	}
 	time.Sleep(80 * time.Millisecond)
 	// after the in-flight query landed, the new key is served on its own
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if cands, _ := live.DoLive([]rune("SELECT * FROM fi"), 16); cands != nil {
+		if cands, _, _ := live.DoLive([]rune("SELECT * FROM fi"), 16); cands != nil {
 			if n := stub.callCount(); n != 2 {
 				t.Errorf("inner called %d times, want 2", n)
 			}

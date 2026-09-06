@@ -131,27 +131,27 @@ func TestWithContextCompletion(t *testing.T) {
 		{
 			"from table prefix",
 			"SELECT * FROM fi", 16,
-			[]string{"lm", "lm_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2,
 		},
 		{
 			"from empty word offers tables, functions, sequences",
 			"SELECT * FROM ", 14,
-			[]string{"now", "film", "actor", "film_view", "actor_id_seq"}, 0,
+			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 0,
 		},
 		{
 			"insert into offers updatables only",
 			"INSERT INTO fi", 14,
-			[]string{"lm", "lm_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2,
 		},
 		{
 			"update offers updatables only",
 			"UPDATE fi", 9,
-			[]string{"lm", "lm_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2,
 		},
 		{
 			"insert into column list prefix",
 			"INSERT INTO film (na", 20,
-			[]string{"me"}, 2,
+			[]string{"name"}, 2,
 		},
 		{
 			"insert into column list",
@@ -161,37 +161,37 @@ func TestWithContextCompletion(t *testing.T) {
 		{
 			"alias qualified column",
 			"SELECT * FROM film f WHERE f.", 29,
-			[]string{"id", "name"}, 2,
+			[]string{"f.id", "f.name"}, 2,
 		},
 		{
 			"unqualified column after and",
 			"SELECT * FROM film WHERE id = 1 AND na", 38,
-			[]string{"me"}, 2,
+			[]string{"name"}, 2,
 		},
 		{
 			"join on column",
 			"SELECT * FROM film JOIN actor ON fi", 35,
-			[]string{"lm_id"}, 2,
+			[]string{"film_id"}, 2,
 		},
 		{
 			"group by column",
 			"SELECT * FROM film GROUP BY na", 30,
-			[]string{"me"}, 2,
+			[]string{"name"}, 2,
 		},
 		{
 			"schema qualified table",
 			"SELECT * FROM public.", 21,
-			[]string{"now", "film", "actor", "film_view", "actor_id_seq"}, 7,
+			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 7,
 		},
 		{
 			"schema qualified table prefix",
 			"SELECT * FROM public.fi", 23,
-			[]string{"lm", "lm_view"}, 9,
+			[]string{"public.film", "public.film_view"}, 9,
 		},
 		{
 			"join alias qualified column",
 			"SELECT * FROM film f JOIN actor a ON f.", 39,
-			[]string{"id", "name"}, 2,
+			[]string{"f.id", "f.name"}, 2,
 		},
 		{
 			"unknown qualifier declines",
@@ -201,20 +201,20 @@ func TestWithContextCompletion(t *testing.T) {
 		{
 			"table listed after semicolon",
 			"SELECT 1; SELECT * FROM fi", 26,
-			[]string{"lm", "lm_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2,
 		},
 		{
 			"using column list",
 			"SELECT * FROM film JOIN actor USING (fi", 39,
-			[]string{"lm_id"}, 2,
+			[]string{"film_id"}, 2,
 		},
 		{
 			"where offers columns and keywords",
 			"SELECT * FROM film WHERE ", 25,
 			[]string{
-				"IN", "OR", "id", "AND", "END", "NOT", "CASE", "ELSE",
-				"LIKE", "THEN", "WHEN", "name", "EXISTS", "BETWEEN",
-				"IS NULL", "IS NOT NULL",
+				"id", "OR", "IN", "AND", "NOT", "END", "name", "LIKE",
+				"CASE", "WHEN", "THEN", "ELSE", "EXISTS", "IS NULL",
+				"BETWEEN", "IS NOT NULL",
 			}, 0,
 		},
 		{
@@ -277,7 +277,7 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 		{
 			"context result replaces whole dotted word",
 			"SELECT * FROM public.fi", 23,
-			[]string{"lm", "lm_view"}, 9,
+			[]string{"public.film", "public.film_view"}, 9,
 		},
 	}
 
@@ -305,8 +305,8 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 func TestCompleteWithContextOrder(t *testing.T) {
 	c := completer{reader: candMockReader{}, logger: discardLogger()}
 	got := c.completeWithContext([]string{"FROM", "*", "SELECT"}, []rune("fi"))
-	if len(got) != 2 || string(got[0]) != "lm" || string(got[1]) != "lm_view" {
-		t.Errorf("completeWithContext(fi) = %q, want [lm lm_view]", got)
+	if len(got) != 2 || string(got[0]) != "public.film" || string(got[1]) != "public.film_view" {
+		t.Errorf("completeWithContext(fi) = %q, want [public.film public.film_view]", got)
 	}
 }
 

@@ -1015,6 +1015,21 @@ func parseParentIdentifier(name string) metadata.Filter {
 	return result
 }
 
+// fullIdentifier renders an object's name with all known namespace parts,
+// independent of what the user typed — schema.table or
+// catalog.schema.table. The pseudo-catalog "def" (MySQL's implicit
+// catalog) is ignored.
+func fullIdentifier(catalog, schema, name string) string {
+	switch {
+	case catalog != "" && catalog != "def" && schema != "":
+		return catalog + "." + schema + "." + name
+	case schema != "":
+		return schema + "." + name
+	default:
+		return name
+	}
+}
+
 func qualifiedIdentifier(filter metadata.Filter, catalog, schema, name string) string {
 	// TODO handle quoted identifiers
 	if filter.Catalog != "" && filter.Schema != "" {

@@ -48,6 +48,20 @@
   双向；重定向时代码页返回 0 回退 UTF-8。charset 与全程序 GOOS=windows 交叉编译通过。
 - [x] **x/text 归位 direct** — go mod tidy 核实无变化（本就为 direct）。
 
+## 已完成（第三轮：用户报障修复）
+
+- [x] **`\conns` 缺失于补全候选**：根治方式是让 `gen.go`（本就解析 cmds.go 生成
+  descs.go）顺带生成 `drivers/completer/cmds_gen.go` 的 `backslashCommands`（含
+  `dt[S+]` 的全组合变体与别名），completer 不再手维护命令表；新增
+  `metacmd/completer_drift_test.go` 防漂移测试（遍历全部注册命令验证可补全）。
+  该测试同时揪出约 30 个历史缺失命令（\d、\o、\if/\endif、\quit、\chart 等），
+  一并随生成修复。
+- [x] **OceanBase Oracle 租户 `V$PARAMETER` 不存在导致 selectables 报错**：
+  `orameta.Catalogs` 拆成 v$parameter / dba_db_links 两条尽力而为查询，任一失败
+  （如 OBE-00942）降级为返回已获得的部分，不再让补全的 namespaces 查询整体报错；
+  新增 `drivers/metadata/oracle/metadata_test.go`（modernc sqlite 内存库模拟缺表
+  场景，无需 Docker）覆盖两个降级路径。
+
 ## 剩余项
 
 - [ ] **默认引擎翻转**：`rline/tui.go` 的 `inputMode()` 目前仅在 `USQL_INPUT=tui` 时启用

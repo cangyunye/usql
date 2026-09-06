@@ -4,6 +4,7 @@ package oracle
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/xo/usql/drivers"
@@ -47,38 +48,41 @@ func newReader(pf func(int) string) func(drivers.DB, ...metadata.ReaderOption) m
 }
 
 func (r metaReader) Catalogs(metadata.Filter) (*metadata.CatalogSet, error) {
-	qstr := `SELECT
+	// catalogs are advisory on Oracle-family servers: the database name
+	// comes from v$parameter and database links from dba_db_links, and
+	// neither view is guaranteed to exist or be readable (e.g. OceanBase
+	// Oracle tenants have no V$PARAMETER) — query both best-effort and
+	// return whatever succeeded, so completion and \l degrade to fewer
+	// catalogs instead of failing outright
+	var results []metadata.Catalog
+	for _, qstr := range []string{
+		`SELECT
   UPPER(Value) AS catalog
 FROM v$parameter o
-WHERE name = 'db_name'
-UNION ALL
-SELECT
+WHERE name = 'db_name'`,
+		`SELECT
   db_link AS catalog
-FROM dba_db_links
-ORDER BY catalog
-`
-
-	rows, closeRows, err := r.Query(qstr)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return metadata.NewCatalogSet([]metadata.Catalog{}), nil
+FROM dba_db_links`,
+	} {
+		rows, closeRows, err := r.Query(qstr)
+		if err != nil {
+			continue
 		}
-		return nil, err
-	}
-	defer closeRows()
-
-	results := []metadata.Catalog{}
-	for rows.Next() {
-		rec := metadata.Catalog{}
-		err = rows.Scan(&rec.Catalog)
+		for rows.Next() {
+			rec := metadata.Catalog{}
+			if err = rows.Scan(&rec.Catalog); err != nil {
+				closeRows()
+				return nil, err
+			}
+			results = append(results, rec)
+		}
+		err = rows.Err()
+		closeRows()
 		if err != nil {
 			return nil, err
 		}
-		results = append(results, rec)
 	}
-	if rows.Err() != nil {
-		return nil, rows.Err()
-	}
+	sort.Slice(results, func(i, j int) bool { return results[i].Catalog < results[j].Catalog })
 	return metadata.NewCatalogSet(results), nil
 }
 

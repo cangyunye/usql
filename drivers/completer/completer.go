@@ -118,89 +118,6 @@ func NewDefaultCompleter(opts ...Option) rline.Completer {
 		sqlStartCommands: CommonSqlStartCommands,
 		// TODO do we need to add built-in functions like, COALESCE, CAST, NULLIF, CONCAT etc?
 		sqlCommands: CommonSqlCommands,
-		backslashCommands: []string{
-			`\!`,
-			`\?`,
-			`\C`,
-			`\H`,
-			`\T`,
-			`\Z`,
-			`\a`,
-			`\begin`,
-			`\bind`,
-			`\c`,
-			`\cd`,
-			`\commit`,
-			`\connect`,
-			`\conninfo`,
-			`\copy`,
-			`\copyright`,
-			`\cset`,
-			`\d+`,
-			`\dS+`,
-			`\dS`,
-			`\da+`,
-			`\daS+`,
-			`\daS`,
-			`\da`,
-			`\df+`,
-			`\dfS+`,
-			`\dfS`,
-			`\df`,
-			`\di+`,
-			`\diS+`,
-			`\diS`,
-			`\di`,
-			`\dm+`,
-			`\dmS+`,
-			`\dmS`,
-			`\dm`,
-			`\dn+`,
-			`\dnS+`,
-			`\dnS`,
-			`\dn`,
-			`\drivers`,
-			`\ds+`,
-			`\dsS+`,
-			`\dsS`,
-			`\ds`,
-			`\dt+`,
-			`\dtS+`,
-			`\dtS`,
-			`\dt`,
-			`\dv+`,
-			`\dvS+`,
-			`\dvS`,
-			`\dv`,
-			`\e`,
-			`\echo`,
-			`\f`,
-			`\g`,
-			`\getenv`,
-			`\gexec`,
-			`\gset`,
-			`\gx`,
-			`\i`,
-			`\ir`,
-			`\l+`,
-			`\l`,
-			`\p`,
-			`\password`,
-			`\prompt`,
-			`\pset`,
-			`\q`,
-			`\r`,
-			`\raw`,
-			`\rollback`,
-			`\set`,
-			`\setenv`,
-			`\t`,
-			`\timing`,
-			`\unset`,
-			`\w`,
-			`\watch`,
-			`\x`,
-		},
 	}
 	for _, o := range opts {
 		o(&c)
@@ -264,14 +181,13 @@ func WithBeforeComplete(f CompleteFunc) Option {
 
 // completer based on https://github.com/postgres/postgres/blob/9f3665fbfc34b963933e51778c7feaa8134ac885/src/bin/psql/tab-complete.c
 type completer struct {
-	db                metadata.DB
-	reader            metadata.Reader
-	logger            logger
-	sqlStartCommands  []string
-	sqlCommands       []string
-	backslashCommands []string
-	connStrings       []string
-	beforeComplete    CompleteFunc
+	db               metadata.DB
+	reader           metadata.Reader
+	logger           logger
+	sqlStartCommands []string
+	sqlCommands      []string
+	connStrings      []string
+	beforeComplete   CompleteFunc
 	// cache is the metadata query cache installed by WithContextCompletion.
 	cache *cachedReader
 	// snap is the connect-time catalog snapshot installed by
@@ -318,7 +234,7 @@ func (c completer) complete(previousWords []string, text []rune) [][]rune {
 	if len(text) > 0 {
 		if len(previousWords) == 0 && text[0] == '\\' {
 			/* If current word is a backslash command, offer completions for that */
-			return CompleteFromListCase(MATCH_CASE, text, c.backslashCommands...)
+			return CompleteFromListCase(MATCH_CASE, text, backslashCommands...)
 		}
 		if text[0] == ':' {
 			if len(text) == 1 || text[1] == ':' {

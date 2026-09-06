@@ -46,6 +46,9 @@ type Context struct {
 	// current clause keyword — INSERT INTO film <cursor> lists one, while
 	// FROM film JOIN <cursor> does not for the JOIN.
 	TableListed bool
+	// IntoListDone reports whether a complete "(a, b)" column group was
+	// written after the INSERT INTO target table.
+	IntoListDone bool
 	// Aliases maps each alias (and each table's own name) to its reference.
 	// The alias of a derived table maps to the zero TableRef, because its
 	// columns cannot be resolved without evaluating the subquery.
@@ -97,6 +100,9 @@ func scanClauses(tokens []token) Context {
 				// a complete group in a table list is a derived table, and
 				// the identifier that follows is its alias
 				derivedTable = tableMode
+				if ctx.Clause == "INTO" {
+					ctx.IntoListDone = true
+				}
 			}
 			continue
 		}

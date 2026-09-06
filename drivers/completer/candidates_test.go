@@ -31,10 +31,13 @@ var candTables = []metadata.Table{
 	{Catalog: "", Schema: "public", Name: "film_view", Type: "VIEW"},
 }
 
-var candColumns = map[string][]string{
-	"film":      {"id", "name"},
-	"actor":     {"id", "film_id"},
-	"film_view": {"id", "title"},
+var candColumns = []metadata.Column{
+	{Table: "film", Name: "id", OrdinalPosition: 1},
+	{Table: "film", Name: "name", OrdinalPosition: 2},
+	{Table: "actor", Name: "id", OrdinalPosition: 1},
+	{Table: "actor", Name: "film_id", OrdinalPosition: 2},
+	{Table: "film_view", Name: "id", OrdinalPosition: 1},
+	{Table: "film_view", Name: "title", OrdinalPosition: 2},
 }
 
 var candFunctions = []metadata.Function{
@@ -71,8 +74,10 @@ func (r candMockReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 
 func (r candMockReader) Columns(f metadata.Filter) (*metadata.ColumnSet, error) {
 	var results []metadata.Column
-	for _, name := range candColumns[strings.ToLower(f.Parent)] {
-		results = append(results, metadata.Column{Table: f.Parent, Name: name})
+	for _, col := range candColumns {
+		if strings.EqualFold(col.Table, f.Parent) {
+			results = append(results, col)
+		}
 	}
 	return metadata.NewColumnSet(results), nil
 }
@@ -166,6 +171,16 @@ func TestWithContextCompletion(t *testing.T) {
 			"update offers updatables only",
 			"UPDATE fi", 9,
 			[]string{"public.film", "public.film_view"}, 2,
+		},
+		{
+			"insert into table done offers column list group",
+			"INSERT INTO film ", 17,
+			[]string{"(id, name)"}, 0,
+		},
+		{
+			"insert into column group done offers values",
+			"INSERT INTO film (id, name) v", 29,
+			[]string{"values", "overriding"}, 1,
 		},
 		{
 			"insert into column list prefix",
@@ -279,8 +294,13 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 		wantLen int
 	}{
 		{
-			"insert into table listed",
+			"insert into table listed offers column group",
 			"INSERT INTO film ", 17,
+			[]string{"(id, name)"}, 0,
+		},
+		{
+			"insert into without column metadata declines to heuristics",
+			"INSERT INTO pg_catalog.pg_class ", 32,
 			[]string{"(", "DEFAULT VALUES", "SELECT", "TABLE", "VALUES", "OVERRIDING"}, 0,
 		},
 		{

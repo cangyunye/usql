@@ -164,13 +164,24 @@ func (c completer) contextOptions(ctx Context) ([]string, bool) {
 	case ctx.Clause == "INTO" && ctx.OpenParens > 0:
 		// INSERT INTO film (<cursor> — the column list of the target table
 		return c.scopeColumns(ctx), len(ctx.Tables) > 0
+	case ctx.Clause == "INTO" && ctx.IntoListDone:
+		// INSERT INTO film (a, b) <cursor> — what may follow the column
+		// group
+		return []string{"VALUES", "SELECT", "TABLE", "OVERRIDING"}, true
 	case ctx.Clause == "USING" && ctx.OpenParens > 0:
 		// JOIN ... USING (<cursor> — join columns of the tables in scope
 		return c.scopeColumns(ctx), len(ctx.Tables) > 0
 	case tableClauses[ctx.Clause]:
 		if ctx.Object == "" && ctx.TableListed {
-			// the table of the clause is already listed; what comes next
-			// ("(", SET, VALUES, ...) is the heuristics' business
+			if ctx.Clause == "INTO" {
+				// INSERT INTO film <cursor> — offer the target table's
+				// full column list as one "(a, b, c)" candidate, in
+				// metadata order; without column metadata decline to the
+				// heuristics ("(", VALUES, ...)
+				if list := c.insertColumnList(ctx); list != "" {
+					return []string{list}, true
+				}
+			}
 			return nil, false
 		}
 		// dotless words complete schema/user/owner names first, keeping
@@ -230,16 +241,58 @@ func (c completer) qualifiedOptions(ctx Context) []string {
 	}
 }
 
-// scopeColumns returns the columns of every table in scope.
+// insertColumnList renders the full column list of the INSERT INTO target
+// table as a single "(a, b, c)" candidate, in metadata (ordinal) order. It
+// returns "" when the columns cannot be determined.
+func (c completer) insertColumnList(ctx Context) string {
+	if len(ctx.Tables) == 0 {
+		return ""
+	}
+	ref := ctx.Tables[len(ctx.Tables)-1]
+	r, ok := c.reader.(metadata.ColumnReader)
+	if !ok {
+		return ""
+	}
+	filter := metadata.Filter{
+		Catalog:     ref.Catalog,
+		Schema:      ref.Schema,
+		Parent:      ref.Name,
+		OnlyVisible: ref.Catalog == "" && ref.Schema == "",
+		WithSystem:  ref.Catalog != "" || ref.Schema != "",
+	}
+	set, err := r.Columns(filter)
+	if err != nil {
+		return ""
+	}
+	defer set.Close()
+	var cols []string
+	for set.Next() {
+		cols = append(cols, set.Get().Name)
+	}
+	if len(cols) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(cols, ", ") + ")"
+}
+
+// scopeColumns returns the columns of every table in scope, in metadata
+// order, deduplicated by name.
 func (c completer) scopeColumns(ctx Context) []string {
 	var options []string
+	seen := map[string]bool{}
 	for _, ref := range ctx.Tables {
-		options = append(options, c.tableColumns(ref)...)
+		for _, col := range c.tableColumns(ref) {
+			if !seen[col] {
+				seen[col] = true
+				options = append(options, col)
+			}
+		}
 	}
 	return options
 }
 
-// tableColumns queries the reader for the columns of a table reference.
+// tableColumns queries the reader for the columns of a table reference, in
+// metadata (ordinal) order.
 func (c completer) tableColumns(ref TableRef) []string {
 	r, ok := c.reader.(metadata.ColumnReader)
 	if !ok || ref.Name == "" {
@@ -252,12 +305,16 @@ func (c completer) tableColumns(ref TableRef) []string {
 		OnlyVisible: ref.Catalog == "" && ref.Schema == "",
 		WithSystem:  ref.Catalog != "" || ref.Schema != "",
 	}
-	return c.getNames(
-		func() (iterator, error) { return r.Columns(filter) },
-		func(res interface{}) string {
-			return res.(*metadata.ColumnSet).Get().Name
-		},
-	)
+	set, err := r.Columns(filter)
+	if err != nil {
+		return nil
+	}
+	defer set.Close()
+	var cols []string
+	for set.Next() {
+		cols = append(cols, set.Get().Name)
+	}
+	return cols
 }
 
 // scopeTables is the fallback for a table position, used only when no

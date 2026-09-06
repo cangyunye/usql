@@ -138,9 +138,24 @@ func TestWithContextCompletion(t *testing.T) {
 			[]string{"public.film", "public.film_view"}, 2,
 		},
 		{
-			"from empty word offers tables, functions, sequences",
+			"from empty word offers namespaces only",
 			"SELECT * FROM ", 14,
-			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 0,
+			[]string{"public"}, 0,
+		},
+		{
+			"from namespace prefix",
+			"SELECT * FROM pu", 16,
+			[]string{"public"}, 2,
+		},
+		{
+			"from namespace dot lists objects",
+			"SELECT * FROM public.", 21,
+			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 7,
+		},
+		{
+			"from bare table name falls back to qualified tables",
+			"SELECT * FROM film", 18,
+			[]string{"public.film", "public.film_view"}, 4,
 		},
 		{
 			"insert into offers updatables only",

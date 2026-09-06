@@ -173,6 +173,15 @@ func (c completer) contextOptions(ctx Context) ([]string, bool) {
 			// ("(", SET, VALUES, ...) is the heuristics' business
 			return nil, false
 		}
+		// dotless words complete schema/user/owner names first, keeping
+		// the candidate list small; after "schema." the qualified branch
+		// lists that namespace's objects. Only when no namespace matches
+		// the typed word fall back to fully qualified tables, so direct
+		// table names ("FROM film") still complete.
+		ns := c.getNamespaces(metadata.Filter{OnlyVisible: true})
+		if len(completeFuzzyFull(ctx.Qualifier+ctx.Object, ns)) > 0 {
+			return ns, true
+		}
 		return c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE"), true
 	case columnClauses[ctx.Clause]:
 		options := c.scopeColumns(ctx)
@@ -251,12 +260,12 @@ func (c completer) tableColumns(ref TableRef) []string {
 	)
 }
 
-// scopeTables completes the first table of a statement: namespaces to qualify
-// with, plus the tables themselves — all selectables for FROM and JOIN,
-// updatable tables only for INSERT INTO and UPDATE, mirroring
-// completeWithSelectables and completeWithUpdatables. The query filter is
-// stable (no typed text in it): per-keystroke matching happens client-side
-// in fuzzy ranking, so the cached query is reused while typing.
+// scopeTables is the fallback for a table position, used only when no
+// namespace matches the typed word: fully qualified selectables — all of
+// them for FROM and JOIN, updatable tables only for INSERT INTO and UPDATE.
+// The query filter is stable (no typed text in it): per-keystroke matching
+// happens client-side in fuzzy ranking, so the cached query is reused while
+// typing.
 func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 	filter := metadata.Filter{OnlyVisible: true}
 	if tablesOnly {

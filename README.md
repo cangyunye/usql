@@ -505,12 +505,23 @@ port, database, configured encoding, and whether a password is stored. The menu 
 | `d <name or #>`| delete the named connection (after confirmation)  |
 | `q`            | leave the manager                                 |
 
+`\conns` also connects in a single step: `\conns <name>` or `\conns <row
+number>` opens that stored connection directly, without entering the manager.
+
 The form asks for name (on add), driver (numbered picker of the compiled-in
 drivers or a scheme alias), user, host, port, database, URL parameters, and
 password. Password input is masked; when editing, leaving it empty keeps the
 stored password. In non-interactive or piped runs `\conns` only prints the
 table. All input goes through the normal line editor, so the manager defines
 no global shortcuts and nothing conflicts with readline bindings.
+
+When already connected, `\c <name>` where `<name>` is a plain word (no URL
+punctuation) reconnects to that **database** on the current server — the
+psql-style way to switch databases, which for PostgreSQL-family servers is
+the only way, since the wire protocol requires a database at connect time.
+`opengauss://` URLs without a database default to the built-in `postgres`
+database instead of the login user's own (which typically does not exist).
+`\conninfo` masks stored passwords when displaying the connection string.
 
 Usql-managed connections are persisted to
 `$HOME/.config/usql/connections.yaml` (or the platform equivalent) in the same
@@ -1395,6 +1406,25 @@ interested in helping to make `usql`'s completion better, see [the section
 below on contributing][contributing].
 
 Command completion can be canceled with `<Control-C>`.
+
+On an interactive terminal, the candidate menu also opens **while typing** —
+an input-method-style list below the prompt, refreshed on every keystroke,
+display-only (nothing is inserted until you accept it with `<Tab>`, the
+arrow keys, or `<Enter>` in the menu). Candidates are ranked with prefix
+matches first, and table candidates are shown fully qualified as
+`schema.table`, so similarly named objects are easy to tell apart:
+
+```sh
+pg:postgres@=> select * from pu
+   public.film   public.film_view   public
+```
+
+Completion metadata is cached for a minute per session, and the cache is
+dropped when a statement changes the session scope (`USE` on MySQL-family
+servers, `SET search_path` on PostgreSQL-family servers, `ALTER SESSION SET
+CURRENT_SCHEMA` on Oracle-family servers), so the candidate list always
+reflects the current database/schema. Slow catalog sources (e.g. OceanBase)
+are queried off the input loop in the background, so typing never blocks.
 
 #### Time Formatting
 

@@ -68,6 +68,10 @@ usql 'oboracle://sys@oratest:P4ssw0rd@127.0.0.1:2881/'
 - The username is **`user@tenant`**. Use the tenant's actual user (for a
   freshly created Oracle tenant this is often `sys`).
 - Do **not** add a `#cluster` suffix for direct observer connections.
+- Switch schema (not tenant) with `ALTER SESSION SET CURRENT_SCHEMA = <schema>`;
+  completion follows the session's current schema. Note that a login user's
+  own objects are excluded from `\d`-style listings when connected as a
+  system user (`SYS`), since system schemas are filtered out.
 - Verify:
 
 ```sh
@@ -85,7 +89,28 @@ usql 'opengauss://user:P4ssw0rd@127.0.0.1:5432/postgres'
 ```
 
 - Supported parameters match `lib/pq`: `host`, `port`, `user`, `password`,
-  `dbname`, `sslmode`, etc. (either URL form or `key=value` DSN).
+  `dbname`, `sslmode`, etc. (either URL form or `key=value` DSN). In a URL,
+  escape `#` as `%23` and `$` as `%24` when they appear in the password.
+- **Database defaults to `postgres`.** The PostgreSQL wire protocol requires
+  a database at connect time, and libpq would default to the login user's
+  own database — which usually does not exist (`database "ogadmin" does not
+  exist`). Omitting the database connects to the built-in `postgres`
+  database instead:
+
+  ```sh
+  usql 'opengauss://user:P4ssw0rd@127.0.0.1:5432'
+  ```
+
+- **Switch databases with `\c <dbname>`** after connecting (the psql-style
+  shortcut; it reconnects to the named database on the same server, reusing
+  user/host/port/password). This is the only way to change databases on
+  PostgreSQL-family servers, including the compat-mode databases:
+
+  ```sh
+  og:ogadmin@127.0.0.1/postgres=> \c og_ora
+  og:ogadmin@127.0.0.1/og_ora=>
+  ```
+
 - Verify:
 
 ```sh
@@ -133,11 +158,10 @@ In the form, fill:
   contain `@` and is stored and injected correctly
 - **hostname / port / database / parameters / password** — as usual
 
-Then connect by name:
-
-```sh
-(not connected)=> \c ob_oracle
-```
+Then connect by name — either `\c ob_oracle`, or the one-step
+`\conns ob_oracle` / `\conns <row number>` (opens the stored connection
+without entering the manager). Inside the manager, `c <name|#>` does the
+same.
 
 Stored connections live in `connections.yaml` (no passwords) with passwords in
 the OS keyring, or in a `0600`-permission `secrets.json` fallback file. Both
@@ -153,5 +177,22 @@ Connecting from a command-line DSN also **saves** it automatically: pass
 `--name <name>` to choose the stored name, otherwise a default identifier is
 derived from `scheme_user_host_port_dbname` (database optional). The URL's
 password is kept in the secret store, never in `connections.yaml`.
+
+## Completion notes for these databases
+
+- The candidate menu opens **while typing** (input-method style,
+  display-only; `<Tab>` or `<Enter>` accepts). Table candidates are shown
+  fully qualified as `schema.table`, so similarly named objects are easy to
+  tell apart; column candidates follow aliases (`f.` lists that table's
+  columns).
+- The candidate list respects the session scope: after `USE db` (OceanBase
+  MySQL tenants), `SET search_path` (openGauss/PostgreSQL) or `ALTER SESSION
+  SET CURRENT_SCHEMA` (OceanBase Oracle tenants) the scope cache is dropped
+  automatically.
+- Catalog metadata is cached for one minute per session; OceanBase
+  dictionary queries are slow on a cold cache (up to ~10s), but run in the
+  background — typing never blocks, and every later keystroke is instant.
+- `\conninfo` masks the stored password when displaying the connection
+  string.
 
 [conns]: https://github.com/xo/usql#managing-named-connections-conns

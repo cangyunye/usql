@@ -114,7 +114,7 @@ func NewDefaultCompleter(opts ...Option) rline.Completer {
 	c := completer{
 		// an empty struct satisfies the metadata.Reader interface, because it is actually empty
 		reader:           struct{}{},
-		logger:           log.New(os.Stdout, "ERROR: ", log.LstdFlags),
+		logger:           log.New(os.Stderr, "ERROR: ", log.LstdFlags),
 		sqlStartCommands: CommonSqlStartCommands,
 		// TODO do we need to add built-in functions like, COALESCE, CAST, NULLIF, CONCAT etc?
 		sqlCommands: CommonSqlCommands,
@@ -274,6 +274,10 @@ type completer struct {
 	beforeComplete    CompleteFunc
 	// cache is the metadata query cache installed by WithContextCompletion.
 	cache *cachedReader
+	// snap is the connect-time catalog snapshot installed by
+	// WithContextCompletion, serving the hot table/function/sequence/schema
+	// candidate queries from memory.
+	snap *snapshotReader
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context

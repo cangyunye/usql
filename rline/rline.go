@@ -168,7 +168,8 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 	}
 	// transcode console output to the terminal character set, when the
 	// locale requests a non-UTF-8 encoding (e.g. zh_CN.GBK); file and pipe
-	// output (-o) is left as UTF-8
+	// output (-o) is left as UTF-8. Console INPUT decodes with the input
+	// code page (the Windows console input CP, or the POSIX locale).
 	var enc encoding.Encoding
 	if out == "" {
 		if enc = charset.OutputEncoding(); enc != nil {
@@ -176,10 +177,19 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 			stderr = newEncodedWriter(stderr, enc)
 		}
 	}
+	inEnc := enc
+	if out == "" {
+		if e := charset.ConsoleInputEncoding(); e != nil {
+			inEnc = e
+		}
+	}
 	// the bubbletea input engine (USQL_INPUT=tui) serves interactive
 	// sessions; non-interactive input is line-at-a-time either way
 	if inputMode(interactive, forceNonInteractive) {
-		return newTUI(charset.ConsoleDecoder(stdin, enc), stdout, stderr, histfile), nil
+		// the console file backs terminal queries (cursor position); the
+		// transcode wrapper hides it
+		cons, _ := stdin.(*os.File)
+		return newTUI(charset.ConsoleDecoder(stdin, inEnc), stdout, stderr, histfile, cons), nil
 	}
 	if interactive {
 		// wrap it with cancelable stdin

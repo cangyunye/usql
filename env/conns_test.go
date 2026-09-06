@@ -206,3 +206,23 @@ func TestDumpConnMasksPasswords(t *testing.T) {
 		t.Fatalf("DumpConn missing plain entry: %s", out)
 	}
 }
+
+func TestBuildConnURLFilePaths(t *testing.T) {
+	// file-style databases: path without a hostname must produce an empty
+	// authority (scheme:///path), whose generators accept the URL
+	urlstr, err := buildConnURL(map[string]any{"protocol": "sqlite", "path": "/tmp/x.db"})
+	if err != nil {
+		t.Fatalf("sqlite path: %v", err)
+	}
+	if urlstr != "sqlite:///tmp/x.db" {
+		t.Fatalf("sqlite path url: %q", urlstr)
+	}
+	// server-style databases keep the host form
+	urlstr, err = buildConnURL(map[string]any{"protocol": "postgres", "hostname": "db", "port": "5432", "database": "mydb"})
+	if err != nil {
+		t.Fatalf("postgres: %v", err)
+	}
+	if urlstr != "postgres://db:5432/mydb" {
+		t.Fatalf("postgres url: %q", urlstr)
+	}
+}

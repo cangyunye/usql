@@ -81,13 +81,40 @@ func ToUTF8(s string, enc encoding.Encoding) string {
 // (decoded as GBK), and GB18030. Everything else (including UTF-8, C, and
 // POSIX) yields nil.
 func OutputEncoding() encoding.Encoding {
-	switch localeCharset() {
+	return encodingForCharset(consoleCharset(consoleOutputCharset(), localeCharset()))
+}
+
+// ConsoleInputEncoding reports the encoding used by console INPUT (the
+// Windows input code page, or the POSIX locale elsewhere), for decoding
+// typed bytes to UTF-8. It falls back to the output encoding, whose POSIX
+// detection covers both directions.
+func ConsoleInputEncoding() encoding.Encoding {
+	if enc := encodingForCharset(consoleInputCharset()); enc != nil {
+		return enc
+	}
+	return OutputEncoding()
+}
+
+// encodingForCharset maps a charset name to its encoding (nil for UTF-8 or
+// unknown names).
+func encodingForCharset(charset string) encoding.Encoding {
+	switch charset {
 	case "gbk", "gb2312", "euccn", "cp936":
 		return simplifiedchinese.GBK
 	case "gb18030":
 		return simplifiedchinese.GB18030
 	}
 	return nil
+}
+
+// consoleCharset prefers the Windows console code page over the POSIX
+// locale: conhost reports the active code pages directly, while the locale
+// environment is typically unset on Windows.
+func consoleCharset(console, locale string) string {
+	if console != "" {
+		return console
+	}
+	return locale
 }
 
 // ConsoleEncodingName returns a human-readable name for the console encoding
@@ -223,7 +250,8 @@ func localeCharset() string {
 }
 
 func applyRunewidthFix() {
-	if localeCharset() == "gb18030" {
+	switch consoleCharset(consoleOutputCharset(), localeCharset()) {
+	case "gb18030":
 		runewidth.DefaultCondition.EastAsianWidth = true
 	}
 }

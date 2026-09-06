@@ -15,6 +15,8 @@ type editor struct {
 	killRing [][]rune
 	lastYank bool // previous command was a yank (yank-pop)
 	lastKill bool // previous command was a kill (ring append)
+	yankPos  int  // kill ring entry the last yank took
+	yankLen  int  // runes the last yank inserted
 }
 
 // insertRunes inserts rs at the cursor.
@@ -176,14 +178,107 @@ func (e *editor) killPrevWord() { e.kill(e.wordStart(e.idx)) }
 // killNextWord kills the word after the cursor (Alt-D).
 func (e *editor) killNextWord() { e.kill(e.wordEnd(e.idx)) }
 
+// transpose swaps the two runes before the cursor, moving the cursor after
+// the swapped pair (Ctrl-T). At the end of the line the last two runes
+// swap; at the start it is a no-op.
+func (e *editor) transpose() bool {
+	if e.idx < 1 || len(e.buf) < 2 {
+		return false
+	}
+	i := e.idx
+	if i == len(e.buf) {
+		i--
+	}
+	e.buf[i-1], e.buf[i] = e.buf[i], e.buf[i-1]
+	e.idx = i + 1
+	e.lastKill, e.lastYank = false, false
+	return true
+}
+
+// transposeWords swaps the word before the cursor with the word before it,
+// leaving the cursor after the swapped pair (Alt-T).
+func (e *editor) transposeWords() bool {
+	// the word before the cursor, skipping trailing whitespace
+	end := e.idx
+	for end > 0 && unicode.IsSpace(e.buf[end-1]) {
+		end--
+	}
+	if end == 0 {
+		return false
+	}
+	start := e.wordStart(end)
+	if start == end {
+		return false
+	}
+	// the word before that, and the whitespace between the two
+	prevEnd := start
+	for prevEnd > 0 && unicode.IsSpace(e.buf[prevEnd-1]) {
+		prevEnd--
+	}
+	if prevEnd == 0 {
+		return false
+	}
+	prevStart := e.wordStart(prevEnd)
+	if prevStart == prevEnd {
+		return false
+	}
+	w1 := append([]rune(nil), e.buf[start:end]...)
+	w0 := append([]rune(nil), e.buf[prevStart:prevEnd]...)
+	gap := append([]rune(nil), e.buf[prevEnd:start]...)
+	var b []rune
+	b = append(b, e.buf[:prevStart]...)
+	b = append(b, w1...)
+	b = append(b, gap...)
+	b = append(b, w0...)
+	b = append(b, e.buf[end:]...)
+	e.buf = b
+	e.idx = prevStart + len(w1) + len(gap) + len(w0)
+	e.lastKill, e.lastYank = false, false
+	return true
+}
+
 // yank pastes the front kill ring entry at the cursor (Ctrl-Y).
 func (e *editor) yank() bool {
 	if len(e.killRing) == 0 {
 		return false
 	}
-	e.insertRunes(e.killRing[len(e.killRing)-1])
+	return e.yankAt(len(e.killRing) - 1)
+}
+
+// yankAt pastes kill ring entry i at the cursor, recording the paste for
+// yank-pop.
+func (e *editor) yankAt(i int) bool {
+	e.insertRunes(e.killRing[i])
 	e.lastYank, e.lastKill = true, false
+	e.yankPos, e.yankLen = i, len(e.killRing[i])
 	return true
+}
+
+// yankN pastes the n-th most recent kill ring entry (1 = front; the Ctrl-Y
+// numeric prefix argument).
+func (e *editor) yankN(n int) bool {
+	if len(e.killRing) == 0 {
+		return false
+	}
+	if n > len(e.killRing) {
+		n = len(e.killRing)
+	}
+	return e.yankAt(len(e.killRing) - n)
+}
+
+// yankPop replaces the text pasted by the preceding yank with the previous
+// (older) kill ring entry, wrapping around (Alt-Y).
+func (e *editor) yankPop() bool {
+	if !e.lastYank || len(e.killRing) < 2 {
+		return false
+	}
+	i := e.yankPos - 1
+	if i < 0 {
+		i = len(e.killRing) - 1
+	}
+	e.buf = append(e.buf[:e.idx-e.yankLen], e.buf[e.idx:]...)
+	e.idx -= e.yankLen
+	return e.yankAt(i)
 }
 
 // deletePrevWord deletes the word before the cursor without saving it to the

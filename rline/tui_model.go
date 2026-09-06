@@ -3,6 +3,8 @@ package rline
 import (
 	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/xo/usql/uitheme"
@@ -36,20 +38,37 @@ type lineModel struct {
 	draft   []rune
 
 	// candidate menu
-	menu    [][]rune // candidate suffixes/full words
-	menuLen int      // replace length for replace-style candidates
-	menuRep bool     // replace semantics
-	menuSel int
-	menuTop int // window offset
-	menuMax int // window height (terminal height bounded)
+	menu      [][]rune // candidate suffixes/full words
+	menuLen   int      // replace length for replace-style candidates
+	menuRep   bool     // replace semantics
+	menuSel   int
+	menuTop   int  // window offset
+	menuMax   int  // window height (terminal height bounded)
+	menuAbove bool // render the menu above the input line
+	topRow    int  // terminal row the read started on (-1 unknown)
 
 	// ghost suggestion (dim suffix shown at end of line)
 	ghost []rune
 
-	// incremental search
-	searching bool
-	query     string
-	preSearch []rune // buffer to restore on Ctrl-G
+	// incremental search (Ctrl-R reverse, Ctrl-S forward)
+	searching  bool
+	searchFwd  bool   // search direction
+	searchFail bool   // the last query found no match
+	searchFrom int    // history position the search started from
+	query      string // search query
+	preSearch  []rune // buffer to restore on Ctrl-G
+	preHist    int    // history position to restore on Ctrl-G
+	preHas     bool   // history position validity to restore on Ctrl-G
+
+	// emacs numeric prefix argument (Alt-<digits>); consumed by the next
+	// command that understands it
+	arg int
+
+	// output filter (syntax highlight) cache; see highlight in tui_hl.go
+	hlIn   string    // buffer content the cache was built from
+	hlOut  string    // filtered (highlighted) form of hlIn
+	hlAt   time.Time // when hlIn/hlOut were computed
+	hlPend bool      // a trailing re-highlight is scheduled
 
 	// result plumbing
 	done        bool
@@ -57,13 +76,17 @@ type lineModel struct {
 	waiting     bool // an async completion is pending (kick armed)
 }
 
-// newLineModel builds the model for one read.
-func newLineModel(t *tuiRline, prompt string) *lineModel {
+// newLineModel builds the model for one read. topRow is the terminal row
+// the read starts on (-1 when unknown).
+func newLineModel(t *tuiRline, prompt string, topRow int) *lineModel {
 	return &lineModel{
 		t:       t,
 		prom:    prompt,
 		histPos: len(t.hist.lines),
 		menuMax: menuHeight,
+		menuSel: -1,
+		menuTop: 0,
+		topRow:  topRow,
 	}
 }
 
@@ -83,12 +106,7 @@ func (m *lineModel) waitKick() tea.Cmd {
 func (m *lineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		if h := msg.Height - 2; h < m.menuMax {
-			if h < 1 {
-				h = 1
-			}
-			m.menuMax = h
-		}
+		m.resize(msg.Height)
 		return m, nil
 
 	case kickMsg:
@@ -98,8 +116,17 @@ func (m *lineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitKick()
 
+	case hlMsg:
+		// trailing re-highlight after the debounce window
+		m.hlPend = false
+		if m.t.outFn != nil && string(m.ed.buf) != m.hlIn {
+			m.computeHL()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		mod, cmd := m.handleKey(msg)
+		return mod, tea.Batch(cmd, m.refreshHighlight())
 	}
 	return m, nil
 }
@@ -152,37 +179,73 @@ func (m *lineModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleSearchKey processes keys during Ctrl-R search.
+// handleSearchKey processes keys during Ctrl-R / Ctrl-S search.
 func (m *lineModel) handleSearchKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "ctrl+r":
-		m.doSearch()
+		m.searchFwd = false
+		m.doSearch(false)
+	case "ctrl+s":
+		m.searchFwd = true
+		m.doSearch(false)
 	case "ctrl+g", "esc":
-		m.searching = false
+		m.searching, m.searchFail = false, false
+		m.histPos, m.hasHist = m.preHist, m.preHas
 		m.ed.reset(m.preSearch)
 	case "backspace":
 		if m.query != "" {
-			m.query = m.query[:len(m.query)-1]
-			m.doSearch()
+			if _, size := utf8.DecodeLastRuneInString(m.query); size > 0 {
+				m.query = m.query[:len(m.query)-size]
+			}
+			m.doSearch(true)
 		}
 	case "enter", "ctrl+j":
-		m.searching = false
+		m.searching, m.searchFail = false, false
 	default:
 		if rs := msg.Runes; len(rs) > 0 && !msg.Alt {
 			m.query += string(rs)
-			m.doSearch()
+			m.doSearch(true)
 		}
 	}
 	return m, nil
 }
 
-// doSearch scans history backwards for the query.
-func (m *lineModel) doSearch() {
-	pos := m.histPos
+// startSearch enters search mode in the given direction.
+func (m *lineModel) startSearch(fwd bool) {
+	m.searching, m.searchFwd = true, fwd
+	m.query, m.searchFail = "", false
+	m.preSearch = append([]rune(nil), m.ed.buf...)
+	m.preHist, m.preHas = m.histPos, m.hasHist
+	m.searchFrom = m.histPos
 	if !m.hasHist {
-		pos = len(m.t.hist.lines)
+		m.searchFrom = len(m.t.hist.lines)
 	}
-	if i, line, ok := m.t.hist.search(m.query, pos+1); ok {
+}
+
+// doSearch finds the next match for the query in the search direction. A
+// query edit restarts the scan from where search mode began; a direction
+// key (Ctrl-R/Ctrl-S) steps past the current match.
+func (m *lineModel) doSearch(edit bool) {
+	start := m.searchFrom
+	if !edit && m.hasHist {
+		start = m.histPos
+	}
+	switch {
+	case m.searchFwd && edit:
+		start-- // fwdSearch scans start+1 upwards; an edit restarts at the origin itself
+	case edit:
+		start++ // search scans start-1 downwards; an edit restarts at the origin itself
+	}
+	var i int
+	var line string
+	var ok bool
+	if m.searchFwd {
+		i, line, ok = m.t.hist.fwdSearch(m.query, start)
+	} else {
+		i, line, ok = m.t.hist.search(m.query, start)
+	}
+	m.searchFail = !ok && m.query != ""
+	if ok {
 		m.histPos, m.hasHist = i, true
 		m.ed.reset([]rune(line))
 	}
@@ -228,10 +291,25 @@ func (m *lineModel) handleMenuKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	return m, nil
 }
 
-// handleEditKey processes keys in normal editing mode.
+// handleEditKey processes keys in normal editing mode. The emacs numeric
+// prefix argument (m.arg) is consumed by the next key that understands it;
+// any other key discards it.
 func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	ed := &m.ed
+	n := m.arg
+	m.arg = 0
+	if n <= 0 {
+		n = 1
+	}
 	switch key {
+	case "alt+0", "alt+1", "alt+2", "alt+3", "alt+4",
+		"alt+5", "alt+6", "alt+7", "alt+8", "alt+9":
+		// numeric prefix argument (ESC-<digits>); consumed by the next
+		// command
+		if m.arg < 1000 {
+			m.arg = m.arg*10 + int(key[4]-'0')
+		}
+		return m, nil
 	case "enter", "ctrl+j":
 		m.done = true
 		m.ghost = nil
@@ -239,13 +317,16 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		// clear the ghost, no-op otherwise
 		m.ghost = nil
 	case "backspace":
-		ed.backspace()
+		for k := 0; k < n && ed.backspace(); k++ {
+		}
 		m.afterEdit(false)
 	case "delete":
-		ed.delete()
+		for k := 0; k < n && ed.delete(); k++ {
+		}
 		m.afterEdit(false)
 	case "left", "ctrl+b":
-		ed.moveLeft()
+		for k := 0; k < n && ed.moveLeft(); k++ {
+		}
 		m.ghost = nil
 	case "right":
 		if ed.atEnd() && len(m.ghost) > 0 {
@@ -254,7 +335,8 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 			m.ghost = nil
 			m.afterEdit(false)
 		} else {
-			ed.moveRight()
+			for k := 0; k < n && ed.moveRight(); k++ {
+			}
 			m.ghost = nil
 		}
 	case "ctrl+right", "alt+f":
@@ -270,11 +352,13 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 			ed.insertRunes(m.ghost[:n])
 			m.afterEdit(false)
 		} else {
-			ed.moveWordRight()
+			for k := 0; k < n && ed.moveWordRight(); k++ {
+			}
 			m.ghost = nil
 		}
 	case "alt+b", "ctrl+left":
-		ed.moveWordLeft()
+		for k := 0; k < n && ed.moveWordLeft(); k++ {
+		}
 		m.ghost = nil
 	case "ctrl+a", "home":
 		ed.moveStart()
@@ -289,13 +373,33 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		ed.killToStart()
 		m.afterEdit(false)
 	case "ctrl+w", "alt+backspace":
-		ed.killPrevWord()
+		for k := 0; k < n; k++ {
+			ed.killPrevWord()
+		}
 		m.afterEdit(false)
 	case "alt+d":
-		ed.killNextWord()
+		for k := 0; k < n; k++ {
+			ed.killNextWord()
+		}
 		m.afterEdit(false)
 	case "ctrl+y":
-		ed.yank()
+		if !ed.yankN(n) {
+			// no entry at that depth: fall back to the front one
+			ed.yank()
+		}
+		m.afterEdit(false)
+	case "alt+y":
+		ed.yankPop()
+		m.afterEdit(false)
+	case "ctrl+t":
+		for k := 0; k < n; k++ {
+			ed.transpose()
+		}
+		m.afterEdit(false)
+	case "alt+t":
+		for k := 0; k < n; k++ {
+			ed.transposeWords()
+		}
 		m.afterEdit(false)
 	case "tab":
 		m.openMenu()
@@ -305,9 +409,9 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	case "down", "ctrl+n":
 		m.historyNext()
 	case "ctrl+r":
-		m.searching = true
-		m.query = ""
-		m.preSearch = append([]rune(nil), ed.buf...)
+		m.startSearch(false)
+	case "ctrl+s":
+		m.startSearch(true)
 	default:
 		if rs := msg.Runes; len(rs) > 0 {
 			ed.insertRunes(rs)
@@ -491,16 +595,59 @@ func (m *lineModel) acceptCandidate(i int) {
 	m.afterEdit(false)
 }
 
+// minBelowRows is the smallest candidate list that is worth opening below
+// the input line; with less room the menu pops above it instead.
+const minBelowRows = 5
+
+// resize recomputes the candidate menu placement for a terminal height: the
+// menu opens below the input line while several rows remain on screen,
+// otherwise above it (IME-style) — the terminal scroll provides the room.
+// Without a known cursor row the legacy top-anchored shrink applies.
+func (m *lineModel) resize(h int) {
+	switch {
+	case m.topRow < 0 || h < minBelowRows+2:
+		// unknown cursor row: assume the read starts near the top
+		m.menuAbove = false
+		if hh := h - 2; hh < m.menuMax {
+			if hh < 1 {
+				hh = 1
+			}
+			m.menuMax = hh
+		}
+	case h-m.topRow-1 >= minBelowRows:
+		// enough room below: open the menu under the input line
+		m.menuAbove = false
+		if below := h - m.topRow - 1; below < m.menuMax {
+			m.menuMax = below
+		}
+	default:
+		// near the bottom: pop the menu above the input line
+		m.menuAbove = true
+		m.menuMax = menuHeight
+		if hh := h - 1; hh < m.menuMax {
+			m.menuMax = hh
+		}
+	}
+	if m.menu != nil {
+		m.clampMenuSel()
+	}
+}
+
 // View renders the input line, candidate menu, and search prompt.
 func (m *lineModel) View() string {
 	var b strings.Builder
-	if m.searching {
-		b.WriteString(m.searchView())
-	} else {
-		b.WriteString(m.lineView())
-	}
-	if m.menu != nil {
+	switch {
+	case m.menu != nil && m.menuAbove && !m.searching:
+		// IME-style: the popup takes the rows above the input line
 		b.WriteString(m.menuView())
+		b.WriteString(m.lineView())
+	case m.searching:
+		b.WriteString(m.searchView())
+	default:
+		b.WriteString(m.lineView())
+		if m.menu != nil {
+			b.WriteString(m.menuView())
+		}
 	}
 	if m.interrupted {
 		b.WriteString("^C")
@@ -518,24 +665,23 @@ func (m *lineModel) lineView() string {
 	buf := m.ed.buf
 	idx := m.ed.idx
 	t := uitheme.Current()
+	// the debounced output-filter (syntax highlight) render of the line
+	hi := m.highlight(string(buf))
 	// when finalizing, render without the cursor block
 	if m.done {
-		b.WriteString(string(buf))
+		b.WriteString(hi)
 		return b.String()
 	}
-	before := string(buf[:idx])
 	switch {
 	case idx < len(buf):
-		b.WriteString(before)
-		b.WriteString(t.Selected.Render(string(buf[idx])))
-		b.WriteString(string(buf[idx+1:]))
+		b.WriteString(m.lineStyled(hi, buf, idx))
 	case len(m.ghost) > 0 && uitheme.Enabled():
 		// block cursor over the first ghost rune, rest dim
-		b.WriteString(before)
+		b.WriteString(hi)
 		b.WriteString(t.Selected.Render(string(m.ghost[0])))
 		b.WriteString(t.Dim.Render(string(m.ghost[1:])))
 	default:
-		b.WriteString(before)
+		b.WriteString(hi)
 		b.WriteString(t.Selected.Render(" "))
 	}
 	return b.String()
@@ -544,13 +690,16 @@ func (m *lineModel) lineView() string {
 // searchView renders the incremental search prompt.
 func (m *lineModel) searchView() string {
 	t := uitheme.Current()
-	mark := t.Warn.Render("(reverse-i-search)`")
-	markEnd := t.Warn.Render("': ")
-	q := m.query
-	if m.query == "" {
-		mark = t.Dim.Render("(failed reverse-i-search)`")
+	dir := "reverse-i-search"
+	if m.searchFwd {
+		dir = "forward-i-search"
 	}
-	return mark + q + markEnd + string(m.ed.buf)
+	mark := t.Warn.Render("(" + dir + ")`")
+	markEnd := t.Warn.Render("': ")
+	if m.searchFail {
+		mark = t.Dim.Render("(failed " + dir + ")`")
+	}
+	return mark + m.query + markEnd + string(m.ed.buf)
 }
 
 // menuView renders the vertical candidate menu below the input line.

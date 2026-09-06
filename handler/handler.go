@@ -887,7 +887,11 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 				// for databases with slow catalogs (e.g. OceanBase), so
 				// raise it; applied after the defaults, so it wins
 				opts := append(readerOpts(), metadata.WithTimeout(10*time.Second))
-				c := drivers.NewCompleter(ctx, h.u, h.db, opts, completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion())
+				c := drivers.NewCompleter(ctx, h.u, h.db, opts,
+					// route the completer's diagnostic logging through the
+					// IO's stderr, so it is buffered during TUI reads
+					completer.WithLogger(log.New(h.l.Stderr(), "ERROR: ", log.LstdFlags)),
+					completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion())
 				// NewLive adds the typing-time fast path on top
 				live := completer.NewLive(c)
 				if inv, ok := live.(interface{ Invalidate() }); ok {

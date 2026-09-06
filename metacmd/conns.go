@@ -50,8 +50,9 @@ var fileScheme = map[string]bool{
 // form's encoding field.
 const connsEncDefault = "utf-8"
 
-// connTable renders the named-connection list as a bordered table.
-func connTable(names []string) string {
+// connTable renders the named-connection list as a bordered table; selected
+// (-1 when none) highlights the cursor row for the TUI modal.
+func connTable(names []string, selected int) string {
 	headers := []string{"#", "name", "source", "driver", "user", "host", "port", "database", "encoding", "password"}
 	rows := make([][]string, 0, len(names))
 	for i, name := range names {
@@ -95,6 +96,8 @@ func connTable(names []string) string {
 			switch {
 			case row == 0:
 				return style.Bold(true)
+			case row == selected+1:
+				return style.Bold(true).Background(lipgloss.Color("236"))
 			case row%2 == 0:
 				return style.Background(lipgloss.Color("235"))
 			default:
@@ -104,12 +107,17 @@ func connTable(names []string) string {
 	return t.Render()
 }
 
-// connsManage runs the interactive connection manager loop.
+// connsManage runs the interactive connection manager loop. Under the TUI
+// input engine it is a self-contained bubbletea modal; readline mode keeps
+// the line-oriented loop below.
 func connsManage(h Handler) error {
+	if t, ok := h.IO().(interface{ IsTUI() bool }); ok && t.IsTUI() {
+		return connsModal(h)
+	}
 	stdout, stderr := h.IO().Stdout(), h.IO().Stderr()
 	for {
 		names := slices.Sorted(maps.Keys(env.Vars().Conn()))
-		fmt.Fprintln(stdout, connTable(names))
+		fmt.Fprintln(stdout, connTable(names, -1))
 		if len(names) == 0 {
 			fmt.Fprintln(stdout, "  (no named connections yet; type `a` to add one)")
 		}
@@ -308,9 +316,30 @@ func connsForm(h Handler, name string, editing bool) error {
 		pw = oldPw
 	}
 
-	// assemble and save
+	// encoding: client-side decoding of database output; validated by
+	// saveConnFields so a typo doesn't fail later at connect time
+	encDef, _ := env.Vars().GetConnEncoding(name)
+	enc, err := askField(h, "encoding (utf-8, gbk, gb2312, gb18030)", encDef, false)
+	if err != nil {
+		return err
+	}
+	vals["encoding"] = strings.ToLower(strings.TrimSpace(enc))
+	if err := saveConnFields(name, proto, vals, pw); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdout, "saved connection", name)
+	return nil
+}
+
+// saveConnFields assembles and stores a named connection from form values:
+// vals carries username, hostname, port, database, parameters, and encoding;
+// empty values are skipped.
+func saveConnFields(name, proto string, vals map[string]string, pw string) error {
 	components := map[string]any{"protocol": proto}
 	for k, v := range vals {
+		if k == "encoding" || v == "" {
+			continue
+		}
 		components[k] = v
 	}
 	if db := vals["database"]; db != "" {
@@ -330,15 +359,7 @@ func connsForm(h Handler, name string, editing bool) error {
 			components["database"] = db
 		}
 	}
-
-	// encoding: client-side decoding of database output; validated here so a
-	// typo doesn't fail later at connect time
-	encDef, _ := env.Vars().GetConnEncoding(name)
-	enc, err := askField(h, "encoding (utf-8, gbk, gb2312, gb18030)", encDef, false)
-	if err != nil {
-		return err
-	}
-	enc = strings.ToLower(strings.TrimSpace(enc))
+	enc := vals["encoding"]
 	if enc == connsEncDefault {
 		enc = ""
 	}
@@ -348,11 +369,7 @@ func connsForm(h Handler, name string, editing bool) error {
 		}
 		components["encoding"] = enc
 	}
-	if err := env.SaveConn(name, components, pw); err != nil {
-		return err
-	}
-	fmt.Fprintln(stdout, "saved connection", name)
-	return nil
+	return env.SaveConn(name, components, pw)
 }
 
 // askProtocol offers the compiled-in drivers and returns a validated protocol

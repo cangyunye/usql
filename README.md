@@ -515,6 +515,15 @@ stored password. In non-interactive or piped runs `\conns` only prints the
 table. All input goes through the normal line editor, so the manager defines
 no global shortcuts and nothing conflicts with readline bindings.
 
+Under the [bubbletea input engine][input-engine] (`USQL_INPUT=tui`) the
+manager runs as a **full-screen modal** (its own view, restored on exit):
+`<Up>`/`<Down>` or `<j>`/`<k>` highlight a row, `<Enter>`/`<row number>`
+edit it, `<a>` adds, `<c>` connects to the highlighted row, `<d>` deletes
+after a `y`/`<n>` confirmation, and `<q>`/`<Esc>` leaves. The form navigates
+with `<Tab>`/`<Up>`/`<Down>` (with an in-field editor), `<Enter>` on the
+last field saves, and `<Esc>` cancels. Connecting switches the session to
+that connection; on failure the manager reopens.
+
 When already connected, `\c <name>` where `<name>` is a plain word (no URL
 punctuation) reconnects to that **database** on the current server — the
 psql-style way to switch databases, which for PostgreSQL-family servers is
@@ -660,6 +669,13 @@ taken from `LC_ALL`, `LC_CTYPE`, or `LANG` (e.g. `zh_CN.GBK`, `zh_CN.GB2312`,
 `zh_CN.GB18030`, `zh_CN.UTF-8`). Under a `GBK`/`GB2312` locale, characters not
 representable in GBK are rendered as `?`. Output redirected to files or pipes
 is always UTF-8.
+
+On Windows, the console code pages decide the encoding: output follows
+`GetConsoleOutputCP` and typed input follows `GetConsoleCP` — on zh-CN
+systems both default to cp936 (GBK), and cp54936 selects GB18030 — so Chinese
+text round-trips through queries, prompts, and the `\conns` form on a
+default conhost. When either code page is UTF-8 (65001) or usql runs
+redirected, no transcoding is applied.
 
 Console **input** is decoded from the terminal's character set as well when
 using the [bubbletea input engine][input-engine] (`USQL_INPUT=tui`): on a
@@ -1144,6 +1160,16 @@ Runtime behavior, such as [enabling or disabling syntax
 highlighting][highlighting] can be modified through special variables like
 [`SYNTAX_HL`][highlighting].
 
+`THEME` switches the interactive color theme used for tables, prompts,
+errors, and the input engines (`default`, `warm`, or `plain`):
+
+```sh
+pg:postgres@=> \set THEME warm
+```
+
+The default `PROMPT1` wraps the prompt in the theme's accent color (via the
+`%27` escape mechanism); set `PROMPT1` explicitly to override it.
+
 Use the `\? variables` [command][commands] to display variable help information
 and to list special variables recognized by `usql`:
 
@@ -1447,10 +1473,14 @@ $ USQL_INPUT=tui usql pg://
 $ export USQL_INPUT=tui
 ```
 
-In TUI mode the completion candidates are shown as a **single-column menu
-below the prompt** (like a CJK input method), displayed as full words with
-the selection highlighted, scrollable with `<PgUp>`/`<PgDn>`, and directly
-selectable with `<Alt>`+`<1-9>`:
+In TUI mode the input line is echoed with **chroma syntax highlighting**
+(the same `SYNTAX_HL` styling used for output, including multi-line
+statement context), re-highlighted as you type. The completion candidates
+are shown as a **single-column menu below the prompt** (like a CJK input
+method), displayed as full words with the selection highlighted, scrollable
+with `<PgUp>`/`<PgDn>`, and directly selectable with `<Alt>`+`<1-9>`; when
+the screen has no room below the input line, the menu pops up **above**
+it, like an input-method candidate window:
 
 ```sh
 pg:postgres@=> select * from pu<Tab>
@@ -1468,11 +1498,18 @@ pg:postgres@=> select * from us█ers where ...
 ```
 
 - `<Right>` accepts the whole suggestion; `<Ctrl>`+`<Right>` accepts one word
-- `<Ctrl>`+`<R>` incremental history search; `<Enter>` accepts the match,
-  `<Ctrl>`+`<G>` cancels
+- `<Ctrl>`+`<R>` / `<Ctrl>`+`<S>` incremental history search (reverse and
+  forward); `<Enter>` accepts the match, `<Ctrl>`+`<G>` cancels
 - while the menu is open, `<Enter>`/`<Tab>` accept the selected candidate
   and never execute the line; `<Esc>` closes the menu
+- emacs editing: kill/yank with a ring (`<Ctrl>`+`<W>`, `<Ctrl>`+`<K>`,
+  `<Ctrl>`+`<U>`, `<Ctrl>`+`<Y>`, `<Alt>`+`<Y>` to cycle), transpositions
+  (`<Ctrl>`+`<T>`, `<Alt>`+`<T>`), and numeric prefix arguments
+  (`<Alt>`+`<3>` repeats the next command three times)
 - `<Ctrl>`+`<C>` cancels the line, `<Ctrl>`+`<D>` on an empty line exits
+
+Note: `<Ctrl>`+`<S>` is captured only while reading a line (the terminal is
+in raw mode); between lines the classic flow-control meaning applies.
 
 Non-interactive runs (`-c`, `-f`, piped input, `-o`) always use plain
 line-at-a-time input regardless of `USQL_INPUT`.

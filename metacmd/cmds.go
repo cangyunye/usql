@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -414,10 +415,27 @@ func Password(p *Params) error {
 func ConnectionInfo(p *Params) error {
 	s := text.NotConnected
 	if db, u := p.Handler.DB(), p.Handler.URL(); db != nil && u != nil {
-		s = fmt.Sprintf(text.ConnInfo, u.Driver, u.DSN)
+		s = fmt.Sprintf(text.ConnInfo, u.Driver, redactDSN(u.DSN))
 	}
 	fmt.Fprintln(p.Handler.IO().Stdout(), s)
 	return nil
+}
+
+// DSN password masking: key=value style DSNs, URL-style DSNs, and
+// go-sql-driver style "user[:tenant]:pass@tcp(host)/db" DSNs (the user may
+// itself contain "@", so the password runs to the last "@" before "tcp(").
+var (
+	dsnPasswordRE       = regexp.MustCompile(`(?i)(password|passwd|pwd)=([^;\s]*)`)
+	dsnURLPasswordRE    = regexp.MustCompile(`(://[^:/@\s]+):[^@\s]+@`)
+	dsnTCPUserRE        = regexp.MustCompile(`^(.+):(.+)@tcp\(`)
+	redactedPlaceholder = "xxxxx"
+)
+
+// redactDSN hides credentials before a connection string is displayed.
+func redactDSN(dsn string) string {
+	out := dsnPasswordRE.ReplaceAllString(dsn, `$1=`+redactedPlaceholder)
+	out = dsnURLPasswordRE.ReplaceAllString(out, `$1:`+redactedPlaceholder+`@`)
+	return dsnTCPUserRE.ReplaceAllString(out, `$1:`+redactedPlaceholder+`@tcp(`)
 }
 
 // Encoding is a Connection meta command (\encoding). Shows the client encoding

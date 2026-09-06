@@ -908,41 +908,10 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	return h.Open(ctx, dsn)
 }
 
+// connStrings returns the stored named connection names, used to complete
+// the argument of `\c`/`\conns`-style commands.
 func (h *Handler) connStrings() []string {
-	entries, err := passfile.Entries(h.user.HomeDir, text.PassfileName)
-	if err != nil {
-		// ignore the error as this is only used for completer
-		// and it'll be reported again when trying to force params before opening a conn
-		entries = nil
-	}
-	available := drivers.Available()
-	names := make([]string, 0, len(available)+len(entries))
-	for schema := range available {
-		_, aliases := dburl.SchemeDriverAndAliases(schema)
-		// TODO should we create all combinations of space, :, :// and +transport ?
-		names = append(names, schema)
-		names = append(names, aliases...)
-	}
-	for _, entry := range entries {
-		if entry.Protocol == "*" {
-			continue
-		}
-		user, host, port, dbname := "", "", "", ""
-		if entry.Username != "*" {
-			user = entry.Username + "@"
-			if entry.Host != "*" {
-				host = entry.Host
-				if entry.Port != "*" {
-					port = ":" + entry.Port
-				}
-				if entry.DBName != "*" {
-					dbname = "/" + entry.DBName
-				}
-			}
-		}
-		names = append(names, entry.Protocol+"://"+user+host+port+dbname)
-	}
-	return append(names, slices.Sorted(maps.Keys(env.Vars().Conn()))...)
+	return slices.Sorted(maps.Keys(env.Vars().Conn()))
 }
 
 // forceParams forces connection parameters on a database URL, adding any

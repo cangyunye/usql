@@ -183,6 +183,31 @@ func TestWithContextCompletion(t *testing.T) {
 			[]string{"values", "overriding"}, 1,
 		},
 		{
+			"values group hints all fields in written order",
+			"INSERT INTO film (id, name, release_year) VALUES (", 50,
+			[]string{"id", "name", "release_year"}, 0,
+		},
+		{
+			"values group hints remaining fields after first value",
+			"INSERT INTO film (id, name, release_year) VALUES (1, ", 53,
+			[]string{"name", "release_year"}, 0,
+		},
+		{
+			"values group skips string literal commas",
+			"INSERT INTO film (id, name, release_year) VALUES (1, 'x, y', ", 61,
+			[]string{"release_year"}, 0,
+		},
+		{
+			"values group without column list uses table order",
+			"INSERT INTO film VALUES (", 25,
+			[]string{"id", "name"}, 0,
+		},
+		{
+			"values group exhausted offers nothing",
+			"INSERT INTO film VALUES (1, 'a', ", 33,
+			nil, 0,
+		},
+		{
 			"insert into column list prefix",
 			"INSERT INTO film (na", 20,
 			[]string{"name"}, 2,

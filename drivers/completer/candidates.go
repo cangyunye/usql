@@ -118,9 +118,18 @@ func reconstructLine(previousWords []string, text []rune) []rune {
 // fuzzily — prefix matches first. It returns nil when the context does not
 // determine a candidate set, so callers can fall back to the heuristics.
 func (c completer) completeFromContext(ctx Context) [][]rune {
-	options, ok := c.contextOptions(ctx)
+	options, ok, ordered := c.contextOptions(ctx)
 	if !ok || len(options) == 0 {
 		return nil
+	}
+	if ordered {
+		// already in the order the user needs (e.g. VALUES field hints);
+		// fuzzy ranking would destroy it
+		res := make([][]rune, len(options))
+		for i, o := range options {
+			res[i] = []rune(o)
+		}
+		return res
 	}
 	return completeFuzzyFull(ctx.Qualifier+ctx.Object, options)
 }
@@ -130,6 +139,9 @@ func (c completer) completeFromContext(ctx Context) [][]rune {
 // context is inconclusive it returns ok=false, and the readline layer falls
 // back to Do (append-style heuristics).
 func (c *completer) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
+	if pos > len(line) {
+		pos = len(line)
+	}
 	var i int
 	for i = pos - 1; i > 0; i-- {
 		if strings.ContainsRune(WORD_BREAKS, line[i]) {
@@ -161,20 +173,24 @@ func (c *completer) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
 // contextOptions returns the candidate options for the context, or ok=false
 // when the context is inconclusive and the caller should fall back to the
 // tail-matching heuristics.
-func (c completer) contextOptions(ctx Context) ([]string, bool) {
+func (c completer) contextOptions(ctx Context) ([]string, bool, bool) {
 	switch {
 	case ctx.Qualifier != "" && ctx.Clause != "":
-		return c.qualifiedOptions(ctx), true
+		return c.qualifiedOptions(ctx), true, false
 	case ctx.Clause == "INTO" && ctx.OpenParens > 0:
 		// INSERT INTO film (<cursor> — the column list of the target table
-		return c.scopeColumns(ctx), len(ctx.Tables) > 0
+		return c.scopeColumns(ctx), len(ctx.Tables) > 0, false
+	case ctx.Clause == "VALUES" && ctx.ValuesParens:
+		// INSERT INTO ... VALUES (<cursor> — hint the fields in written
+		// order, so long column lists stay trackable while filling values
+		return c.valuesFieldHints(ctx), true, true
 	case ctx.Clause == "INTO" && ctx.IntoListDone:
 		// INSERT INTO film (a, b) <cursor> — what may follow the column
 		// group
-		return []string{"VALUES", "SELECT", "TABLE", "OVERRIDING"}, true
+		return []string{"VALUES", "SELECT", "TABLE", "OVERRIDING"}, true, false
 	case ctx.Clause == "USING" && ctx.OpenParens > 0:
 		// JOIN ... USING (<cursor> — join columns of the tables in scope
-		return c.scopeColumns(ctx), len(ctx.Tables) > 0
+		return c.scopeColumns(ctx), len(ctx.Tables) > 0, false
 	case tableClauses[ctx.Clause]:
 		if ctx.Object == "" && ctx.TableListed {
 			if ctx.Clause == "INTO" {
@@ -183,10 +199,10 @@ func (c completer) contextOptions(ctx Context) ([]string, bool) {
 				// metadata order; without column metadata decline to the
 				// heuristics ("(", VALUES, ...)
 				if list := c.insertColumnList(ctx); list != "" {
-					return []string{list}, true
+					return []string{list}, true, false
 				}
 			}
-			return nil, false
+			return nil, false, false
 		}
 		// dotless words complete schema/user/owner names first, keeping
 		// the candidate list small; after "schema." the qualified branch
@@ -195,16 +211,32 @@ func (c completer) contextOptions(ctx Context) ([]string, bool) {
 		// table names ("FROM film") still complete.
 		ns := c.getNamespaces(metadata.Filter{OnlyVisible: true})
 		if len(completeFuzzyFull(ctx.Qualifier+ctx.Object, ns)) > 0 {
-			return ns, true
+			return ns, true, false
 		}
-		return c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE"), true
+		return c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE"), true, false
 	case columnClauses[ctx.Clause]:
 		options := c.scopeColumns(ctx)
 		options = append(options, clauseKeywords[ctx.Clause]...)
-		return options, true
+		return options, true, false
 	default:
-		return nil, false
+		return nil, false, false
 	}
+}
+
+// valuesFieldHints hints the fields of an INSERT ... VALUES group in
+// written order, starting at the value currently being filled. The column
+// order comes from the written "(a, b, c)" list, or from the table's
+// metadata when no explicit list was given.
+func (c completer) valuesFieldHints(ctx Context) []string {
+	cols := ctx.IntoColumns
+	if len(cols) == 0 && len(ctx.Tables) > 0 {
+		cols = c.tableColumns(ctx.Tables[len(ctx.Tables)-1])
+	}
+	if ctx.ValuesCount >= len(cols) {
+		// more values than columns: nothing left to hint
+		return nil
+	}
+	return cols[ctx.ValuesCount:]
 }
 
 // qualifiedOptions completes a dotted word. In a column position the

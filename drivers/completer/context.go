@@ -49,6 +49,16 @@ type Context struct {
 	// IntoListDone reports whether a complete "(a, b)" column group was
 	// written after the INSERT INTO target table.
 	IntoListDone bool
+	// IntoColumns holds the column names of that group, in written order
+	// (empty when no explicit column list was written).
+	IntoColumns []string
+	// ValuesParens reports whether the cursor is inside the open "(...)"
+	// of an INSERT ... VALUES clause.
+	ValuesParens bool
+	// ValuesCount counts the complete values already written inside that
+	// group (top-level commas), so completion can hint the field that
+	// comes next.
+	ValuesCount int
 	// Aliases maps each alias (and each table's own name) to its reference.
 	// The alias of a derived table maps to the zero TableRef, because its
 	// columns cannot be resolved without evaluating the subquery.
@@ -92,16 +102,42 @@ func scanClauses(tokens []token) Context {
 	match := matchParens(tokens)
 	tableMode := false
 	derivedTable := false
+	valuesDepth := 0
 	for i := 0; i < len(tokens); i++ {
 		t := tokens[i]
 		if t.kind == tokLparen {
 			if j, ok := match[i]; ok {
+				if ctx.Clause == "INTO" && tableMode {
+					// INSERT INTO t (f1, f2) — remember the written order
+					for k := i + 1; k < j; k++ {
+						if tokens[k].kind == tokIdent {
+							ctx.IntoColumns = append(ctx.IntoColumns, tokens[k].text)
+						}
+					}
+					ctx.IntoListDone = true
+				}
 				i = j
 				// a complete group in a table list is a derived table, and
 				// the identifier that follows is its alias
 				derivedTable = tableMode
-				if ctx.Clause == "INTO" {
-					ctx.IntoListDone = true
+			} else if ctx.Clause == "VALUES" {
+				// unclosed group: the cursor is inside the INSERT ...
+				// VALUES "(...)", count complete top-level values
+				ctx.ValuesParens = true
+				valuesDepth = 1
+			}
+			continue
+		}
+		if valuesDepth > 0 {
+			switch t.kind {
+			case tokLparen:
+				valuesDepth++
+			case tokRparen:
+				valuesDepth = 0
+				ctx.ValuesParens = false
+			case tokComma:
+				if valuesDepth == 1 {
+					ctx.ValuesCount++
 				}
 			}
 			continue

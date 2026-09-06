@@ -45,6 +45,7 @@ import (
 	"github.com/xo/usql/stmt"
 	ustyles "github.com/xo/usql/styles"
 	"github.com/xo/usql/text"
+	"github.com/xo/usql/uitheme"
 	"golang.org/x/text/encoding"
 )
 
@@ -174,6 +175,13 @@ func (h *Handler) SetSingleLineMode(singleLineMode bool) {
 	h.singleLineMode = singleLineMode
 }
 
+// printError writes an error message, styled by the output theme when color
+// is available (styles render plain otherwise).
+func printError(w io.Writer, err error) {
+	t := uitheme.Current()
+	fmt.Fprintln(w, t.Error.Render("error:"), t.ErrorMsg.Render(err.Error()))
+}
+
 // Run executes queries and commands.
 func (h *Handler) Run() error {
 	stdout, stderr, iactive := h.l.Stdout(), h.l.Stderr(), h.l.Interactive()
@@ -186,7 +194,7 @@ func (h *Handler) Run() error {
 			}
 		}
 		// welcome text
-		fmt.Fprintln(stdout, text.WelcomeDesc)
+		fmt.Fprintln(stdout, uitheme.Current().Dim.Render(text.WelcomeDesc))
 		fmt.Fprintln(stdout)
 	}
 	var cmd string
@@ -258,13 +266,13 @@ func (h *Handler) Run() error {
 				case h.batch && batch:
 					err = fmt.Errorf("cannot perform %s in existing batch", typ)
 					lastErr = WrapErr(h.buf.String(), err)
-					fmt.Fprintln(stderr, "error:", err)
+					printError(stderr, err)
 					continue
 				// cannot use \g* while accumulating statements for batch queries
 				case h.batch && typ != h.batchEnd && opt.Exec != metacmd.ExecNone:
 					err = errors.New("cannot force batch execution")
 					lastErr = WrapErr(h.buf.String(), err)
-					fmt.Fprintln(stderr, "error:", err)
+					printError(stderr, err)
 					continue
 				case batch:
 					h.batch, h.batchEnd = true, end
@@ -309,7 +317,7 @@ func (h *Handler) Run() error {
 					lastErr = WrapErr(h.lastExec, err)
 					if env.Get("ON_ERROR_STOP") == "on" {
 						if iactive {
-							fmt.Fprintln(stderr, "error:", err)
+							printError(stderr, err)
 							h.buf.Reset([]rune{}) // empty the buffer so no other statements are run
 							continue
 						} else {
@@ -317,7 +325,7 @@ func (h *Handler) Run() error {
 							return err
 						}
 					} else {
-						fmt.Fprintln(stderr, "error:", err)
+						printError(stderr, err)
 					}
 				}
 				stop()
@@ -339,14 +347,14 @@ func (h *Handler) apply(stdout, stderr io.Writer, cmd, paramstr string) (metacmd
 		case err == text.ErrMissingRequiredArgument:
 			fmt.Fprintln(stderr, fmt.Sprintf(text.MissingRequiredArg, cmd))
 		default:
-			fmt.Fprintln(stderr, "error:", err)
+			printError(stderr, err)
 		}
 		return metacmd.Option{}, true, err
 	}
 	// run
 	opt, err := f(h)
 	if err != nil && err != rline.ErrInterrupt {
-		fmt.Fprintln(stderr, "error:", err)
+		printError(stderr, err)
 		return metacmd.Option{}, true, WrapErr(cmd, err)
 	}
 loop:
@@ -354,7 +362,7 @@ loop:
 	for {
 		switch arg, ok, err := params.Arg(); {
 		case err != nil:
-			fmt.Fprintln(stderr, "error:", err)
+			printError(stderr, err)
 		case !ok:
 			break loop
 		default:
@@ -896,7 +904,7 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 		return err
 	}
 	// print the error
-	fmt.Fprintln(h.l.Stderr(), "error:", err)
+	printError(h.l.Stderr(), err)
 	// otherwise, try to collect a password ...
 	dsn, err := h.Password(params[0])
 	if err != nil {
@@ -946,7 +954,7 @@ func (h *Handler) forceParams(u *dburl.URL) {
 	user, err := passfile.Match(u, h.user.HomeDir, text.PassfileName)
 	switch {
 	case err != nil:
-		fmt.Fprintln(h.l.Stderr(), "error:", err)
+		printError(h.l.Stderr(), err)
 	case user != nil:
 		u.User = user
 	}
@@ -1205,7 +1213,7 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 			s += " (%v)"
 			v = append(v, d.Round(1*time.Millisecond))
 		}
-		fmt.Fprintln(h.l.Stdout(), fmt.Sprintf(s, v...))
+		fmt.Fprintln(h.l.Stdout(), uitheme.Current().Dim.Render(fmt.Sprintf(s, v...)))
 	}
 	return nil
 }
@@ -1230,7 +1238,7 @@ func (h *Handler) doExecSingle(ctx context.Context, w io.Writer, opt metacmd.Opt
 			s += " (%v)"
 			v = append(v, d.Round(1*time.Millisecond))
 		}
-		fmt.Fprintln(h.l.Stdout(), fmt.Sprintf(s, v...))
+		fmt.Fprintln(h.l.Stdout(), uitheme.Current().Dim.Render(fmt.Sprintf(s, v...)))
 	}
 	return nil
 }
@@ -1349,8 +1357,22 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	if drivers.LowerColumnNames(h.u) {
 		params["lower_column_names"] = "true"
 	}
+	// paint aligned unicode tables when the table_color print setting allows
+	// it; painting only inserts SGR sequences, so tblfmt's alignment is
+	// unaffected. Skipped for redirected output (\o, \g file, \g |pipe).
+	var pw io.WriteCloser
+	if h.out == nil && params["pipe"] == "" && params["table_color"] != "off" &&
+		params["format"] == "aligned" && params["linestyle"] == "unicode" &&
+		opt.Exec != metacmd.ExecCrosstab && h.l.Interactive() && uitheme.Enabled() {
+		pw = uitheme.Current().LineWriter(w)
+		w = pw
+	}
 	// encode and handle error conditions
-	switch err := tblfmt.EncodeAll(w, resultSet, params, extra...); {
+	err = tblfmt.EncodeAll(w, resultSet, params, extra...)
+	if pw != nil {
+		pw.Close()
+	}
+	switch {
 	case err != nil && cmd != nil && errors.Is(err, syscall.EPIPE):
 		// broken pipe means pager quit before consuming all data, which might be expected
 		return nil
@@ -1362,6 +1384,9 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 		return err
 	case params["format"] == "aligned":
 		fmt.Fprintln(w)
+	}
+	if pw != nil {
+		pw.Close()
 	}
 	if pipe != nil {
 		pipe.Close()

@@ -11,7 +11,7 @@ import (
 
 	"github.com/xo/usql/drivers/metadata"
 	"github.com/xo/usql/env"
-	"github.com/xo/usql/rline/readline"
+	"github.com/xo/usql/rline"
 	"github.com/xo/usql/text"
 )
 
@@ -110,7 +110,7 @@ var (
 	}
 )
 
-func NewDefaultCompleter(opts ...Option) readline.AutoCompleter {
+func NewDefaultCompleter(opts ...Option) rline.Completer {
 	c := completer{
 		// an empty struct satisfies the metadata.Reader interface, because it is actually empty
 		reader:           struct{}{},

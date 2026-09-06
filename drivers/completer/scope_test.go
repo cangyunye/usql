@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/xo/usql/drivers/metadata"
-	"github.com/xo/usql/rline/readline"
+	"github.com/xo/usql/rline"
 )
 
 func TestScopeChanged(t *testing.T) {
@@ -58,7 +58,7 @@ func TestInvalidateDropsReaderCache(t *testing.T) {
 
 func TestLiveInvalidateDropsTypedResults(t *testing.T) {
 	stub := &stubCompleter{}
-	live := NewLive(stub).(readline.LiveAutoCompleter)
+	live := NewLive(stub).(rline.LiveCompleter)
 	inv, ok := live.(interface{ Invalidate() })
 	if !ok {
 		t.Fatal("NewLive result does not implement Invalidate")

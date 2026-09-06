@@ -19,7 +19,7 @@ import (
 	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers/completer"
 	"github.com/xo/usql/drivers/metadata"
-	"github.com/xo/usql/rline/readline"
+	"github.com/xo/usql/rline"
 	"github.com/xo/usql/stmt"
 	"github.com/xo/usql/text"
 )
@@ -104,7 +104,7 @@ type Driver struct {
 	// NewMetadataWriter returns a db metadata printer.
 	NewMetadataWriter func(db DB, w io.Writer, opts ...metadata.ReaderOption) metadata.Writer
 	// NewCompleter returns a db auto-completer.
-	NewCompleter func(db DB, opts ...completer.Option) readline.AutoCompleter
+	NewCompleter func(db DB, opts ...completer.Option) rline.Completer
 	// Copy rows into the database table
 	Copy func(ctx context.Context, db *sql.DB, rows *sql.Rows, table string) (int64, error)
 }
@@ -492,7 +492,7 @@ func NewMetadataWriter(ctx context.Context, u *dburl.URL, db DB, w io.Writer, op
 
 // NewCompleter creates a metadata completer for a driver and database
 // connection.
-func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadata.ReaderOption, opts ...completer.Option) readline.AutoCompleter {
+func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadata.ReaderOption, opts ...completer.Option) rline.Completer {
 	d, ok := drivers[u.Driver]
 	if !ok {
 		return nil

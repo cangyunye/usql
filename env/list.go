@@ -179,6 +179,10 @@ var pvarNames = []varName{
 		`set record separator for unaligned output to a zero byte`,
 	},
 	{
+		`table_color`,
+		`colorize aligned unicode tables [on, off, auto]`,
+	},
+	{
 		`tableattr`,
 		`specify attributes for table tag in html format, or proportional column widths for left-aligned data types in latex-longtable format`,
 	},

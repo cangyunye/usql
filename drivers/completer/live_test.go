@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xo/usql/rline/readline"
+	"github.com/xo/usql/rline"
 )
 
 // stubCompleter delays and counts synchronous Do calls.
@@ -32,7 +32,7 @@ func (s *stubCompleter) callCount() int {
 
 func TestLiveTabPathIsSynchronous(t *testing.T) {
 	stub := &stubCompleter{}
-	live := NewLive(stub).(readline.LiveAutoCompleter)
+	live := NewLive(stub).(rline.LiveCompleter)
 
 	cands, length := live.Do([]rune("SELECT * FROM fi"), 16)
 	if len(cands) != 1 || string(cands[0]) != "ilm" || length != 2 {
@@ -45,7 +45,7 @@ func TestLiveTabPathIsSynchronous(t *testing.T) {
 
 func TestLiveDoLiveServesFromCache(t *testing.T) {
 	stub := &stubCompleter{}
-	live := NewLive(stub).(readline.LiveAutoCompleter)
+	live := NewLive(stub).(rline.LiveCompleter)
 
 	line := []rune("SELECT * FROM fi")
 	// first request: background, returns nothing yet
@@ -71,7 +71,7 @@ func TestLiveDoLiveServesFromCache(t *testing.T) {
 
 func TestLiveKickFiresOnce(t *testing.T) {
 	stub := &stubCompleter{delay: 20 * time.Millisecond}
-	live := NewLive(stub).(readline.LiveAutoCompleter)
+	live := NewLive(stub).(rline.LiveCompleter)
 
 	kicks := make(chan struct{}, 1)
 	live.SetLiveKick(func() { kicks <- struct{}{} })
@@ -86,7 +86,7 @@ func TestLiveKickFiresOnce(t *testing.T) {
 
 func TestLiveSkipsWhileComputing(t *testing.T) {
 	stub := &stubCompleter{delay: 50 * time.Millisecond}
-	live := NewLive(stub).(readline.LiveAutoCompleter)
+	live := NewLive(stub).(rline.LiveCompleter)
 
 	live.DoLive([]rune("SELECT * FROM f"), 15)
 	// different keystroke while the first query is in flight: declined
@@ -110,7 +110,7 @@ func TestLiveSkipsWhileComputing(t *testing.T) {
 
 func TestLiveCacheEvicts(t *testing.T) {
 	stub := &stubCompleter{}
-	live := NewLive(stub).(readline.LiveAutoCompleter)
+	live := NewLive(stub).(rline.LiveCompleter)
 
 	// fill well past the cache size with distinct lines
 	for i := 0; i < liveCacheSize+10; i++ {

@@ -14,6 +14,7 @@ package charset
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"unicode/utf8"
@@ -99,6 +100,91 @@ func ConsoleEncodingName() string {
 		return "GBK"
 	}
 	return "UTF-8"
+}
+
+// ConsolePreview returns s as it will appear on a console whose output
+// encoding is enc: runes the encoding cannot represent are replaced with
+// '?', matching what rline's console transcoding writer emits. Layout
+// decisions (column widths, cursor math) made against the preview match
+// what the terminal actually displays. When enc is nil, s is returned
+// unchanged.
+func ConsolePreview(s string, enc encoding.Encoding) string {
+	if enc == nil || s == "" {
+		return s
+	}
+	encStr, _, err := transform.String(ConsoleEncoder(enc), s)
+	if err != nil {
+		return s
+	}
+	decStr, _, err := transform.String(enc.NewDecoder(), encStr)
+	if err != nil {
+		return encStr
+	}
+	return decStr
+}
+
+// ConsoleEncoder returns a transformer that encodes UTF-8 to enc,
+// substituting runes the encoding cannot represent with '?'.
+//
+// This deliberately deviates from x/text's ReplaceUnsupported, which emits
+// the encoding's declared replacement byte — 0x1A (SUB) for the GBK family.
+// SUB is a zero-width control character: substituting a two-column rune
+// (emoji, rare hanzi) with it silently shifts every subsequent column of
+// the line, breaking table borders. '?' is one column wide on both UTF-8
+// and GBK-family consoles, keeping alignment predictable.
+func ConsoleEncoder(enc encoding.Encoding) transform.Transformer {
+	return &qmarkReplacer{enc: enc.NewEncoder()}
+}
+
+// qmarkReplacer wraps an encoding.Encoder, emitting '?' for unsupported
+// runes. It mirrors x/text's unexported errorHandler, which the encoders'
+// substitution errors (internal.ErrASCIIReplacement et al., exposing
+// Replacement() byte) are designed for. Reset is a no-op: unsupported-rune
+// substitution carries no state between calls.
+type qmarkReplacer struct {
+	enc *encoding.Encoder
+}
+
+// Transform satisfies transform.Transformer.
+func (q *qmarkReplacer) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
+	nDst, nSrc, err = q.enc.Transform(dst, src, atEOF)
+	for err != nil {
+		if _, ok := err.(interface{ Replacement() byte }); !ok {
+			return nDst, nSrc, err
+		}
+		_, sz := utf8.DecodeRune(src[nSrc:])
+		if sz == 0 {
+			return nDst, nSrc, transform.ErrShortSrc
+		}
+		if nDst >= len(dst) {
+			return nDst, nSrc, transform.ErrShortDst
+		}
+		dst[nDst] = '?'
+		err = nil
+		nDst++
+		if nSrc += sz; nSrc < len(src) {
+			var dn, sn int
+			dn, sn, err = q.enc.Transform(dst[nDst:], src[nSrc:], atEOF)
+			nDst += dn
+			nSrc += sn
+		}
+	}
+	return nDst, nSrc, err
+}
+
+// Reset satisfies transform.Transformer.
+func (q *qmarkReplacer) Reset() {
+	q.enc.Reset()
+}
+
+// ConsoleDecoder wraps r with a decoder for the console encoding, so
+// keystrokes typed on a GBK-family console arrive as UTF-8 runes. When enc
+// is nil, r is returned unchanged.
+func ConsoleDecoder(r io.Reader, enc encoding.Encoding) io.Reader {
+	if enc == nil {
+		return r
+	}
+	return transform.NewReader(r, enc.NewDecoder())
 }
 
 // init compensates for go-runewidth's locale table, which knows gbk and

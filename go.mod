@@ -19,6 +19,7 @@ require (
 	github.com/btnguyen2k/gocosmos v1.1.0
 	github.com/btnguyen2k/godynamo v1.3.0
 	github.com/chaisql/chai v0.18.0
+	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/couchbase/go_n1ql v0.0.0-20220303011133-0ed4bf93e31d
 	github.com/databricks/databricks-sql-go v1.10.0
@@ -47,6 +48,7 @@ require (
 	github.com/microsoft/go-mssqldb v1.9.8
 	github.com/mithrandie/csvq v1.18.1
 	github.com/mithrandie/csvq-driver v1.7.0
+	github.com/muesli/termenv v0.16.0
 	github.com/nakagami/firebirdsql v0.9.16
 	github.com/ory/dockertest/v3 v3.12.0
 	github.com/prestodb/presto-go-client/v2 v2.1.1
@@ -69,7 +71,8 @@ require (
 	github.com/ydb-platform/ydb-go-sdk/v3 v3.128.2
 	github.com/yookoala/realpath v1.0.0
 	github.com/ziutek/mymysql v1.5.4
-	golang.org/x/sys v0.42.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.35.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/bigquery v1.2.0
@@ -204,6 +207,7 @@ require (
 	github.com/elastic/go-windows v1.0.2 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
+	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/exasol/error-reporting-go v0.2.0 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -269,6 +273,7 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-sixel v0.0.8 // indirect
 	github.com/minio/asm2plan9s v0.0.0-20200509001527-cdd76441f9d8 // indirect
 	github.com/minio/c2goasm v0.0.0-20190812172519-36a3d3bbc4f3 // indirect
@@ -286,7 +291,8 @@ require (
 	github.com/moby/sys/userns v0.1.0 // indirect
 	github.com/moby/term v0.5.2 // indirect
 	github.com/mtibben/percent v0.2.1 // indirect
-	github.com/muesli/termenv v0.16.0 // indirect
+	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
+	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/murfffi/gorich v0.3.0 // indirect
 	github.com/nakagami/chacha20 v0.1.0 // indirect
@@ -355,7 +361,6 @@ require (
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/telemetry v0.0.0-20260316223853-b6b0c46d1ccd // indirect
-	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.43.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect

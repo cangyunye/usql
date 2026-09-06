@@ -127,6 +127,7 @@ func NewDefaultVars() *Variables {
 			"recordsep":                "\n",
 			"recordsep_zero":           "off",
 			"tableattr":                "",
+			"table_color":              "auto",
 			"time":                     "RFC3339Nano",
 			"timezone":                 "",
 			"title":                    "",
@@ -245,6 +246,12 @@ func (v *Variables) SetPrint(name, value string) (string, error) {
 			return "", text.ErrInvalidFormatLineStyle
 		}
 		v.prnt[name] = value
+	case "table_color":
+		s, err := ParseKeywordBool(value, name, "auto")
+		if err != nil {
+			return "", err
+		}
+		v.prnt[name] = s
 	case "csv_fieldsep", "fieldsep", "null", "recordsep", "tableattr", "time", "title", "locale":
 		v.prnt[name] = value
 	case "timezone":
@@ -279,7 +286,7 @@ func (v *Variables) TogglePrint(name, extra string) (string, error) {
 		default:
 			panic(fmt.Sprintf("invalid state for field %s", name))
 		}
-	case "expanded":
+	case "expanded", "table_color":
 		switch v.prnt[name] {
 		case "on", "auto":
 			v.prnt[name] = "off"

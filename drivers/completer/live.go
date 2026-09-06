@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/xo/usql/rline/readline"
+	"github.com/xo/usql/rline"
 )
 
 // liveCacheSize caps how many (line, pos) results are remembered for
@@ -18,12 +18,12 @@ const liveCacheSize = 64
 // schedules the query off the input loop; when it lands, kick re-renders the
 // candidate menu. This keeps every keystroke responsive even when the
 // metadata source is slow (e.g. OceanBase cold queries).
-func NewLive(inner readline.AutoCompleter) readline.AutoCompleter {
+func NewLive(inner rline.Completer) rline.Completer {
 	return &liveCompleter{inner: inner}
 }
 
 type liveCompleter struct {
-	inner readline.AutoCompleter
+	inner rline.Completer
 
 	mu        sync.Mutex
 	kick      func()
@@ -38,10 +38,10 @@ type liveResult struct {
 	replace bool
 }
 
-var _ readline.LiveAutoCompleter = &liveCompleter{}
+var _ rline.LiveCompleter = &liveCompleter{}
 
-// SetLiveKick satisfies readline.LiveAutoCompleter; the readline layer
-// injects its re-render hook once the instance is wired up.
+// SetLiveKick satisfies rline.LiveCompleter; the UI layer injects its
+// re-render hook once the instance is wired up.
 func (l *liveCompleter) SetLiveKick(kick func()) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -68,7 +68,7 @@ func (l *liveCompleter) Do(line []rune, pos int) ([][]rune, int) {
 // DoRepl forwards the wrapped completer's replace-style candidates, so TAB
 // through the live wrapper still replaces the word at the cursor.
 func (l *liveCompleter) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
-	if rp, ok := l.inner.(readline.Replacer); ok {
+	if rp, ok := l.inner.(rline.Replacer); ok {
 		return rp.DoRepl(line, pos)
 	}
 	return nil, 0, false
@@ -120,7 +120,7 @@ func (l *liveCompleter) DoLive(line []rune, pos int) ([][]rune, int, bool) {
 // compute runs the wrapped completer's replace-aware path when available,
 // falling back to plain Do.
 func (l *liveCompleter) compute(line []rune, pos int) ([][]rune, int, bool) {
-	if rp, ok := l.inner.(readline.Replacer); ok {
+	if rp, ok := l.inner.(rline.Replacer); ok {
 		if cands, length, replace := rp.DoRepl(line, pos); replace {
 			return cands, length, true
 		}

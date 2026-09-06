@@ -22,6 +22,7 @@ import (
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/text"
+	"github.com/xo/usql/uitheme"
 )
 
 // Quit is a General meta command (\q \quit). Quits the application.
@@ -76,16 +77,33 @@ func Drivers(p *Params) error {
 	}
 	sort.Strings(names)
 	fmt.Fprintln(stdout, text.AvailableDrivers)
-	for _, n := range names {
-		s := "  " + n
-		driver, aliases := dburl.SchemeDriverAndAliases(n)
-		if driver != n {
-			s += " (" + driver + ")"
+	if uitheme.Enabled() {
+		// themed table when color is available; plain output otherwise
+		rows := make([][]string, 0, len(names))
+		for _, n := range names {
+			driver, aliases := dburl.SchemeDriverAndAliases(n)
+			via, al := "", ""
+			if driver != n {
+				via = driver
+			}
+			if len(aliases) > 0 {
+				al = strings.Join(aliases, ", ")
+			}
+			rows = append(rows, []string{n, via, al})
 		}
-		if len(aliases) > 0 {
-			s += " [" + strings.Join(aliases, ", ") + "]"
+		fmt.Fprint(stdout, uitheme.Current().Table([]string{"driver", "(via)", "[aliases]"}, rows))
+	} else {
+		for _, n := range names {
+			s := "  " + n
+			driver, aliases := dburl.SchemeDriverAndAliases(n)
+			if driver != n {
+				s += " (" + driver + ")"
+			}
+			if len(aliases) > 0 {
+				s += " [" + strings.Join(aliases, ", ") + "]"
+			}
+			fmt.Fprintln(stdout, s)
 		}
-		fmt.Fprintln(stdout, s)
 	}
 	if cmd != nil {
 		if err := wc.Close(); err != nil {

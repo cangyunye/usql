@@ -661,6 +661,12 @@ taken from `LC_ALL`, `LC_CTYPE`, or `LANG` (e.g. `zh_CN.GBK`, `zh_CN.GB2312`,
 representable in GBK are rendered as `?`. Output redirected to files or pipes
 is always UTF-8.
 
+Console **input** is decoded from the terminal's character set as well when
+using the [bubbletea input engine][input-engine] (`USQL_INPUT=tui`): on a
+`GBK`-family console, Chinese text can be typed directly into queries,
+prompts, and the `\conns` form, and is saved to history as UTF-8. The classic
+readline engine assumes UTF-8 keystrokes.
+
 ### Connection Examples
 
 The following are example connection strings and additional ways to connect to
@@ -1426,6 +1432,66 @@ CURRENT_SCHEMA` on Oracle-family servers), so the candidate list always
 reflects the current database/schema. Slow catalog sources (e.g. OceanBase)
 are queried off the input loop in the background, so typing never blocks.
 
+#### Input Engine (Bubbletea TUI)
+
+`usql` ships two interactive input engines. The default is the classic
+readline engine; an opt-in [bubbletea][bubbletea]-based engine adds an
+input-method-style vertical completion menu and fish/pgcli-style ghost text
+suggestions:
+
+```sh
+# opt in per invocation
+$ USQL_INPUT=tui usql pg://
+
+# or export it in your shell profile
+$ export USQL_INPUT=tui
+```
+
+In TUI mode the completion candidates are shown as a **single-column menu
+below the prompt** (like a CJK input method), displayed as full words with
+the selection highlighted, scrollable with `<PgUp>`/`<PgDn>`, and directly
+selectable with `<Alt>`+`<1-9>`:
+
+```sh
+pg:postgres@=> select * from pu<Tab>
+  1 public.users
+▸ 2 public.user_settings
+  3 public.ufilters
+```
+
+While typing at the end of a line, a **dim ghost suggestion** of the best
+match (from history, and from database metadata when connected) is shown
+after the cursor, like fish or pgcli:
+
+```sh
+pg:postgres@=> select * from us█ers where ...
+```
+
+- `<Right>` accepts the whole suggestion; `<Ctrl>`+`<Right>` accepts one word
+- `<Ctrl>`+`<R>` incremental history search; `<Enter>` accepts the match,
+  `<Ctrl>`+`<G>` cancels
+- while the menu is open, `<Enter>`/`<Tab>` accept the selected candidate
+  and never execute the line; `<Esc>` closes the menu
+- `<Ctrl>`+`<C>` cancels the line, `<Ctrl>`+`<D>` on an empty line exits
+
+Non-interactive runs (`-c`, `-f`, piped input, `-o`) always use plain
+line-at-a-time input regardless of `USQL_INPUT`.
+
+#### Colored Tables
+
+On interactive color-capable terminals, aligned tables rendered with
+`\pset linestyle unicode` are colorized: theme-colored borders, bold headers,
+and zebra-striped rows. Coloring only inserts escape sequences and never
+changes the table's character layout, so mixed CJK/ASCII content stays
+aligned. Coloring is controlled by:
+
+```sh
+pg:postgres@=> \pset table_color auto   # on, off, or auto (the default)
+```
+
+With `auto`, tables are colored when the terminal supports it; redirected
+output (`\o`, `\g file`, `\g |pipe`) is never colored.
+
 #### Time Formatting
 
 Some databases support time/date columns that [support formatting][go-time]. By
@@ -1716,6 +1782,8 @@ contributing, see CONTRIBUTING.md](CONTRIBUTING.md).
 [chroma]: https://github.com/alecthomas/chroma
 [chroma-formatter]: https://github.com/alecthomas/chroma#formatters
 [chroma-style]: https://xyproto.github.io/splash/docs/all.html
+[bubbletea]: https://github.com/charmbracelet/bubbletea
+[input-engine]: #input-engine-bubbletea-tui "Input Engine (Bubbletea TUI)"
 [help-wanted]: https://github.com/xo/usql/issues?q=is:open+is:issue+label:%22help+wanted%22
 [aur]: https://aur.archlinux.org/packages/usql
 [yay]: https://github.com/Jguer/yay

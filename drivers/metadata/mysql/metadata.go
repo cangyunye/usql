@@ -7,7 +7,7 @@ import (
 	"github.com/xo/usql/drivers/completer"
 	"github.com/xo/usql/drivers/metadata"
 	infos "github.com/xo/usql/drivers/metadata/informationschema"
-	"github.com/xo/usql/rline/readline"
+	"github.com/xo/usql/rline"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 		infos.WithUsagePrivileges(false),
 	)
 	// NewCompleter for MySQL databases
-	NewCompleter = func(db drivers.DB, opts ...completer.Option) readline.AutoCompleter {
+	NewCompleter = func(db drivers.DB, opts ...completer.Option) rline.Completer {
 		readerOpts := []metadata.ReaderOption{
 			// this needs to be relatively low, since autocomplete is very
 			// interactive — but low enough timeouts break column completion

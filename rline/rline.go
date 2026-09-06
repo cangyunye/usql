@@ -37,7 +37,7 @@ type IO interface {
 	// Prompt sets the prompt for the next interactive line read.
 	Prompt(string)
 	// Completer sets the auto-completer.
-	Completer(readline.AutoCompleter)
+	Completer(Completer)
 	// Save saves a line of history.
 	Save(string) error
 	// Password prompts for a password.
@@ -56,7 +56,7 @@ type Rline struct {
 	Int  bool
 	Cyg  bool
 	P    func(string)
-	A    func(readline.AutoCompleter)
+	A    func(Completer)
 	S    func(string) error
 	Pw   func(string) (string, error)
 }
@@ -105,7 +105,7 @@ func (l *Rline) Prompt(s string) {
 }
 
 // Completer sets the auto-completer.
-func (l *Rline) Completer(a readline.AutoCompleter) {
+func (l *Rline) Completer(a Completer) {
 	if l.A != nil {
 		l.A(a)
 	}
@@ -169,11 +169,17 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 	// transcode console output to the terminal character set, when the
 	// locale requests a non-UTF-8 encoding (e.g. zh_CN.GBK); file and pipe
 	// output (-o) is left as UTF-8
+	var enc encoding.Encoding
 	if out == "" {
-		if enc := charset.OutputEncoding(); enc != nil {
+		if enc = charset.OutputEncoding(); enc != nil {
 			stdout = newEncodedWriter(stdout, enc)
 			stderr = newEncodedWriter(stderr, enc)
 		}
+	}
+	// the bubbletea input engine (USQL_INPUT=tui) serves interactive
+	// sessions; non-interactive input is line-at-a-time either way
+	if inputMode(interactive, forceNonInteractive) {
+		return newTUI(charset.ConsoleDecoder(stdin, enc), stdout, stderr, histfile), nil
 	}
 	if interactive {
 		// wrap it with cancelable stdin
@@ -229,12 +235,12 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 		Int: interactive || cygwin,
 		Cyg: cygwin,
 		P:   l.SetPrompt,
-		A: func(a readline.AutoCompleter) {
+		A: func(a Completer) {
 			cfg := l.Config.Clone()
-			cfg.AutoComplete = a
+			cfg.AutoComplete = completerAdapter{c: a}
 			// let the completer re-render the live menu when background
 			// queries land
-			if lc, ok := a.(readline.LiveAutoCompleter); ok {
+			if lc, ok := a.(LiveCompleter); ok {
 				lc.SetLiveKick(l.Operation.LiveKick)
 			}
 			l.SetConfig(cfg)
@@ -244,12 +250,14 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 	}, nil
 }
 
-// newEncodedWriter wraps w with a UTF-8 to enc transcoding writer. The
-// returned writer's Close is a no-op: ownership of the underlying writer
-// stays with the caller (readline handles terminal close, and closing
-// transform.Writer would close the underlying terminal).
+// newEncodedWriter wraps w with a UTF-8 to enc transcoding writer that
+// substitutes unrepresentable runes with '?' (charset.ConsoleEncoder — the
+// x/text default 0x1A SUB is zero-width and breaks terminal alignment).
+// The returned writer's Close is a no-op: ownership of the underlying
+// writer stays with the caller (readline handles terminal close, and
+// closing transform.Writer would close the underlying terminal).
 func newEncodedWriter(w io.Writer, enc encoding.Encoding) io.WriteCloser {
-	tw := transform.NewWriter(w, encoding.ReplaceUnsupported(enc.NewEncoder()))
+	tw := transform.NewWriter(w, charset.ConsoleEncoder(enc))
 	return &encodedWriter{w: tw}
 }
 

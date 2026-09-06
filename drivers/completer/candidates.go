@@ -11,6 +11,10 @@ import (
 // positions, mirroring completeWithUpdatables.
 var updatableTypes = []string{"TABLE", "BASE TABLE", "LOCAL TEMPORARY", "GLOBAL TEMPORARY", "VIEW"}
 
+// selectableTypes are the relation types offered in FROM/JOIN positions:
+// updatable types plus materialized views. Indexes are never selectable.
+var selectableTypes = append(updatableTypes, "MATERIALIZED VIEW")
+
 // booleanKeywords continue a column expression in a condition clause.
 var booleanKeywords = []string{
 	"AND", "OR", "NOT", "IN", "IS NULL", "IS NOT NULL", "LIKE",
@@ -327,6 +331,8 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 	filter := metadata.Filter{OnlyVisible: true}
 	if tablesOnly {
 		filter.Types = updatableTypes
+	} else {
+		filter.Types = selectableTypes
 	}
 	var names []string
 	if r, ok := c.reader.(metadata.TableReader); ok {
@@ -370,11 +376,13 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 // object text is matched client-side by fuzzy ranking.
 func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []string {
 	filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
+	if tablesOnly {
+		filter.Types = updatableTypes
+	} else {
+		filter.Types = selectableTypes
+	}
 	names := make([]string, 0, 10)
 	if r, ok := c.reader.(metadata.TableReader); ok {
-		if tablesOnly {
-			filter.Types = updatableTypes
-		}
 		names = append(names, c.getNames(
 			func() (iterator, error) { return r.Tables(filter) },
 			func(res interface{}) string {

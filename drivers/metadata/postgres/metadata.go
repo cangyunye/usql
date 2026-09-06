@@ -141,6 +141,10 @@ FROM pg_catalog.pg_class c
 `
 	conds := []string{"n.nspname !~ '^pg_toast' AND c.relkind != 'c'"}
 	vals := []interface{}{}
+	if len(f.Types) == 0 {
+		// no type filter: still never list indexes — they are not tables
+		conds = append(conds, "c.relkind NOT IN ('i', 'I')")
+	}
 	if f.OnlyVisible {
 		conds = append(conds, "pg_catalog.pg_table_is_visible(c.oid)")
 	}

@@ -40,8 +40,6 @@ type connsModel struct {
 	names  []string // sorted named connections
 	rowsel int      // highlighted list row
 	err    string   // transient error line
-	width  int
-	height int
 
 	// delete confirmation
 	confirm string
@@ -88,12 +86,12 @@ var connsFormSpecs = []connsFieldSpec{
 }
 
 // connsModal runs the bubbletea connection manager until quit or connect.
-func connsModal(h Handler) error {
+func connsModal(h Handler, in io.Reader) error {
 	stdout, stderr := h.IO().Stdout(), h.IO().Stderr()
 	for {
 		prog := tea.NewProgram(newConnsModel(h),
 			tea.WithAltScreen(),
-			tea.WithInput(h.IO().(interface{ ConsoleReader() io.Reader }).ConsoleReader()),
+			tea.WithInput(in),
 			tea.WithOutput(h.IO().Stdout()),
 			tea.WithoutSignalHandler(),
 		)
@@ -145,8 +143,6 @@ func (m *connsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
 	}
 	return m, nil
 }

@@ -93,8 +93,9 @@ func NewDefaultVars() *Variables {
 		locale = s
 	}
 	// prompt — when color is available, the default PROMPT1 wraps the
-	// prompt in the theme's Accent color (bold cyan); %27 emits the ESC
-	// byte via Prompt's %<num> mechanism
+	// prompt in the default theme's accent color (bold cyan); it does not
+	// follow THEME switches. %27 emits the ESC byte via Prompt's %<num>
+	// mechanism
 	prompt1 := "%S%N%m%/%R%# "
 	if !noColor && colorLevel >= terminfo.ColorLevelBasic {
 		prompt1 = "%27[1;36m%S%N%m%/%R%#%27[0m "

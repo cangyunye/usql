@@ -86,13 +86,19 @@ func OutputEncoding() encoding.Encoding {
 
 // ConsoleInputEncoding reports the encoding used by console INPUT (the
 // Windows input code page, or the POSIX locale elsewhere), for decoding
-// typed bytes to UTF-8. It falls back to the output encoding, whose POSIX
-// detection covers both directions.
+// typed bytes to UTF-8. A Windows console with a non-GBK-family input code
+// page returns nil (bytes pass through unchanged); with no console at all
+// the output encoding applies, whose POSIX detection covers both
+// directions.
 func ConsoleInputEncoding() encoding.Encoding {
-	if enc := encodingForCharset(consoleInputCharset()); enc != nil {
-		return enc
+	switch cs := consoleInputCharset(); cs {
+	case "":
+		return OutputEncoding()
+	case "utf-8":
+		return nil
+	default:
+		return encodingForCharset(cs)
 	}
-	return OutputEncoding()
 }
 
 // encodingForCharset maps a charset name to its encoding (nil for UTF-8 or

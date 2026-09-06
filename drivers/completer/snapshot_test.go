@@ -13,7 +13,19 @@ type snapReader struct {
 	countingReader
 	tables     []metadata.Table
 	schemas    []metadata.Schema
+	sequences  []metadata.Sequence
 	failTables bool
+}
+
+func (r *snapReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, error) {
+	r.count("sequences")
+	rows := make([]metadata.Sequence, 0, len(r.sequences))
+	for _, s := range r.sequences {
+		if filterMatches(f, s.Catalog, s.Schema, "") {
+			rows = append(rows, s)
+		}
+	}
+	return metadata.NewSequenceSet(rows), nil
 }
 
 func (r *snapReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
@@ -178,4 +190,26 @@ func TestSnapshotConcurrentServe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestSnapshotSequencesIgnoreTypes(t *testing.T) {
+	// the inner sequence readers ignore Filter.Types (sequences carry no
+	// type); the snapshot must serve them the same way, or FROM-position
+	// candidates lose their sequences once the snapshot is loaded
+	inner := &snapReader{countingReader: countingReader{queries: map[string]int{}},
+		sequences: []metadata.Sequence{{Schema: "public", Name: "film_id_seq"}}}
+	snap := NewSnapshotReader(inner)
+	waitForSnapshot(t, snap)
+	r := metadata.SequenceReader(snap)
+	set, err := r.Sequences(metadata.Filter{OnlyVisible: true, Types: []string{"TABLE", "VIEW"}})
+	if err != nil {
+		t.Fatalf("Sequences: %v", err)
+	}
+	var names []string
+	for set.Next() {
+		names = append(names, set.Get().Name)
+	}
+	if len(names) != 1 || names[0] != "film_id_seq" {
+		t.Fatalf("sequences with a table Types filter: %v", names)
+	}
 }

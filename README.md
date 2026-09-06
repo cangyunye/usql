@@ -1167,8 +1167,9 @@ errors, and the input engines (`default`, `warm`, or `plain`):
 pg:postgres@=> \set THEME warm
 ```
 
-The default `PROMPT1` wraps the prompt in the theme's accent color (via the
-`%27` escape mechanism); set `PROMPT1` explicitly to override it.
+The default `PROMPT1` wraps the prompt in the default theme's accent color,
+bold cyan (via the `%27` escape mechanism); it does not follow `THEME`
+switches — set `PROMPT1` explicitly to match a custom theme.
 
 Use the `\? variables` [command][commands] to display variable help information
 and to list special variables recognized by `usql`:

@@ -303,6 +303,9 @@ func (o *opCompleter) completeRefreshLocked() {
 	if o.replaceLen == 0 {
 		colWidth += o.candidateOff + 1
 		same = o.op.buf.RuneSlice(-o.candidateOff)
+	} else {
+		// still keep at least one space between the columns
+		colWidth++
 	}
 
 	// -1 to avoid reach the end of line

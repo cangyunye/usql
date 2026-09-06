@@ -827,7 +827,15 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 		// parse dsn
 		u, err := dburl.Parse(dsn)
 		if err != nil {
-			return err
+			// not a URL: when already connected, treat a bare word as a
+			// database name on the current server (psql-style `\c DBNAME`)
+			if !isBareDBName(dsn) || h.u == nil || h.db == nil {
+				return err
+			}
+			nu := *h.u
+			nu.Path = "/" + dsn
+			nu.DSN = replaceDBName(h.u.DSN, dsn)
+			u = &nu
 		}
 		h.u = u
 		// force parameters
@@ -940,6 +948,28 @@ func (h *Handler) connStrings() []string {
 // forceParams forces connection parameters on a database URL, adding any
 // driver specific required parameters, and the username/password when a
 // matching entry exists in the PASS file.
+// isBareDBName reports whether s is a plain database name (no DSN
+// punctuation), eligible for the psql-style `\c DBNAME` shortcut.
+func isBareDBName(s string) bool {
+	return s != "" && !strings.ContainsAny(s, ":/=@? \t")
+}
+
+// dbNameRE and mysqlDBRE replace the database in the two DSN shapes usql
+// produces: GenPostgres keyword DSNs ("... dbname=old ...") and GenMysql
+// DSNs ("user:pass@tcp(host:port)/old").
+var (
+	dbNameRE  = regexp.MustCompile(`(dbname=)[^ ]*`)
+	mysqlDBRE = regexp.MustCompile(`(tcp\([^)]*\))(/[^? ]*)?`)
+)
+
+// replaceDBName swaps the database in a DSN for the given name.
+func replaceDBName(dsn, name string) string {
+	if strings.Contains(dsn, "dbname=") {
+		return dbNameRE.ReplaceAllString(dsn, `${1}`+name)
+	}
+	return mysqlDBRE.ReplaceAllString(dsn, `${1}/`+name)
+}
+
 func (h *Handler) forceParams(u *dburl.URL) {
 	// force driver parameters
 	drivers.ForceParams(u)

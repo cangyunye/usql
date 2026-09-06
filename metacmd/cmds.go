@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -330,12 +331,34 @@ func Connect(p *Params) error {
 }
 
 // ConnList is a Connection meta command (\conns). Lists the stored named
-// connections, and manages them interactively when on a terminal.
+// connections, and manages them interactively when on a terminal. When
+// passed a name or a row number, connects directly to that stored
+// connection.
 //
 // Descs:
 //
 //	conns	show named connections, or manage (add/edit/delete/connect) interactively
+//	conns NAME|N	connect directly to a named connection
 func ConnList(p *Params) error {
+	// \conns NAME|N — connect directly to a stored connection
+	vals, err := p.All(true)
+	if err == nil && len(vals) > 0 {
+		if len(vals) > 1 {
+			return fmt.Errorf("usage: \\conns [NAME|N]")
+		}
+		names := slices.Sorted(maps.Keys(env.Vars().Conn()))
+		name := resolveConnTarget(names, vals[0])
+		if name == "" {
+			return fmt.Errorf("no such connection: %s", vals[0])
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+		defer cancel()
+		if err := p.Handler.Open(ctx, name); err != nil {
+			return err
+		}
+		fmt.Fprintln(p.Handler.IO().Stdout(), "connected to", name)
+		return nil
+	}
 	if !p.Handler.IO().Interactive() {
 		names := make([]string, 0, len(env.Vars().Conn()))
 		for k := range env.Vars().Conn() {

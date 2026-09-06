@@ -49,6 +49,7 @@ func init() {
 			{Connect, `c`, `DRIVER PARAMS...`, `connect to database with driver and parameters`, false, false},
 			{Connect, `connect`, ``, `alias for \c`, true, false},
 			{ConnList, `conns`, ``, `show named connections, or manage (add/edit/delete/connect) interactively`, false, false},
+			{ConnList, `conns NAME|N`, ``, `connect directly to a named connection`, false, false},
 			{Disconnect, `Z`, ``, `close (disconnect) database connection`, false, false},
 			{Disconnect, `disconnect`, ``, `alias for \Z`, true, false},
 			{Password, `password`, `[USER]`, `change password for user`, false, false},

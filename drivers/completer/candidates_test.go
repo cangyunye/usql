@@ -99,6 +99,10 @@ func (r candMockReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, err
 	return metadata.NewSequenceSet(results), nil
 }
 
+func (r candMockReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
+	return metadata.NewSchemaSet([]metadata.Schema{{Schema: "public"}}), nil
+}
+
 func containsString(names []string, name string) bool {
 	for _, n := range names {
 		if n == name {
@@ -220,7 +224,7 @@ func TestWithContextCompletion(t *testing.T) {
 		{
 			"backslash commands still complete via heuristics",
 			`\dt `, 4,
-			[]string{"actor", "film"}, 0,
+			[]string{"public.film", "public.actor"}, 0,
 		},
 	}
 

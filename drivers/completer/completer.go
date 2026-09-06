@@ -447,11 +447,11 @@ func (c completer) complete(previousWords []string, text []rune) [][]rune {
 	}
 	/* Backslash commands */
 	if TailMatches(MATCH_CASE, previousWords, `\cd|\e|\edit|\g|\gx|\i|\include|\ir|\include_relative|\o|\out|\s|\w|\write`) {
-		return completeFromFiles(text)
+		return completeFuzzyFull(string(text), completeFromFiles(text))
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\c|\connect|\copy`) ||
 		TailMatches(MATCH_CASE, previousWords, `\copy`, `*`) {
-		return CompleteFromList(text, c.connStrings...)
+		return completeFuzzyFull(string(text), c.connStrings)
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\copy`, `*`, `*`) {
 		return nil
@@ -481,42 +481,46 @@ func (c completer) complete(previousWords []string, text []rune) [][]rune {
 		return c.completeWithTables(text, []string{"MATERIALIZED VIEW"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\d*`) {
-		return c.completeWithSelectables(text)
+		return c.completeWithSelectablesFull(text)
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\l*`) ||
 		TailMatches(MATCH_CASE, previousWords, `\lo*`) {
 		return c.completeWithCatalogs(text)
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`) {
-		return CompleteFromList(text, `border`, `columns`, `expanded`, `fieldsep`, `fieldsep_zero`,
+		return completeFuzzyFull(string(text), []string{`border`, `columns`, `expanded`, `fieldsep`, `fieldsep_zero`,
 			`footer`, `format`, `linestyle`, `null`, `numericlocale`, `pager`, `pager_min_lines`,
 			`recordsep`, `recordsep_zero`, `tableattr`, `title`, `title`, `tuples_only`,
-			`unicode_border_linestyle`, `unicode_column_linestyle`, `unicode_header_linestyle`)
+			`unicode_border_linestyle`, `unicode_column_linestyle`, `unicode_header_linestyle`})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `expanded`) {
-		return CompleteFromList(text, "auto", "on", "off")
+		return completeFuzzyFull(string(text), []string{"auto", "on", "off"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `pager`) {
-		return CompleteFromList(text, "always", "on", "off")
+		return completeFuzzyFull(string(text), []string{"always", "on", "off"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `fieldsep_zero|footer|numericlocale|pager|recordsep_zero|tuples_only`) {
-		return CompleteFromList(text, "on", "off")
+		return completeFuzzyFull(string(text), []string{"on", "off"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `format`) {
-		return CompleteFromList(text, "unaligned", "aligned", "wrapped", "html", "asciidoc", "latex", "latex-longtable", "troff-ms", "csv", "json", "vertical")
+		return completeFuzzyFull(string(text), []string{"unaligned", "aligned", "wrapped", "html", "asciidoc", "latex", "latex-longtable", "troff-ms", "csv", "json", "vertical"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `linestyle`) {
-		return CompleteFromList(text, "ascii", "old-ascii", "unicode")
+		return completeFuzzyFull(string(text), []string{"ascii", "old-ascii", "unicode"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `unicode_border_linestyle|unicode_column_linestyle|unicode_header_linestyle`) {
-		return CompleteFromList(text, "single", "double")
+		return completeFuzzyFull(string(text), []string{"single", "double"})
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\pset`, `*`) ||
 		TailMatches(MATCH_CASE, previousWords, `\pset`, `*`, `*`) {
 		return nil
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\?`) {
-		return CompleteFromList(text, "commands", "options", "variables")
+		return completeFuzzyFull(string(text), []string{"commands", "options", "variables"})
+	}
+	// meta-command argument position: never suggest SQL keywords
+	if len(previousWords) > 0 && strings.HasPrefix(previousWords[len(previousWords)-1], "\\") {
+		return nil
 	}
 	// is suggesting basic sql commands better than nothing?
 	return CompleteFromList(text, c.sqlCommands...)
@@ -748,97 +752,120 @@ func (c completer) completeWithSelectables(text []rune) [][]rune {
 	return CompleteFromList(text, names...)
 }
 
+// completeWithSelectablesFull completes `\d`-style listings with fully
+// qualified tables, functions and sequences — no bare namespace names.
+func (c completer) completeWithSelectablesFull(text []rune) [][]rune {
+	var names []string
+	if r, ok := c.reader.(metadata.TableReader); ok {
+		filter := metadata.Filter{OnlyVisible: true}
+		names = append(names, c.getNames(
+			func() (iterator, error) { return r.Tables(filter) },
+			func(res interface{}) string {
+				t := res.(*metadata.TableSet).Get()
+				return fullIdentifier(t.Catalog, t.Schema, t.Name)
+			},
+		)...)
+	}
+	if r, ok := c.reader.(metadata.FunctionReader); ok {
+		names = append(names, c.getNames(
+			func() (iterator, error) { return r.Functions(metadata.Filter{OnlyVisible: true}) },
+			func(res interface{}) string {
+				f := res.(*metadata.FunctionSet).Get()
+				return fullIdentifier(f.Catalog, f.Schema, f.Name)
+			},
+		)...)
+	}
+	if r, ok := c.reader.(metadata.SequenceReader); ok {
+		names = append(names, c.getNames(
+			func() (iterator, error) { return r.Sequences(metadata.Filter{OnlyVisible: true}) },
+			func(res interface{}) string {
+				s := res.(*metadata.SequenceSet).Get()
+				return fullIdentifier(s.Catalog, s.Schema, s.Name)
+			},
+		)...)
+	}
+	return completeFuzzyFull(string(text), names)
+}
+
 func (c completer) completeWithTables(text []rune, types []string) [][]rune {
 	r, ok := c.reader.(metadata.TableReader)
 	if !ok {
-		return [][]rune{}
+		return nil
 	}
 
-	filter := parseIdentifier(string(text))
-	filter.Types = types
-	names := c.getNamespaces(filter)
-	tables := c.getNames(
+	// stable filter (no typed text): per-keystroke matching happens
+	// client-side; candidates are fully qualified schema.table names
+	filter := metadata.Filter{OnlyVisible: true, Types: types}
+	names := c.getNames(
 		func() (iterator, error) {
 			return r.Tables(filter)
 		},
 		func(res interface{}) string {
 			t := res.(*metadata.TableSet).Get()
-			return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name)
+			return fullIdentifier(t.Catalog, t.Schema, t.Name)
 		},
 	)
-	names = append(names, tables...)
-	sort.Strings(names)
-	return CompleteFromList(text, names...)
+	return completeFuzzyFull(string(text), names)
 }
 
 func (c completer) completeWithFunctions(text []rune, types []string) [][]rune {
 	r, ok := c.reader.(metadata.FunctionReader)
 	if !ok {
-		return [][]rune{}
+		return nil
 	}
-	filter := parseIdentifier(string(text))
-	filter.Types = types
-	names := c.getNamespaces(filter)
-	functions := c.getNames(
+	filter := metadata.Filter{OnlyVisible: true, Types: types}
+	names := c.getNames(
 		func() (iterator, error) {
 			return r.Functions(filter)
 		},
 		func(res interface{}) string {
 			f := res.(*metadata.FunctionSet).Get()
-			return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name)
+			return fullIdentifier(f.Catalog, f.Schema, f.Name)
 		},
 	)
-	names = append(names, functions...)
-	sort.Strings(names)
-	return CompleteFromList(text, names...)
+	return completeFuzzyFull(string(text), names)
 }
 
 func (c completer) completeWithIndexes(text []rune) [][]rune {
 	r, ok := c.reader.(metadata.IndexReader)
 	if !ok {
-		return [][]rune{}
+		return nil
 	}
-	filter := parseIdentifier(string(text))
-	names := c.getNamespaces(filter)
-	indexes := c.getNames(
+	filter := metadata.Filter{OnlyVisible: true}
+	names := c.getNames(
 		func() (iterator, error) {
 			return r.Indexes(filter)
 		},
 		func(res interface{}) string {
 			f := res.(*metadata.IndexSet).Get()
-			return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name)
+			return fullIdentifier(f.Catalog, f.Schema, f.Name)
 		},
 	)
-	names = append(names, indexes...)
-	sort.Strings(names)
-	return CompleteFromList(text, names...)
+	return completeFuzzyFull(string(text), names)
 }
 
 func (c completer) completeWithSequences(text []rune) [][]rune {
 	r, ok := c.reader.(metadata.SequenceReader)
 	if !ok {
-		return [][]rune{}
+		return nil
 	}
-	filter := parseIdentifier(string(text))
-	names := c.getNamespaces(filter)
-	sequences := c.getNames(
+	filter := metadata.Filter{OnlyVisible: true}
+	names := c.getNames(
 		func() (iterator, error) {
 			return r.Sequences(filter)
 		},
 		func(res interface{}) string {
 			s := res.(*metadata.SequenceSet).Get()
-			return qualifiedIdentifier(filter, s.Catalog, s.Schema, s.Name)
+			return fullIdentifier(s.Catalog, s.Schema, s.Name)
 		},
 	)
-	names = append(names, sequences...)
-	sort.Strings(names)
-	return CompleteFromList(text, names...)
+	return completeFuzzyFull(string(text), names)
 }
 
 func (c completer) completeWithSchemas(text []rune) [][]rune {
 	r, ok := c.reader.(metadata.SchemaReader)
 	if !ok {
-		return [][]rune{}
+		return nil
 	}
 	filter := parseIdentifier(string(text))
 	names := c.getNames(
@@ -854,13 +881,13 @@ func (c completer) completeWithSchemas(text []rune) [][]rune {
 			return qualifiedIdentifier(filter, "", s.Catalog, s.Schema)
 		},
 	)
-	return CompleteFromList(text, names...)
+	return completeFuzzyFull(string(text), names)
 }
 
 func (c completer) completeWithCatalogs(text []rune) [][]rune {
 	r, ok := c.reader.(metadata.CatalogReader)
 	if !ok {
-		return [][]rune{}
+		return nil
 	}
 	filter := parseIdentifier(string(text))
 	names := c.getNames(
@@ -1068,7 +1095,7 @@ type iterator interface {
 	Close() error
 }
 
-func completeFromFiles(text []rune) [][]rune {
+func completeFromFiles(text []rune) []string {
 	// TODO handle quotes properly
 	dir := filepath.Dir(string(text))
 	dirs, err := os.ReadDir(dir)
@@ -1091,5 +1118,5 @@ func completeFromFiles(text []rune) [][]rune {
 		}
 		matches = append(matches, dir+name)
 	}
-	return CompleteFromList(text, matches...)
+	return matches
 }

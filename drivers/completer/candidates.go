@@ -141,6 +141,16 @@ func (c *completer) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
 	if res := c.completeWithContext(previousWords, text); res != nil {
 		return res, len(text), true
 	}
+	// meta-command argument position (the command itself is already
+	// typed): object and value candidates are full words replacing the
+	// argument. Typing the command itself (text starts with backslash)
+	// stays append-style, since backslash command candidates are suffixes.
+	if !strings.HasPrefix(string(text), "\\") && len(previousWords) > 0 &&
+		strings.HasPrefix(previousWords[len(previousWords)-1], "\\") {
+		if res := c.complete(previousWords, text); res != nil {
+			return res, len(text), true
+		}
+	}
 	return nil, 0, false
 }
 
@@ -252,7 +262,7 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 	if tablesOnly {
 		filter.Types = updatableTypes
 	}
-	names := c.getNamespaces(filter)
+	var names []string
 	if r, ok := c.reader.(metadata.TableReader); ok {
 		names = append(names, c.getNames(
 			func() (iterator, error) { return r.Tables(filter) },

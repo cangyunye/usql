@@ -51,8 +51,8 @@ func TestCompleter(t *testing.T) {
 			`\i comp`,
 			7,
 			[]string{
-				"leter.go",
-				"leter_test.go",
+				"completer.go",
+				"completer_test.go",
 			},
 			4,
 		},
@@ -61,7 +61,7 @@ func TestCompleter(t *testing.T) {
 			`\c p`,
 			4,
 			[]string{
-				"g://",
+				"pg://",
 			},
 			1,
 		},

@@ -1,14 +1,22 @@
 # Taskfile for building usql.
 #
 # Cross-platform task runner (github.com/go-task/task). Tested with task v3.
-#   task build      -> build the test driver set (CGO-free, pure Go)
-#   task build:cgo  -> build with CGO enabled (mattn sqlite3, resvg, duckdb)
-#   task drivers    -> show the drivers compiled into the binary
-#   task clean      -> remove built artifacts
+#   task build       -> build the test driver set (CGO-free, pure Go, stripped)
+#   task build:chart -> CGO-free + ECharts JS engine (\chart ... file= SVG export)
+#   task build:cgo   -> build with CGO enabled (mattn sqlite3, resvg, charts)
+#   task drivers     -> show the drivers compiled into the built binary
+#   task clean       -> remove built artifacts
 #
-# The driver set below covers: oceanbase (mysql), oboracle (OceanBase Oracle),
-# opengauss, mysql, postgres, oracle, plus a pure-Go sqlite (moderncsqlite).
+# The driver set below covers exactly: oceanbase (mysql), oboracle (OceanBase
+# Oracle), opengauss, mysql, postgres, oracle. moderncsqlite is deliberately
+# NOT included; add it back (and drop no_sqlite3) if you want a local test DB.
 # Tune DRIVERS with `task build DRIVERS="postgres mysql"` if you want less.
+# -ldflags "-s -w" strips DWARF/symbol tables (~11MB); panic traces still work.
+#
+# \chart is gated behind the "chart" build tag: it embeds the goja JS engine
+# plus echarts.min.js (~7MB). The default build omits it; build:chart keeps a
+# CGO-free binary with SVG file export; build:cgo adds terminal image output
+# via the resvg cgo binding.
 
 version: "3"
 
@@ -17,28 +25,34 @@ env:
 
 vars:
   BIN: usql
-  # CGO-free, no-C-driver test set. no_* excludes base drivers not wanted.
+  # CGO-free, no-C-driver set, stripped. no_* excludes base drivers not wanted.
+  # oceanbase is a mysql-scheme alias, so the mysql tag covers it.
   DRIVERS: >-
     postgres mysql oracle opengauss oboracle
-    no_sqlite3 no_sqlserver no_clickhouse no_csvq moderncsqlite
+    no_sqlite3 no_sqlserver no_clickhouse no_csvq
 
 tasks:
   default:
-    desc: Build usql with the test driver set (CGO-free, pure Go)
+    desc: Build usql with the test driver set (CGO-free, pure Go, stripped)
     cmds:
-      - go build -tags "{{.DRIVERS}}" -o {{.BIN}} .
+      - go build -tags "{{.DRIVERS}}" -ldflags "-s -w" -o {{.BIN}} .
 
   build:
     desc: Alias of default (CGO-free test driver set)
     cmds:
       - task: default
 
+  build:chart:
+    desc: Build CGO-free with the ECharts engine (\chart file= SVG export)
+    cmds:
+      - go build -tags "{{.DRIVERS}} chart" -ldflags "-s -w" -o {{.BIN}} .
+
   build:cgo:
-    desc: Build with CGO enabled (mattn sqlite3, resvg chart, duckdb)
+    desc: Build with CGO enabled (mattn sqlite3, resvg, terminal charts)
     env:
       CGO_ENABLED: "1"
     cmds:
-      - go build -tags "{{.DRIVERS | replace \"no_sqlite3 moderncsqlite\" \"sqlite3\"}}" -o {{.BIN}} .
+      - go build -tags "{{.DRIVERS | replace \"no_sqlite3\" \"sqlite3\"}} chart" -ldflags "-s -w" -o {{.BIN}} .
 
   drivers:
     desc: List the drivers compiled into the built binary

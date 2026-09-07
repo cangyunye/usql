@@ -8,14 +8,19 @@ import (
 	"testing"
 
 	"github.com/99designs/keyring"
+	"github.com/xo/dburl"
 )
 
 // setupConnsTest points the config dir at a temp XDG dir and forces the
 // fallback (file) secret backend so tests do not depend on an OS keyring.
+// HOME is redirected as well: os.UserConfigDir ignores XDG_CONFIG_HOME on
+// darwin, and without it the tests would read the user's real connections
+// file.
 func setupConnsTest(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
 	old := keyringBackends
 	keyringBackends = func() []keyring.BackendType { return nil }
 	t.Cleanup(func() {
@@ -224,5 +229,42 @@ func TestBuildConnURLFilePaths(t *testing.T) {
 	}
 	if urlstr != "postgres://db:5432/mydb" {
 		t.Fatalf("postgres url: %q", urlstr)
+	}
+}
+
+func TestSaveConnFromURLEncoding(t *testing.T) {
+	setupConnsTest(t)
+	u, err := dburl.Parse("mysql://kube:pw@localhost:3306/dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConnFromURL("enc1", u, "GBK"); err != nil {
+		t.Fatal(err)
+	}
+	if enc, ok := Vars().GetConnEncoding("enc1"); !ok || enc != "gbk" {
+		t.Fatalf("session encoding = %q, %v; want gbk", enc, ok)
+	}
+	b, err := os.ReadFile(connsFile(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "encoding: gbk") {
+		t.Fatalf("store file missing encoding: gbk:\n%s", b)
+	}
+	if strings.Contains(string(b), "pw") {
+		t.Fatalf("store file leaked password:\n%s", b)
+	}
+	// utf-8 (the default) and empty are not recorded
+	if err := SaveConnFromURL("enc2", u, "utf-8"); err != nil {
+		t.Fatal(err)
+	}
+	if enc, ok := Vars().GetConnEncoding("enc2"); ok && enc != "" {
+		t.Fatalf("utf-8 recorded as %q, want unset", enc)
+	}
+	if err := SaveConnFromURL("enc3", u, ""); err != nil {
+		t.Fatal(err)
+	}
+	if enc, ok := Vars().GetConnEncoding("enc3"); ok && enc != "" {
+		t.Fatalf("empty recorded as %q, want unset", enc)
 	}
 }

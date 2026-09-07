@@ -573,8 +573,11 @@ func ReadConnPassword(name string) (string, bool, error) {
 
 // SaveConnFromURL stores a successfully connected URL as a named connection,
 // extracting the components and password. The URL's password (if any) is kept
-// in the secret store, never in the components file.
-func SaveConnFromURL(name string, u *dburl.URL) error {
+// in the secret store, never in the components file. A non-empty encoding
+// (the --encoding value the connection was started with) is recorded with
+// the connection, so reconnecting by name re-applies it; the UTF-8 default
+// is not stored.
+func SaveConnFromURL(name string, u *dburl.URL, encoding string) error {
 	components := map[string]any{"protocol": u.Scheme}
 	if u.User != nil && u.User.Username() != "" {
 		components["username"] = u.User.Username()
@@ -590,6 +593,9 @@ func SaveConnFromURL(name string, u *dburl.URL) error {
 	} else if u.Opaque != "" {
 		// file-style schemes keep the raw path in the opaque component
 		components["path"] = u.Opaque
+	}
+	if enc := strings.ToLower(strings.TrimSpace(encoding)); enc != "" && enc != "utf-8" && enc != "utf8" {
+		components["encoding"] = enc
 	}
 	password, _ := u.User.Password()
 	return SaveConn(name, components, password)

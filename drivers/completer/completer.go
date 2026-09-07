@@ -846,17 +846,11 @@ func (c completer) completeWithUpdatables(text []rune) [][]rune {
 
 func (c completer) getNamespaces(f metadata.Filter) []string {
 	names := make([]string, 0, 10)
-	if f.Catalog == "" && f.Schema == "" {
-		if r, ok := c.reader.(metadata.CatalogReader); ok {
-			catalogs := c.getNames(
-				func() (iterator, error) { return r.Catalogs(metadata.Filter{}) },
-				func(res interface{}) string {
-					return res.(*metadata.CatalogSet).Get().Catalog
-				},
-			)
-			names = append(names, catalogs...)
-		}
-	}
+	// Catalogs (database names) are not offered as namespaces: in FROM/JOIN/
+	// UPDATE/INSERT INTO positions one picks schema-qualified objects, and
+	// for PostgreSQL-style databases the catalog list is the database list,
+	// which psql does not offer either. \l completes catalogs via
+	// completeWithCatalogs.
 	if f.Catalog != "" {
 		// filter is already fully qualified, so don't return any namespaces
 		return names

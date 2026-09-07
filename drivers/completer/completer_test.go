@@ -81,8 +81,6 @@ func TestCompleter(t *testing.T) {
 			"SELECT * FROM ",
 			14,
 			[]string{
-				"main",
-				"remote",
 				"default",
 				"system",
 				"film",
@@ -249,8 +247,6 @@ func TestCompleter(t *testing.T) {
 			"TABLE ",
 			6,
 			[]string{
-				"main",
-				"remote",
 				"default",
 				"system",
 				"film",

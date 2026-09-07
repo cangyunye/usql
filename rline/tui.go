@@ -127,6 +127,15 @@ func (t *tuiRline) Completer(c Completer) {
 	}
 }
 
+// SwapCompleter satisfies CompleterSwapper: install c and return a func
+// restoring the previous completer (re-wiring its kick). Swapping happens
+// between reads, so no model ever observes the intermediate state.
+func (t *tuiRline) SwapCompleter(c Completer) func() {
+	prev := t.comp
+	t.Completer(c)
+	return func() { t.Completer(prev) }
+}
+
 // Save records a line in the history.
 func (t *tuiRline) Save(s string) error { return t.hist.Save(s) }
 

@@ -27,6 +27,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
@@ -34,6 +36,7 @@ import (
 	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
+	"github.com/xo/usql/rline"
 	"github.com/xo/usql/text"
 )
 
@@ -110,12 +113,19 @@ func connTable(names []string, selected int) string {
 
 // connsManage runs the interactive connection manager loop. Under the TUI
 // input engine it is a self-contained bubbletea modal; readline mode keeps
-// the line-oriented loop below.
+// the line-oriented loop below, with the SQL completer swapped out for one
+// offering only the manager's own operations.
 func connsManage(h Handler) error {
 	if t, ok := h.IO().(interface{ IsTUI() bool }); ok && t.IsTUI() {
 		if cr, ok := h.IO().(interface{ ConsoleReader() io.Reader }); ok {
 			return connsModal(h, cr.ConsoleReader())
 		}
+	}
+	// the loop's prompts must not complete SQL keywords: install the menu
+	// completer (its per-field prompts re-swap via askField)
+	if sw, ok := h.IO().(rline.CompleterSwapper); ok {
+		restore := sw.SwapCompleter(connsMenuCompleter{})
+		defer restore()
 	}
 	stdout, stderr := h.IO().Stdout(), h.IO().Stderr()
 	for {
@@ -144,7 +154,7 @@ func connsManage(h Handler) error {
 				target = fields[1]
 			}
 			if target == "" {
-				if target, err = askField(h, "name or #", "", false); err != nil {
+				if target, err = askField(h, "name or #", "", false, connTargets(names)...); err != nil {
 					return nil
 				}
 				target = strings.TrimSpace(target)
@@ -322,7 +332,7 @@ func connsForm(h Handler, name string, editing bool) error {
 	// encoding: client-side decoding of database output; validated by
 	// saveConnFields so a typo doesn't fail later at connect time
 	encDef, _ := env.Vars().GetConnEncoding(name)
-	enc, err := askField(h, "encoding (utf-8, gbk, gb2312, gb18030)", encDef, false)
+	enc, err := askField(h, "encoding (utf-8, gbk, gb2312, gb18030)", encDef, false, "utf-8", "gbk", "gb2312", "gb18030")
 	if err != nil {
 		return err
 	}
@@ -399,7 +409,7 @@ func askProtocol(h Handler, current string) (string, error) {
 		def = current
 	}
 	for {
-		v, err := askField(h, "protocol [# or name]", def, false)
+		v, err := askField(h, "protocol [# or name]", def, false, candidates...)
 		if err != nil {
 			return "", err
 		}
@@ -421,7 +431,18 @@ func askProtocol(h Handler, current string) (string, error) {
 
 // askField prompts for a field value. When def is non-empty and the user
 // enters nothing, def is returned. masked input hides the typed characters.
-func askField(h Handler, label, def string, masked bool) (string, error) {
+// Any words offered become the prompt's completion candidates — every conns
+// prompt swaps the completer, so free-form fields (hostnames, paths,
+// passwords) complete nothing rather than SQL keywords.
+func askField(h Handler, label, def string, masked bool, words ...string) (string, error) {
+	if sw, ok := h.IO().(rline.CompleterSwapper); ok {
+		var comp rline.Completer = noCompleter{}
+		if len(words) > 0 {
+			comp = wordCompleter{words}
+		}
+		restore := sw.SwapCompleter(comp)
+		defer restore()
+	}
 	typ := "string"
 	if masked {
 		typ = "password"
@@ -438,4 +459,90 @@ func askField(h Handler, label, def string, masked bool) (string, error) {
 		return def, nil
 	}
 	return v, nil
+}
+
+// noCompleter offers no candidates.
+type noCompleter struct{}
+
+// Do satisfies rline.Completer.
+func (noCompleter) Do([]rune, int) ([][]rune, int) { return nil, 0 }
+
+// wordCompleter completes a fixed word list, ignoring case; candidates are
+// the append-style suffixes after the typed word.
+type wordCompleter struct{ words []string }
+
+// Do satisfies rline.Completer.
+func (w wordCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	if pos > len(line) {
+		pos = len(line)
+	}
+	start := pos
+	for start > 0 && !unicode.IsSpace(line[start-1]) {
+		start--
+	}
+	return completeWords(string(line[start:pos]), w.words), pos - start
+}
+
+// connsMenuCompleter completes the \conns manager menu prompt: the first
+// word is one of the manager's operations (or a row number), the word after
+// connect/delete is a connection name.
+type connsMenuCompleter struct{}
+
+// Do satisfies rline.Completer.
+func (connsMenuCompleter) Do(line []rune, pos int) ([][]rune, int) {
+	if pos > len(line) {
+		pos = len(line)
+	}
+	before := string(line[:pos])
+	fields := strings.Fields(before)
+	cur := ""
+	if len(fields) > 0 && !unicode.IsSpace(rune(before[len(before)-1])) {
+		cur = fields[len(fields)-1]
+		fields = fields[:len(fields)-1]
+	}
+	var options []string
+	switch {
+	case len(fields) == 0:
+		options = []string{"add", "connect", "delete", "quit"}
+		options = append(options, connNumbers()...)
+	case len(fields) == 1:
+		switch strings.ToLower(fields[0]) {
+		case "c", "connect", "d", "delete":
+			options = slices.Sorted(maps.Keys(env.Vars().Conn()))
+		}
+	}
+	if len(options) == 0 {
+		return nil, 0
+	}
+	return completeWords(cur, options), utf8.RuneCountInString(cur)
+}
+
+// completeWords returns the suffixes of options that case-insensitively
+// start with text.
+func completeWords(text string, options []string) [][]rune {
+	var out [][]rune
+	tr := []rune(text)
+	low := strings.ToLower(text)
+	for _, o := range options {
+		or := []rune(o)
+		if strings.HasPrefix(strings.ToLower(o), low) {
+			out = append(out, or[len(tr):])
+		}
+	}
+	return out
+}
+
+// connNumbers lists the manager's row-number shortcuts, 1..n.
+func connNumbers() []string {
+	n := len(env.Vars().Conn())
+	out := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, strconv.Itoa(i))
+	}
+	return out
+}
+
+// connTargets lists the connection names and their row numbers.
+func connTargets(names []string) []string {
+	return append(slices.Clone(names), connNumbers()...)
 }

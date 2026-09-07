@@ -333,13 +333,14 @@ func Run(ctx context.Context, args *Args) error {
 	if err = h.Open(ctx, dsn); err != nil {
 		return err
 	}
-	// save the connected DSN as a named connection
+	// save the connected DSN as a named connection, recording the requested
+	// client encoding so reconnecting by name re-applies it
 	if args.DSN != "" && h.URL() != nil {
 		name := args.Name
 		if name == "" {
 			name = env.DefaultConnName(h.URL())
 		}
-		if err := env.SaveConnFromURL(name, h.URL()); err != nil {
+		if err := env.SaveConnFromURL(name, h.URL(), args.Encoding); err != nil {
 			fmt.Fprintln(os.Stderr, "save connection:", err)
 		}
 	}

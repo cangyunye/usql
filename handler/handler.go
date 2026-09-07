@@ -32,7 +32,6 @@ import (
 	"github.com/go-git/go-billy/v5"
 	"github.com/xo/dburl"
 	"github.com/xo/dburl/passfile"
-	"github.com/xo/echartsgoja"
 	"github.com/xo/tblfmt"
 	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
@@ -1158,6 +1157,9 @@ func (h *Handler) doExecWatch(ctx context.Context, w io.Writer, opt metacmd.Opti
 // doExecChart executes a single query against the database, displaying its output as a chart.
 func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Option, prefix, sqlstr string, qtyp bool, bind []interface{}) error {
 	stdout, _, _ := h.l.Stdout(), h.l.Stderr(), h.l.Interactive()
+	if !chartEnabled {
+		return text.ErrChartNotBuilt
+	}
 	typ := env.TermGraphics()
 	if !typ.Available() {
 		return text.ErrGraphicsNotSupported
@@ -1208,8 +1210,7 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 	if err != nil {
 		return err
 	}
-	echarts := echartsgoja.New(echartsgoja.WithWidthHeight(cfg.W, cfg.H))
-	res, err := echarts.RenderOptions(ctx, data)
+	res, err := renderChartSVG(ctx, cfg, data)
 	if err != nil {
 		return err
 	}

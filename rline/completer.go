@@ -35,6 +35,16 @@ type Replacer interface {
 	DoRepl(line []rune, pos int) (newLine [][]rune, length int, ok bool)
 }
 
+// CompleterSwapper is an optional IO extension that lets callers (e.g. the
+// \conns manager) temporarily replace the active completer with one fitted
+// to their own prompts, restoring the previous one afterwards. The IO
+// implementations swap out only the completer, never the engine.
+type CompleterSwapper interface {
+	// SwapCompleter installs c and returns a func restoring the previous
+	// completer.
+	SwapCompleter(c Completer) (restore func())
+}
+
 // completerAdapter forwards a Completer to the readline.AutoCompleter
 // interface, including the optional LiveCompleter and Replacer extensions.
 // The optional methods degrade to the plain Do path when the wrapped
@@ -49,12 +59,17 @@ func (a completerAdapter) Do(line []rune, pos int) ([][]rune, int) {
 	return a.c.Do(line, pos)
 }
 
-// DoLive satisfies readline.LiveAutoCompleter.
+// DoLive satisfies readline.LiveAutoCompleter. When the wrapped Completer
+// does not provide the live fast path, it degrades to the synchronous Do
+// (append-style), so plain completers stay usable under the adapter: the
+// readline engine takes DoLive's result as final and never falls through to
+// Do on its own.
 func (a completerAdapter) DoLive(line []rune, pos int) ([][]rune, int, bool) {
 	if lc, ok := a.c.(LiveCompleter); ok {
 		return lc.DoLive(line, pos)
 	}
-	return nil, 0, false
+	newLines, length := a.c.Do(line, pos)
+	return newLines, length, false
 }
 
 // SetLiveKick satisfies readline.LiveAutoCompleter.

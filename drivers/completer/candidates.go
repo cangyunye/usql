@@ -138,7 +138,9 @@ func (c completer) completeFromContext(ctx Context) [][]rune {
 		}
 		return res
 	}
-	return completeFuzzyFull(ctx.Qualifier+ctx.Object, options)
+	// anchored (start-anchored) matching: candidates match from the start of
+	// the word or of their last segment, not as fuzzy subsequences
+	return completePrefixFull(ctx.Qualifier+ctx.Object, options)
 }
 
 // DoRepl provides the fork's replace-style completion: the context path's
@@ -215,9 +217,11 @@ func (c completer) contextOptions(ctx Context) ([]string, bool, bool) {
 		// the candidate list small; after "schema." the qualified branch
 		// lists that namespace's objects. Only when no namespace matches
 		// the typed word fall back to fully qualified tables, so direct
-		// table names ("FROM film") still complete.
+		// table names ("FROM film") still complete. Catalogs (database
+		// names) are deliberately not offered: after FROM/INTO one picks
+		// schema-qualified objects, not databases.
 		ns := c.getNamespaces(metadata.Filter{OnlyVisible: true})
-		if len(completeFuzzyFull(ctx.Qualifier+ctx.Object, ns)) > 0 {
+		if len(completePrefixFull(ctx.Qualifier+ctx.Object, ns)) > 0 {
 			return ns, true, false
 		}
 		return c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE"), true, false

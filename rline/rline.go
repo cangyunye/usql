@@ -59,6 +59,8 @@ type Rline struct {
 	A    func(Completer)
 	S    func(string) error
 	Pw   func(string) (string, error)
+
+	comp Completer // the current completer, for SwapCompleter
 }
 
 // Next returns the next line of runes (excluding '\n') from the input.
@@ -106,9 +108,18 @@ func (l *Rline) Prompt(s string) {
 
 // Completer sets the auto-completer.
 func (l *Rline) Completer(a Completer) {
+	l.comp = a
 	if l.A != nil {
 		l.A(a)
 	}
+}
+
+// SwapCompleter satisfies CompleterSwapper: install a and return a func
+// restoring the previous completer.
+func (l *Rline) SwapCompleter(a Completer) func() {
+	prev := l.comp
+	l.Completer(a)
+	return func() { l.Completer(prev) }
 }
 
 // Save saves a line of history.

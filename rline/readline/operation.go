@@ -3,11 +3,18 @@ package readline
 import (
 	"errors"
 	"io"
+	"time"
 )
 
 var (
 	ErrInterrupt = errors.New("Interrupt")
 )
+
+// liveDebounce is how long the typing-time completion waits for the user to
+// stop typing: keystrokes in quick succession — typing, but especially
+// paste — keep re-arming it, so the candidate menu/ghost fires once per
+// typing pause instead of once per rune. (usql fork)
+const liveDebounce = 150 * time.Millisecond
 
 type InterruptError struct {
 	Line []rune
@@ -30,6 +37,8 @@ type Operation struct {
 	*opCompleter
 	*opPassword
 	*opVim
+
+	liveTimer *time.Timer // pending debounced typing-time completion
 }
 
 func (o *Operation) SetBuffer(what string) {
@@ -43,6 +52,27 @@ func (o *Operation) LiveKick() {
 		return
 	}
 	o.LiveComplete()
+}
+
+// LiveDebounce schedules the typing-time completion to run once the user
+// pauses typing; each keystroke re-arms it. (usql fork)
+func (o *Operation) LiveDebounce() {
+	if o.cfg == nil || o.cfg.AutoComplete == nil || !o.cfg.LiveComplete {
+		return
+	}
+	if o.liveTimer != nil {
+		o.liveTimer.Stop()
+	}
+	o.liveTimer = time.AfterFunc(liveDebounce, o.LiveComplete)
+}
+
+// cancelLive stops a pending debounced completion, so it cannot fire into a
+// line that has already been submitted. (usql fork)
+func (o *Operation) cancelLive() {
+	if o.liveTimer != nil {
+		o.liveTimer.Stop()
+		o.liveTimer = nil
+	}
 }
 
 type wrapWriter struct {
@@ -226,8 +256,9 @@ func (o *Operation) ioloop() {
 			if o.IsInCompleteMode() {
 				o.OnComplete()
 			} else if o.cfg.LiveComplete && o.cfg.AutoComplete != nil {
-				// typing-time menu, display-only (usql fork)
-				o.LiveComplete()
+				// typing-time menu, display-only (usql fork); debounced until
+				// the user pauses typing
+				o.LiveDebounce()
 			}
 			if o.cfg.LiveComplete && o.IsInCompleteMode() {
 				keepInCompleteMode = true
@@ -245,6 +276,7 @@ func (o *Operation) ioloop() {
 			if o.IsSearchMode() {
 				o.ExitSearchMode(false)
 			}
+			o.cancelLive()
 			o.buf.MoveToLineEnd()
 			var data []rune
 			if !o.cfg.UniqueEditLine {
@@ -297,6 +329,7 @@ func (o *Operation) ioloop() {
 			}
 
 			// treat as EOF
+			o.cancelLive()
 			if !o.cfg.UniqueEditLine {
 				o.buf.WriteString(o.cfg.EOFPrompt + "\n")
 			}
@@ -313,6 +346,7 @@ func (o *Operation) ioloop() {
 				o.ExitSearchMode(true)
 				break
 			}
+			o.cancelLive()
 			if o.IsInCompleteMode() {
 				o.t.KickRead()
 				o.ExitCompleteMode(true)
@@ -345,8 +379,9 @@ func (o *Operation) ioloop() {
 				o.OnComplete()
 				keepInCompleteMode = true
 			} else if o.cfg.LiveComplete && o.cfg.AutoComplete != nil {
-				// typing-time menu, display-only (usql fork)
-				o.LiveComplete()
+				// typing-time menu, display-only (usql fork); debounced until
+				// the user pauses typing
+				o.LiveDebounce()
 				keepInCompleteMode = o.IsInCompleteMode()
 			}
 		}

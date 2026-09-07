@@ -13,8 +13,18 @@ import (
 // menuHeight is the maximum number of candidates shown at once.
 const menuHeight = 10
 
+// compDebounce is how long the typing-time completion (ghost suggestion and
+// its metadata query) waits for the user to stop typing: keystrokes in quick
+// succession — typing, but especially paste — keep pushing the deadline, so
+// the completion fires once per typing pause instead of once per rune.
+const compDebounce = 150 * time.Millisecond
+
 // kickMsg is delivered when an asynchronous completion result lands.
 type kickMsg struct{}
+
+// compMsg is delivered when the typing pause elapses; the trailing
+// completion is computed then, unless typing continued in the meantime.
+type compMsg struct{}
 
 // finalizeMsg carries the outcome of a line read out of the model.
 type finalizeMsg struct {
@@ -70,6 +80,14 @@ type lineModel struct {
 	hlAt   time.Time // when hlIn/hlOut were computed
 	hlPend bool      // a trailing re-highlight is scheduled
 
+	// typing-time completion debounce: the ghost/metadata completion wants
+	// to run (compDue) no earlier than compDeadline; while keys keep
+	// arriving the deadline slides forward and compPend holds one armed
+	// tick that re-checks it
+	compDue      bool
+	compDeadline time.Time
+	compPend     bool
+
 	// result plumbing
 	done        bool
 	interrupted bool // ^C
@@ -116,6 +134,15 @@ func (m *lineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.waitKick()
 
+	case compMsg:
+		// the typing pause elapsed; typing meanwhile slid the deadline, in
+		// which case the tick re-arms instead of completing now
+		m.compPend = false
+		if !m.done && m.compDue && time.Until(m.compDeadline) <= 0 {
+			m.computeCompletion()
+		}
+		return m, m.scheduleCompletion()
+
 	case hlMsg:
 		// trailing re-highlight after the debounce window
 		m.hlPend = false
@@ -126,7 +153,7 @@ func (m *lineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		mod, cmd := m.handleKey(msg)
-		return mod, tea.Batch(cmd, m.refreshHighlight())
+		return mod, tea.Batch(cmd, m.refreshHighlight(), m.scheduleCompletion())
 	}
 	return m, nil
 }
@@ -314,8 +341,10 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		m.done = true
 		m.ghost = nil
 	case "esc":
-		// clear the ghost, no-op otherwise
+		// clear the ghost, no-op otherwise; also cancel a pending debounced
+		// completion, so the dismissed suggestion does not pop back
 		m.ghost = nil
+		m.compDue = false
 	case "backspace":
 		for k := 0; k < n && ed.backspace(); k++ {
 		}
@@ -457,7 +486,8 @@ func (m *lineModel) historyNext() {
 
 // afterEdit recomputes ghost text and live candidates after a buffer edit.
 // When keepMenu is set (Tab completion), an open menu is refreshed instead
-// of closed.
+// of closed. The typing-time completion is debounced: it runs when the user
+// pauses typing (compDebounce), so paste does not flash a menu per rune.
 func (m *lineModel) afterEdit(keepMenu bool) {
 	if m.menu != nil {
 		m.refreshCompletion()
@@ -469,11 +499,36 @@ func (m *lineModel) afterEdit(keepMenu bool) {
 	if m.ed.atEnd() && !m.ed.empty() && m.t.hist != nil {
 		m.ghost = m.t.hist.suggest(m.ed.buf)
 	}
-	if m.t.comp != nil && m.ed.atEnd() && !m.ed.empty() && len(m.ghost) == 0 {
-		// metadata-sourced best match via the live fast path; the ghost is
-		// filled in when the (possibly asynchronous) result lands
-		m.requestCandidates()
+	// the metadata-sourced best match waits for the typing pause; the ghost
+	// is filled in when the (possibly asynchronous) result lands
+	m.compDue = m.t.comp != nil && m.ed.atEnd() && !m.ed.empty() && len(m.ghost) == 0
+	m.compDeadline = time.Now().Add(compDebounce)
+}
+
+// scheduleCompletion arms the trailing completion tick while a debounced
+// completion is due and the pause has not yet elapsed.
+func (m *lineModel) scheduleCompletion() tea.Cmd {
+	if !m.compDue || m.compPend {
+		return nil
 	}
+	if d := time.Until(m.compDeadline); d > 0 {
+		m.compPend = true
+		return tea.Tick(d, func(time.Time) tea.Msg { return compMsg{} })
+	}
+	// the pause already elapsed (the deadline was set by an earlier batch of
+	// this same keystroke burst): complete on the next Update pass
+	m.compPend = true
+	return tea.Tick(time.Nanosecond, func(time.Time) tea.Msg { return compMsg{} })
+}
+
+// computeCompletion runs the debounced typing-time completion request.
+func (m *lineModel) computeCompletion() {
+	m.compDue = false
+	if m.done || m.menu != nil || m.t.comp == nil || !m.ed.atEnd() ||
+		m.ed.empty() || len(m.ghost) > 0 {
+		return
+	}
+	m.requestCandidates()
 }
 
 // requestCandidates asks the completer for candidates at the cursor,

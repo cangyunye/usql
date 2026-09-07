@@ -180,7 +180,7 @@ func TestWithContextCompletion(t *testing.T) {
 		{
 			"insert into column group done offers values",
 			"INSERT INTO film (id, name) v", 29,
-			[]string{"values", "overriding"}, 1,
+			[]string{"values"}, 1,
 		},
 		{
 			"values group hints all fields in written order",

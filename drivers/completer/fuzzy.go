@@ -142,3 +142,42 @@ func completeFuzzy(text []rune, options ...string) [][]rune {
 	}
 	return result
 }
+
+// completePrefixFull returns the options matched from the start — anchored
+// matching for the context path, where candidates replace the word at the
+// cursor. An option matches when it starts with the pattern (case
+// insensitive), or — for a dotless pattern, so bare table names complete
+// against qualified candidates — when its last dot-separated segment does
+// ("film" matches "public.film"; "db" does not match "foo_db_bar").
+// Results keep a stable shortest-first order, and are lower-cased when the
+// pattern starts with a lower-case letter, mirroring completeFuzzyFull.
+func completePrefixFull(pattern string, options []string) [][]rune {
+	p := strings.ToLower(pattern)
+	dotted := strings.Contains(pattern, ".")
+	var matches []string
+	for _, o := range options {
+		low := strings.ToLower(o)
+		if strings.HasPrefix(low, p) {
+			matches = append(matches, o)
+			continue
+		}
+		// bare word: also match the object segment of qualified candidates
+		if !dotted {
+			if i := strings.LastIndexByte(low, '.'); i >= 0 && strings.HasPrefix(low[i+1:], p) {
+				matches = append(matches, o)
+			}
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return len(matches[i]) < len(matches[j])
+	})
+	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
+	result := make([][]rune, 0, len(matches))
+	for _, m := range matches {
+		if lower {
+			m = strings.ToLower(m)
+		}
+		result = append(result, []rune(m))
+	}
+	return result
+}

@@ -114,3 +114,57 @@ func TestCompleteFuzzy(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletePrefixFull(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		options []string
+		want    []string
+	}{
+		{
+			"prefix matches, mid-string does not",
+			"db",
+			[]string{"db_film", "foo_db_bar", "public.film"},
+			[]string{"db_film"},
+		},
+		{
+			"bare word matches the object segment",
+			"fi",
+			[]string{"public.film", "public.actor", "film_view"},
+			[]string{"film_view", "public.film"},
+		},
+		{
+			"dotted pattern anchors at the start only",
+			"public.fi",
+			[]string{"public.film", "xpublic.film", "public.actor"},
+			[]string{"public.film"},
+		},
+		{
+			"empty pattern keeps everything, shortest first",
+			"",
+			[]string{"public.actor_id_seq", "public.now", "public.film"},
+			[]string{"public.now", "public.film", "public.actor_id_seq"},
+		},
+		{
+			"lowercase pattern lower-cases candidates",
+			"fi",
+			[]string{"PUBLIC.FILM"},
+			[]string{"public.film"},
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			got := completePrefixFull(test.pattern, test.options)
+			if len(got) != len(test.want) {
+				t.Fatalf("completePrefixFull(%q, %v) = %q, want %q", test.pattern, test.options, got, test.want)
+			}
+			for i := range got {
+				if string(got[i]) != test.want[i] {
+					t.Errorf("got[%d] = %q, want %q", i, got[i], test.want[i])
+				}
+			}
+		})
+	}
+}

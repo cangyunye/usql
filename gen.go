@@ -82,7 +82,7 @@ func run(licenseStart int, licenseAuthor string, dburlGen bool, dburlDir string,
 
 // loadDrivers loads the driver descriptions.
 func loadDrivers(wd string) error {
-	skipDirs := []string{"completer", "metadata"}
+	skipDirs := []string{"completer", "metadata", "rowlimit"}
 	err := fs.WalkDir(os.DirFS(wd), ".", func(n string, d fs.DirEntry, err error) error {
 		switch {
 		case err != nil:

@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/handler"
 	"github.com/xo/usql/internal"
@@ -21,6 +22,12 @@ import (
 )
 
 func main() {
+	// switch the attached Windows console to UTF-8 before anything writes
+	// to it — table borders and CJK text are mojibake on a legacy code page
+	// console otherwise; no-op (with a no-op restore) elsewhere. Must run
+	// before rline.New reads the console code pages.
+	restoreConsole := charset.SetupConsole()
+	defer restoreConsole()
 	// get available drivers and known build tags
 	available, known := drivers.Available(), internal.KnownBuildTags()
 	// report if database is supported
@@ -68,6 +75,8 @@ func main() {
 			strings.HasPrefix(estr, "flag needs an argument:"):
 			fmt.Fprintln(os.Stderr, text.CommandHelpHint)
 		}
+		// the error exit bypasses the deferred restore
+		restoreConsole()
 		os.Exit(1)
 	}
 }

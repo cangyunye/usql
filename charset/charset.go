@@ -2,14 +2,15 @@
 //
 // usql processes all text internally as UTF-8. Databases configured with a
 // GBK-family encoding (GBK, GB2312, GB18030) return non-UTF-8 bytes on the
-// wire, and terminals running under a GBK-family locale expect non-UTF-8
-// bytes on output. This package handles both directions:
+// wire. This package handles all sides of the console encoding:
 //
 //   - input: [ParseEncoding] resolves an encoding name, and [ToUTF8] decodes
 //     database values to UTF-8;
-//   - output: [OutputEncoding] reports the terminal encoding implied by the
-//     locale (LC_ALL > LC_CTYPE > LANG), for use by rline when wrapping
-//     console writers.
+//   - output: on Windows, [SetupConsole] switches the attached console to
+//     UTF-8 (65001) so UTF-8 output renders directly; [OutputEncoding]
+//     reports the terminal encoding for the remaining transcoding fallback
+//     (the POSIX locale, LC_ALL > LC_CTYPE > LANG), for use by rline when
+//     wrapping console writers.
 package charset
 
 import (

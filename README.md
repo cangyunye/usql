@@ -670,18 +670,22 @@ taken from `LC_ALL`, `LC_CTYPE`, or `LANG` (e.g. `zh_CN.GBK`, `zh_CN.GB2312`,
 representable in GBK are rendered as `?`. Output redirected to files or pipes
 is always UTF-8.
 
-On Windows, the console code pages decide the encoding: output follows
-`GetConsoleOutputCP` and typed input follows `GetConsoleCP` — on zh-CN
-systems both default to cp936 (GBK), and cp54936 selects GB18030 — so Chinese
-text round-trips through queries, prompts, and the `\conns` form on a
-default conhost. When either code page is UTF-8 (65001) or usql runs
-redirected, no transcoding is applied.
+On Windows, usql switches the attached console to UTF-8 (code page 65001)
+at startup and restores the original code pages on exit. A default zh-CN
+console runs at cp936 (GBK), whose character set has no box-drawing
+characters and mangles UTF-8 output — with the switch, table borders and
+Chinese text render correctly. If the console cannot be switched (no
+console attached, or usql runs redirected), the transcoding fallback
+applies: console output is transcoded to the encoding implied by
+`GetConsoleOutputCP` (cp936/GBK, cp54936/GB18030) or the `LC_ALL`,
+`LC_CTYPE`, or `LANG` locale, with characters not representable in it
+rendered as `?`, and files or pipes always receive UTF-8.
 
-Console **input** is decoded from the terminal's character set as well when
-using the [bubbletea input engine][input-engine] (`USQL_INPUT=tui`): on a
-`GBK`-family console, Chinese text can be typed directly into queries,
-prompts, and the `\conns` form, and is saved to history as UTF-8. The classic
-readline engine assumes UTF-8 keystrokes.
+Console **input** is switched to UTF-8 (code page 65001) alongside output,
+so Chinese text can be typed directly into queries, prompts, and the
+[`\conns` form][commands] on both the classic readline engine and the
+[bubbletea input engine][input-engine] (`USQL_INPUT=tui`), and is saved to
+history as UTF-8.
 
 ### Connection Examples
 

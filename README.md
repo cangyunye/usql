@@ -3,6 +3,10 @@
 </div>
 
 <div align="center">
+  English | <a href="README_CN.md">简体中文</a>
+</div>
+
+<div align="center">
   <a href="#installing" title="Installing">Installing</a> |
   <a href="#building" title="Building">Building</a> |
   <a href="#database-support" title="Database Support">Database Support</a> |
@@ -206,6 +210,12 @@ that will disable the driver:
 $ go install -tags 'most no_avatica no_couchbase no_postgres' github.com/xo/usql@main
 ```
 
+This fork also ships a [`Taskfile.yaml`](Taskfile.yaml) for the
+[Task](https://github.com/go-task/task) runner, wrapping the common builds:
+`task build` (CGO-free test driver set), `task build:chart` (CGO-free plus the
+`\chart` ECharts engine), and `task build:cgo` (CGO with terminal chart
+output).
+
 #### Building Without CGO
 
 A CGO-free (`CGO_ENABLED=0`) build drops every binding to a C library: the
@@ -227,8 +237,10 @@ Notes for CGO-free builds:
 - Named-connection passwords use the 0600-permission `secrets.json` fallback
   file when no OS keyring backend is compiled in (see the
   [`\conns` section](#managing-named-connections-conns)).
-- `\chart` terminal image output needs the cgo resvg binding; use
-  `\chart ... file=` to write the SVG to a file instead.
+- `\chart` requires the `chart` build tag (it embeds the goja JS engine and
+  echarts.min.js). CGO-free builds with `-tags chart` support `\chart ...
+  file=` SVG export; terminal image output additionally needs the cgo resvg
+  binding.
 
 ## Database Support
 
@@ -455,27 +467,35 @@ Flags:
   -X, --no-init                             do not execute initialization scripts (aliases: --no-rc --no-psqlrc --no-usqlrc)
   -o, --out FILE                            output file
   -W, --password                            force password prompt (should happen automatically)
+      --name string                         save the connected DSN under NAME (default: <scheme>_<user>_<host>_<port>_<dbname>)
   -1, --single-transaction                  execute as a single transaction (if non-interactive)
+  -e, --encoding string                     set client encoding for decoding database output (utf-8, gbk, gb2312, gb18030)
   -v, --set NAME=VALUE                      set variable NAME to VALUE (see \set command, aliases: --var --variable)
   -N, --cset NAME=DSN                       set named connection NAME to DSN (see \cset command)
   -P, --pset VAR=ARG                        set printing option VAR to ARG (see \pset command)
   -F, --field-separator FIELD-SEPARATOR     field separator for unaligned and CSV output (default "|" and ",")
   -R, --record-separator RECORD-SEPARATOR   record separator for unaligned and CSV output (default \n)
   -T, --table-attr TABLE-ATTR               set HTML table tag attributes (e.g., width, border)
-  -A, --no-align                            unaligned table output mode
-  -H, --html                                HTML table output mode
-  -t, --tuples-only                         print rows only
-  -x, --expanded                            turn on expanded table output
-  -z, --field-separator-zero                set field separator for unaligned and CSV output to zero byte
-  -0, --record-separator-zero               set record separator for unaligned and CSV output to zero byte
-  -J, --json                                JSON output mode
-  -C, --csv                                 CSV output mode
-  -G, --vertical                            vertical output mode
-  -q, --quiet                               run quietly (no messages, only query output)
+  -A, --no-align                            unaligned table output mode (default true)
+  -H, --html                                HTML table output mode (default true)
+  -t, --tuples-only                         print rows only (default true)
+  -x, --expanded                            turn on expanded table output (default true)
+  -z, --field-separator-zero                set field separator for unaligned and CSV output to zero byte (default true)
+  -0, --record-separator-zero               set record separator for unaligned and CSV output to zero byte (default true)
+  -J, --json                                JSON output mode (default true)
+  -C, --csv                                 CSV output mode (default true)
+  -G, --vertical                            vertical output mode (default true)
+  -q, --quiet                               run quietly (no messages, only query output) (default true)
       --config string                       config file
   -V, --version                             output version information, then exit
   -?, --help                                show this help, then exit
 ```
+
+Connecting with a DSN automatically saves it as a named connection (see the
+[`\conns` section](#managing-named-connections-conns)), named `<scheme>_<user>_<host>_<port>_<dbname>`
+by default, or `--name NAME` to choose the name. Pass `-e`/`--encoding` to
+record a client encoding with the saved connection, so reconnecting by name
+re-applies it.
 
 ### Connecting to Databases
 
@@ -543,6 +563,15 @@ are injected only when connecting to the named connection, and `\cset` /
 `\conns` output masks any password embedded in a URL. Connections defined in
 `config.yaml` continue to work and are listed read-only with source `config`;
 a name defined in both places is reported at startup.
+
+Connections are also saved automatically: every successful connection made by
+passing a DSN on the command-line is recorded to `connections.yaml` under the
+default name `<scheme>_<user>_<host>_<port>_<dbname>` (eg
+`postgres_booktest_localhost_5432_booktest`), or under `--name NAME` when
+given. The `-e`/`--encoding` value is recorded with the connection, so
+`usql NAME` reconnects with the same client encoding. As with all
+usql-managed connections, the password (if any) goes to the secret store,
+never to `connections.yaml`.
 
 #### Database Connection Strings
 
@@ -855,12 +884,15 @@ Connection
   \c DSN or \c NAME                 connect to dsn or named database connection
   \c DRIVER PARAMS...               connect to database with driver and parameters
   \connect                          alias for \c
+  \conns                            show named connections, or manage (add/edit/delete/connect) interactively
+  \conns NAME|N                     connect directly to a named connection
   \Z                                close (disconnect) database connection
   \disconnect                       alias for \Z
   \password [USER]                  change password for user
   \passwd                           alias for \password
   \conninfo                         display information about the current database connection
   \encoding [ENCODING]              show or set the client encoding used to decode database output
+                                    (utf-8, gbk, gb2312, gb18030)
 
 Query Execute
   \g [(OPTIONS)] [FILE] or ;        execute query (and send results to file or |pipe)
@@ -1717,6 +1749,53 @@ The following terminals have been tested with `usql`:
 Additional terminals that support [Sixel][sixel-graphics] graphics are
 catalogued on the [Are We Sixel Yet?][arewesixelyet] website.
 
+#### The `\chart` Command
+
+The [`\chart` command][chart-command] renders the results of a SQL query as a
+chart, using [Apache ECharts][echarts] executed on an embedded JavaScript
+engine ([goja][goja]):
+
+```sh
+pg:postgres@=> \chart title="Films per rating" type=bar \
+  select rating, count(*) from film group by rating;
+```
+
+The first text column of the result is used as the X axis (category) labels,
+and every remaining numeric column becomes a data series. Available options:
+
+| Option     | Description                                                            |
+| ---------- | ---------------------------------------------------------------------- |
+| `title`    | chart title                                                            |
+| `subtitle` | chart subtitle                                                         |
+| `size`     | chart size as `NxN` (width x height, default `800x600`)                |
+| `bg`       | chart background color                                                 |
+| `type`     | chart type — `bar` (default when a category column exists) or `line`   |
+| `prec`     | decimal precision for numeric data                                     |
+| `file`     | write the rendered SVG to a file instead of the terminal               |
+| `help`     | show the option summary                                                |
+
+##### Chart Build Requirements
+
+`\chart` is gated behind the `chart` build tag, because it embeds the ECharts
+JS bundle and JS engine (adding roughly 7MB to the binary). Release builds are
+built without it, so `\chart` in those binaries reports how to enable it:
+
+```sh
+# build with chart support (terminal image output, requires CGO for resvg)
+$ go build -tags 'most chart' .
+
+# CGO-free build with SVG file export only
+$ CGO_ENABLED=0 go build -tags 'most chart no_duckdb no_odbc no_godror no_sqlite3 moderncsqlite' .
+```
+
+- **CGO builds** rasterize the rendered SVG and display it directly in the
+  terminal using [Kitty][kitty-graphics], [iTerm][iterm-graphics], or
+  [Sixel][sixel-graphics] graphics (via the `resvg` binding).
+- **CGO-free builds** with the `chart` tag cannot rasterize images; use
+  `\chart ... file=chart.svg` to write the SVG to a file.
+- **Without the `chart` tag**, `\chart` fails with an error explaining the
+  build tag requirement.
+
 #### Passwords
 
 `usql` supports reading passwords for databases from a `.usqlpass` file
@@ -1793,7 +1872,9 @@ The following are additional notes and miscellania related to `usql`:
 ### Release Builds
 
 [Release builds][releases] are built with the `most` build tag and with
-additional [SQLite3 build tags (see: `build.sh`)](build.sh).
+additional [SQLite3 build tags (see: `build.sh`)](build.sh). They are built
+without the `chart` build tag (see [the `\chart` command](#the-chart-command)),
+so `\chart` reports how to enable it when used.
 
 ### macOS
 
@@ -1868,7 +1949,7 @@ contributing, see CONTRIBUTING.md](CONTRIBUTING.md).
 [variables]: #variables "Variables"
 [runtime-vars]: #runtime-variables "Runtime Variables"
 [connection-vars]: #connection-variables "Connection Variables"
-[print-vars]: #display-formatting-(print)-variables "Display Formatting (print) Variables"
+[print-vars]: #display-formatting-print-variables "Display Formatting (print) Variables"
 [kitty-graphics]: https://sw.kovidgoyal.net/kitty/graphics-protocol.html
 [iterm-graphics]: https://iterm2.com/documentation-images.html
 [sixel-graphics]: https://saitoha.github.io/libsixel/
@@ -1878,5 +1959,7 @@ contributing, see CONTRIBUTING.md](CONTRIBUTING.md).
 [foot]: https://codeberg.org/dnkl/foot
 [kitty]: https://sw.kovidgoyal.net/kitty/
 [arewesixelyet]: https://www.arewesixelyet.com
-[chart-command]: #chart-command "\\chart meta command"
+[chart-command]: #the-chart-command "\\chart meta command"
+[echarts]: https://echarts.apache.org "Apache ECharts"
+[goja]: https://github.com/dop251/goja "goja ECMAScript 5.1+ implementation in Go"
 [yaml]: https://yaml.org

@@ -1624,6 +1624,29 @@ Connected with driver postgres (PostgreSQL 9.6.9)
 pg:booktest@=>
 ```
 
+#### Row Limiting
+
+By default, `usql` caps interactive, unfiltered `SELECT` queries at 100 rows,
+so an accidental full-table query does not flood the terminal. The limit is
+applied in the connected database's own syntax — `LIMIT n` (PostgreSQL, MySQL,
+SQLite, openGauss, OceanBase in MySQL mode, ClickHouse, ...), `FETCH FIRST n
+ROWS ONLY` (Oracle 12c+, OceanBase in Oracle mode), or `SELECT TOP (n)`
+(SQL Server, SAP ASE) — and only when the statement has no `WHERE` clause and
+no existing row restriction (`LIMIT`, `OFFSET`, `FETCH`, `TOP`, `ROWNUM`),
+no set operation (`UNION`, ...), and no `FOR UPDATE` lock clause.
+
+Queries run non-interactively (`-c`, `-f`, piped input) are never rewritten.
+
+The limit is controlled with the `ROWLIMIT` [variable][variables] (default
+`100`; `0` disables), which can be set via the `USQL_ROWLIMIT` environment
+variable, `-v`/`--set`, or `\set`:
+
+```sh
+$ USQL_ROWLIMIT=25 usql pg://
+pg:=> \set ROWLIMIT 0        # disable
+pg:=> \set ROWLIMIT 500      # raise to 500
+```
+
 #### Terminal Graphics
 
 `usql` supports terminal graphics for [Kitty][kitty-graphics], [iTerm][iterm-graphics],

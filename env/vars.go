@@ -87,6 +87,11 @@ func NewDefaultVars() *Variables {
 	if !ok {
 		sslmode = "retry"
 	}
+	// row limit for interactive, unfiltered SELECT queries (0 disables)
+	rowLimit := "100"
+	if v, _ := Getenv(cmdNameUpper + "_ROWLIMIT"); strings.TrimSpace(v) != "" {
+		rowLimit = strings.TrimSpace(v)
+	}
 	// determine locale
 	locale := "en-US"
 	if s, err := syslocale.GetLocale(); err == nil {
@@ -118,6 +123,8 @@ func NewDefaultVars() *Variables {
 			"SYNTAX_HL_OVERRIDE_BG": "true",
 			"SSLMODE":               sslmode,
 			"TERM_GRAPHICS":         "none",
+			// row limit for interactive, unfiltered SELECT queries
+			"ROWLIMIT": rowLimit,
 		},
 		prnt: map[string]string{
 			"border":                   "1",
@@ -172,6 +179,18 @@ func (v *Variables) Conn() map[string][]string {
 func (v *Variables) Get(name string) (string, bool) {
 	value, ok := v.vars[name]
 	return value, ok
+}
+
+// RowLimit returns the configured row limit for interactive, unfiltered
+// SELECT queries: the ROWLIMIT variable (default 100, settable with
+// USQL_ROWLIMIT and \set). Zero or a non-numeric value disables the limit.
+func RowLimit() int {
+	s, _ := Vars().Get("ROWLIMIT")
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
 }
 
 // Set sets a standard variable.

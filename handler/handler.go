@@ -38,6 +38,7 @@ import (
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/drivers/completer"
 	"github.com/xo/usql/drivers/metadata"
+	"github.com/xo/usql/drivers/rowlimit"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/metacmd"
 	"github.com/xo/usql/metacmd/charts"
@@ -480,6 +481,16 @@ func (h *Handler) Execute(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	prefix, sqlstr, qtyp, err := drivers.Process(h.u, prefix, sqlstr)
 	if err != nil {
 		return drivers.WrapErr(h.u.Driver, err)
+	}
+	// interactive, unfiltered SELECT queries are capped at ROWLIMIT rows,
+	// in the connected driver's row limit syntax; scripted (-c/-f) runs are
+	// never rewritten
+	if qtyp && h.l.Interactive() {
+		if n := env.RowLimit(); n > 0 {
+			if limited, changed := rowlimit.Apply(h.u.Driver, sqlstr, n); changed {
+				sqlstr = limited
+			}
+		}
 	}
 	// start a transaction if forced
 	if forceTrans {

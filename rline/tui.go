@@ -238,6 +238,15 @@ func cursorRow(cons *os.File, out io.Writer) int {
 		return -1
 	}
 	defer rd.Close()
+	// on darwin that open is a dup of fd 0 (one description shared with
+	// stdin/stdout/stderr), and registering the descriptor with the runtime
+	// poller for the deadline below put that shared description into
+	// non-blocking mode. left set, any stdout write larger than the
+	// terminal's output buffer fails with EAGAIN ("resource temporarily
+	// unavailable"), so hand the descriptor back in blocking mode before
+	// close; on platforms where the open created a fresh description this
+	// is a no-op.
+	defer rd.Fd()
 	if err := rd.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
 		return -1
 	}

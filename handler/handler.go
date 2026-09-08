@@ -132,7 +132,8 @@ func New(l rline.IO, user *user.User, wd string, charts billy.Filesystem, nopw b
 	}
 	if iactive {
 		l.SetOutput(h.outputHighlighter)
-		l.Completer(completer.NewLive(completer.NewDefaultCompleter(completer.WithConnStrings(h.connStrings()))))
+		// not connected yet: only common aliases are offered for \alias
+		l.Completer(completer.NewLive(completer.NewDefaultCompleter(completer.WithConnStrings(h.connStrings()), completer.WithAliasNames(env.Aliases().Names("")))))
 	}
 	return h
 }
@@ -901,7 +902,8 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 					// route the completer's diagnostic logging through the
 					// IO's stderr, so it is buffered during TUI reads
 					completer.WithLogger(log.New(h.l.Stderr(), "ERROR: ", log.LstdFlags)),
-					completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion())
+					completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion(),
+					completer.WithAliasNames(env.Aliases().Names(h.u.Driver)))
 				// NewLive adds the typing-time fast path on top
 				live := completer.NewLive(c)
 				if inv, ok := live.(interface{ Invalidate() }); ok {

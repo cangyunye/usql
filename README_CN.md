@@ -907,6 +907,8 @@ Query View
   \watch [(OPTIONS)] [INTERVAL]     execute query every specified interval
 
 Query Buffer
+  \alias [NAME [ARG...]]            list SQL aliases, or expand NAME into the input line,
+                                    replacing $placeholders with ARGs
   \e [-raw|-exec] [FILE] [LINE]     edit the query buffer, raw (non-interpolated) buffer, the
                                     exec buffer, or a file with external editor
   \edit                             alias for \e
@@ -989,6 +991,35 @@ Operating System/Environment
 ```
 
 传给命令的参数[可以使用反引号][backticks]。
+
+### SQL 别名（SQL Aliases）
+
+本分支新增了 `\alias` 元命令：用户自定义的命名 SQL 片段，保存在
+`<configdir>/usql/aliases.yaml`（macOS 为 `~/Library/Application
+Support/usql/aliases.yaml`，Linux 为 `~/.config/usql/aliases.yaml`），可用
+`USQL_ALIASES` 环境变量覆盖路径：
+
+```yaml
+common:
+  s1: select * from $tablename limit 20;
+postgres:
+  sessions: select pid, usename, state, query from pg_stat_activity
+            where datname = current_database();
+  conns: select count(*) from pg_stat_activity;
+mysql:
+  sessions: show processlist;
+  conns: show full processlist;
+```
+
+`common:` 段中的别名随处可用；按驱动名分的段（`postgres:`、`mysql:` 等）中的
+别名仅在连接对应驱动时可见，且同名时覆盖 `common` 中的定义。
+
+- `\alias` 列出当前会话可用的别名（含来源与 SQL）。
+- `\alias s1` 将别名展开到输入行，并把光标定位到第一个 `$占位符` 处（即
+  `$name` 记号；PostgreSQL 风格的数字参数如 `$1` 不视为占位符），改写后回车
+  执行。多行模板会折叠到单行。
+- `\alias s1 mytable` 还会按位置依次替换占位符；光标停在第一个剩余占位符处。
+- 别名支持 Tab 补全；每次执行 `\alias` 都会重新加载别名文件，修改立即生效。
 
 <a id="features-and-compatibility"></a>
 

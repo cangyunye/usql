@@ -172,6 +172,13 @@ func WithConnStrings(connStrings []string) Option {
 	}
 }
 
+// WithAliasNames option
+func WithAliasNames(names []string) Option {
+	return func(c *completer) {
+		c.aliasNames = names
+	}
+}
+
 // WithBeforeComplete option
 func WithBeforeComplete(f CompleteFunc) Option {
 	return func(c *completer) {
@@ -187,6 +194,7 @@ type completer struct {
 	sqlStartCommands []string
 	sqlCommands      []string
 	connStrings      []string
+	aliasNames       []string
 	beforeComplete   CompleteFunc
 	// cache is the metadata query cache installed by WithContextCompletion.
 	cache *cachedReader
@@ -368,6 +376,9 @@ func (c completer) complete(previousWords []string, text []rune) [][]rune {
 	/* Backslash commands */
 	if TailMatches(MATCH_CASE, previousWords, `\cd|\e|\edit|\g|\gx|\i|\include|\ir|\include_relative|\o|\out|\s|\w|\write`) {
 		return completeFuzzyFull(string(text), completeFromFiles(text))
+	}
+	if TailMatches(MATCH_CASE, previousWords, `\alias`) {
+		return completeFuzzyFull(string(text), c.aliasNames)
 	}
 	if TailMatches(MATCH_CASE, previousWords, `\c|\connect|\copy`) ||
 		TailMatches(MATCH_CASE, previousWords, `\copy`, `*`) {

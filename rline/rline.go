@@ -46,6 +46,14 @@ type IO interface {
 	SetOutput(func(string) string)
 }
 
+// LineEditor is an optional IO extension for presetting the pending input
+// line text and cursor position, used by \alias to expand an alias into the
+// input line for editing. Unsupported implementations simply ignore the call.
+type LineEditor interface {
+	// SetLine sets the pending line to text with the cursor at pos.
+	SetLine(text []rune, pos int)
+}
+
 // Rline provides a type compatible with the IO interface.
 type Rline struct {
 	Inst *readline.Instance
@@ -141,6 +149,18 @@ func (l *Rline) Password(prompt string) (string, error) {
 // SetOutput sets the output format func.
 func (l *Rline) SetOutput(f func(string) string) {
 	l.Inst.Config.Output = f
+}
+
+// SetLine satisfies LineEditor: preset the readline pending buffer and
+// cursor. The preset content is rendered by the next interactive read.
+func (l *Rline) SetLine(text []rune, pos int) {
+	if l.Inst == nil {
+		return
+	}
+	if pos < 0 || pos > len(text) {
+		pos = len(text)
+	}
+	l.Inst.Operation.SetBufferIdx(string(text), pos)
 }
 
 // New creates a new readline input/output handler.

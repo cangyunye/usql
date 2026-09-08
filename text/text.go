@@ -102,6 +102,7 @@ var (
 	NotificationPayload       = `with payload %q `
 	UnknownShortAlias         = `(unk)`
 	InvalidNamedConnection    = `warning: named connection %q was not defined: %v`
+	InvalidAliasEntry         = `warning: %s: %v`
 	ChartsPathDoesNotExist    = `warning: charts_path %q does not exist`
 	ChartsPathIsNotADirectory = `warning: charts_path %q is not a directory`
 	UsageTemplate             = `Usage:

@@ -17,10 +17,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mattn/go-runewidth"
 	"github.com/xo/dburl"
 	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
+	"github.com/xo/usql/rline"
 	"github.com/xo/usql/text"
 	"github.com/xo/usql/uitheme"
 )
@@ -520,6 +522,100 @@ func Edit(p *Params) error {
 	// save edited buffer to history
 	p.Handler.IO().Save(string(out))
 	buf.Reset([]rune(string(out)))
+	return nil
+}
+
+// Alias is a Query Buffer meta command (\alias). Lists the SQL aliases
+// defined in the aliases file, or expands an alias into the input line with
+// the cursor placed at its first $placeholder, ready for editing.
+//
+// Descs:
+//
+//	alias	[NAME [ARG...]]	list SQL aliases, or expand NAME into the input line, replacing $placeholders with ARGs
+func Alias(p *Params) error {
+	stdout, stderr := p.Handler.IO().Stdout(), p.Handler.IO().Stderr()
+	// reload, so edits to the aliases file since startup are picked up; the
+	// previous store is kept when loading fails
+	if err := env.LoadAliases(); err != nil {
+		fmt.Fprintln(stderr, err)
+	}
+	// driver-specific aliases are only visible while connected
+	var driver string
+	if u := p.Handler.URL(); u != nil {
+		driver = u.Driver
+	}
+	name, err := p.Next(false)
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		return aliasList(p, stdout, stderr, driver)
+	}
+	sql, _, ok := env.Aliases().Get(driver, name)
+	if !ok {
+		if names := env.Aliases().Names(driver); len(names) > 0 {
+			return fmt.Errorf("no such alias: %s (available: %s)", name, strings.Join(names, ", "))
+		}
+		return fmt.Errorf("no such alias: %s", name)
+	}
+	args, err := p.All(false)
+	if err != nil {
+		return err
+	}
+	if n := env.CountPlaceholders(sql); len(args) > n {
+		return fmt.Errorf("alias %q takes at most %d argument(s)", name, n)
+	}
+	line, pos := env.ExpandPlaceholders(env.CollapseLine(sql), args)
+	// interactive: inject the expansion into the input line for editing;
+	// otherwise (pipes, -c) show the expansion instead
+	if le, ok := p.Handler.IO().(rline.LineEditor); ok && p.Handler.IO().Interactive() {
+		le.SetLine([]rune(line), pos)
+		return nil
+	}
+	fmt.Fprintln(stdout, line)
+	return nil
+}
+
+// aliasList writes the aliases visible for driver to stdout, via $PAGER when
+// interactive.
+func aliasList(p *Params, stdout, stderr io.Writer, driver string) error {
+	list := env.Aliases().List(driver)
+	if len(list) == 0 {
+		fmt.Fprintln(stdout, "no aliases defined; edit", env.Aliases().Path())
+		return nil
+	}
+	var cmd *exec.Cmd
+	var wc io.WriteCloser
+	if pager := env.Get("PAGER"); p.Handler.IO().Interactive() && pager != "" {
+		var err error
+		if wc, cmd, err = env.Pipe(stdout, stderr, pager); err != nil {
+			return err
+		}
+		stdout = wc
+	}
+	rows := make([][]string, 0, len(list))
+	for _, a := range list {
+		rows = append(rows, []string{a.Name, a.Scope, env.CollapseLine(a.SQL)})
+	}
+	if uitheme.Enabled() {
+		// themed table when color is available; plain output otherwise
+		fmt.Fprint(stdout, uitheme.Current().Table([]string{"alias", "scope", "sql"}, rows))
+	} else {
+		nw, sw := 0, 0
+		for _, r := range rows {
+			nw = max(nw, runewidth.StringWidth(r[0]))
+			sw = max(sw, runewidth.StringWidth(r[1]))
+		}
+		for _, r := range rows {
+			fmt.Fprintf(stdout, "  %-*s  %-*s  %s\n", nw, r[0], sw, r[1], r[2])
+		}
+	}
+	if cmd != nil {
+		if err := wc.Close(); err != nil {
+			return err
+		}
+		return cmd.Wait()
+	}
 	return nil
 }
 

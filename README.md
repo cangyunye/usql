@@ -234,9 +234,10 @@ $ CGO_ENABLED=0 go build -tags 'most no_duckdb no_odbc no_godror no_sqlite3 mode
 
 Notes for CGO-free builds:
 
-- Named-connection passwords use the 0600-permission `secrets.json` fallback
-  file when no OS keyring backend is compiled in (see the
-  [`\conns` section](#managing-named-connections-conns)).
+- Named-connection passwords are kept in the AES-256-GCM encrypted
+  `secrets.enc` file regardless of CGO — no OS keyring is involved (see the
+  [`\conns` section](#managing-named-connections-conns)); only the one-time
+  `\conns migrate` from an OS keyring needs a CGO build.
 - `\chart` requires the `chart` build tag (it embeds the goja JS engine and
   echarts.min.js). CGO-free builds with `-tags chart` support `\chart ...
   file=` SVG export; terminal image output additionally needs the cgo resvg
@@ -555,10 +556,17 @@ database instead of the login user's own (which typically does not exist).
 Usql-managed connections are persisted to
 `$HOME/.config/usql/connections.yaml` (or the platform equivalent) in the same
 shape as [`connections:` in `config.yaml`][config] — as component maps or DSN
-strings. **Passwords are never written to that file.** They are kept in the OS
-keyring (Secret Service / Keychain / Windows Credential Manager) under service
-`usql`, or when no keyring is available in a fallback file
-`secrets.json` next to it, created with `0600` permissions. Stored passwords
+strings. **Passwords are never written to that file.** They are kept in an
+AES-256-GCM encrypted file `secrets.enc` next to it, written atomically with
+`0600` permissions. Its key is a machine-local random key file `secret.key`
+(created automatically, also `0600`), or when `USQL_SECRETS_PASSPHRASE` is
+set, a key derived from that passphrase (PBKDF2-SHA256, per-file salt) — the
+mode is chosen when the file is first created. `USQL_SECRETS_KEYFILE` points
+at an alternative key location (eg removable media). The OS keyring is never
+used, so no keychain approval prompts appear; `\conns migrate` moves
+passwords written by earlier builds out of the OS keyring (removing the
+keyring items), and a pre-existing plaintext `secrets.json` fallback file is
+imported and renamed `secrets.json.imported` automatically. Stored passwords
 are injected only when connecting to the named connection, and `\cset` /
 `\conns` output masks any password embedded in a URL. Connections defined in
 `config.yaml` continue to work and are listed read-only with source `config`;

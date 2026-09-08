@@ -4,31 +4,26 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/99designs/keyring"
 	"github.com/xo/dburl"
 )
 
-// setupConnsTest points the config dir at a temp XDG dir and forces the
-// fallback (file) secret backend so tests do not depend on an OS keyring.
-// HOME is redirected as well: os.UserConfigDir ignores XDG_CONFIG_HOME on
-// darwin, and without it the tests would read the user's real connections
-// file.
+// setupConnsTest points the config dir at a temp XDG dir. HOME is redirected
+// as well: os.UserConfigDir ignores XDG_CONFIG_HOME on darwin, and without it
+// the tests would read the user's real connections file.
 func setupConnsTest(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
-	old := keyringBackends
-	keyringBackends = func() []keyring.BackendType { return nil }
+	t.Setenv(EnvSecretsPassphrase, "")
+	t.Setenv(EnvSecretsKeyfile, "")
 	t.Cleanup(func() {
-		keyringBackends = old
-		krOnce = sync.Once{}
-		kr, krBackends = nil, nil
+		secCache = nil
 		vars = NewDefaultVars()
 	})
+	secCache = nil
 	vars = NewDefaultVars()
 	return dir
 }
@@ -152,20 +147,136 @@ func TestConnPasswordLifecycle(t *testing.T) {
 	if pw, ok, err := ReadConnPassword("svc"); err != nil || !ok || pw != "hunter2" {
 		t.Fatalf("secret = %q, %v, %v", pw, ok, err)
 	}
-	// fallback file must be 0600
+	// secrets file and key file must be 0600
 	dir, _ := ConfigDir()
-	info, err := os.Stat(filepath.Join(dir, secretStoreFile))
+	info, err := os.Stat(filepath.Join(dir, secretEncFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("secrets file mode = %o, want 600", perm)
 	}
+	info, err = os.Stat(filepath.Join(dir, secretKeyName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("key file mode = %o, want 600", perm)
+	}
 	if err := UpdateConnPassword("svc", ""); err != nil {
 		t.Fatal(err)
 	}
 	if pw, ok, err := ReadConnPassword("svc"); err != nil || ok {
 		t.Fatalf("secret not cleared: %q, %v, %v", pw, ok, err)
+	}
+}
+
+func TestSecretsEncryptedAtRest(t *testing.T) {
+	setupConnsTest(t)
+	if err := SaveConn("dev", map[string]any{
+		"protocol": "postgres",
+		"hostname": "db",
+	}, "s3cr3t"); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, secretEncFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); strings.Contains(s, "s3cr3t") {
+		t.Fatalf("secrets file contains plaintext password:\n%s", s)
+	} else if !strings.HasPrefix(s, secretMagic) {
+		t.Fatalf("secrets file missing magic header:\n%q", s[:min(16, len(s))])
+	}
+	if kdf := b[len(secretMagic)+1]; kdf != kdfKeyfile {
+		t.Fatalf("default kdf mode = %d, want %d", kdf, kdfKeyfile)
+	}
+	// tampering must be detected
+	b[len(b)-1] ^= 1
+	if err := os.WriteFile(filepath.Join(dir, secretEncFile), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secCache, vars = nil, NewDefaultVars()
+	if _, _, err := ReadConnPassword("dev"); err == nil {
+		t.Fatal("expected tampered secrets file to fail")
+	}
+}
+
+func TestSecretsPassphraseMode(t *testing.T) {
+	setupConnsTest(t)
+	t.Setenv(EnvSecretsPassphrase, "master pw")
+	if err := SaveConn("dev", map[string]any{
+		"protocol": "postgres",
+		"hostname": "db",
+	}, "pw1"); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, secretEncFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kdf := b[len(secretMagic)+1]; kdf != kdfPass {
+		t.Fatalf("passphrase kdf mode = %d, want %d", kdf, kdfPass)
+	}
+	// correct passphrase round trips across a fresh "process"
+	secCache, vars = nil, NewDefaultVars()
+	if pw, ok, err := ReadConnPassword("dev"); err != nil || !ok || pw != "pw1" {
+		t.Fatalf("secret = %q, %v, %v", pw, ok, err)
+	}
+	// wrong passphrase fails
+	t.Setenv(EnvSecretsPassphrase, "wrong pw")
+	secCache, vars = nil, NewDefaultVars()
+	if _, _, err := ReadConnPassword("dev"); err == nil {
+		t.Fatal("expected wrong passphrase to fail")
+	}
+	// missing passphrase fails with a hint
+	t.Setenv(EnvSecretsPassphrase, "")
+	secCache, vars = nil, NewDefaultVars()
+	_, _, err = ReadConnPassword("dev")
+	if err == nil || !strings.Contains(err.Error(), EnvSecretsPassphrase) {
+		t.Fatalf("expected %s hint, got %v", EnvSecretsPassphrase, err)
+	}
+}
+
+func TestLegacySecretsImport(t *testing.T) {
+	setupConnsTest(t)
+	dir, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, secretLegacyFile), []byte(`{"conn:old":"legacy pw"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if pw, ok, err := ReadConnPassword("old"); err != nil || !ok || pw != "legacy pw" {
+		t.Fatalf("secret = %q, %v, %v", pw, ok, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, secretEncFile)); err != nil {
+		t.Fatal(err)
+	}
+	imported := filepath.Join(dir, secretImportFile)
+	if _, err := os.Stat(imported); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, secretLegacyFile)); !os.IsNotExist(err) {
+		t.Fatalf("legacy file still present: %v", err)
+	}
+	info, err := os.Stat(imported)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("imported file mode = %o, want 600", perm)
 	}
 }
 

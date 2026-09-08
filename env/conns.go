@@ -4,13 +4,12 @@ package env
 //
 // Named connections are persisted to <configdir>/connections.yaml in the same
 // shape as config.yaml's `connections:` section (string DSNs or component
-// maps). Passwords are NEVER written to that file: they are kept in the OS
-// keyring when one is available, and otherwise in a 0600-permission file
-// <configdir>/secrets.json. Passwords are only ever materialized in memory
-// (env.Variables secrets), keyed by the connection name.
+// maps). Passwords are NEVER written to that file: they are kept in an
+// AES-256-GCM encrypted <configdir>/secrets.enc (see secrets.go). Passwords
+// are only ever materialized in memory (env.Variables secrets), keyed by the
+// connection name.
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"net"
@@ -19,46 +18,19 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"unicode"
 
-	"github.com/99designs/keyring"
 	"github.com/xo/dburl"
 	"github.com/xo/usql/text"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	connStoreFile   = "connections.yaml"
-	secretStoreFile = "secrets.json"
+	connStoreFile = "connections.yaml"
 )
 
 // connSecretKeyPrefix prefixes secret-store keys with the connection name.
 const connSecretKeyPrefix = "conn:"
-
-// keyringBackends returns the keyring backends usql is willing to use for
-// password storage. Overridable in tests.
-var keyringBackends = func() []keyring.BackendType {
-	allowed := []keyring.BackendType{
-		keyring.SecretServiceBackend,
-		keyring.KeychainBackend,
-		keyring.WinCredBackend,
-	}
-	var res []keyring.BackendType
-	for _, b := range keyring.AvailableBackends() {
-		if slices.Contains(allowed, b) {
-			res = append(res, b)
-		}
-	}
-	return res
-}
-
-// keyring state, resolved lazily once per process.
-var (
-	krOnce     sync.Once
-	kr         keyring.Keyring
-	krBackends []keyring.BackendType
-)
 
 // ConfigDir returns the usql configuration directory.
 func ConfigDir() (string, error) {
@@ -76,15 +48,6 @@ func connStorePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, connStoreFile), nil
-}
-
-// secretStorePath returns the path to the fallback secrets file.
-func secretStorePath() (string, error) {
-	dir, err := ConfigDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, secretStoreFile), nil
 }
 
 // key returns the secret-store key for a named connection.
@@ -431,82 +394,10 @@ func MaskURL(s string) string {
 	return u.String()
 }
 
-// secretBackend opens (once) the OS keyring, returning it and whether it is
-// usable.
-func secretBackend() (keyring.Keyring, bool) {
-	krOnce.Do(func() {
-		krBackends = keyringBackends()
-		if len(krBackends) == 0 {
-			return
-		}
-		var err error
-		kr, err = keyring.Open(keyring.Config{
-			ServiceName:     "usql",
-			AllowedBackends: krBackends,
-		})
-		if err != nil {
-			krBackends = nil
-		}
-	})
-	return kr, len(krBackends) != 0 && kr != nil
-}
-
-// readSecretFile reads the fallback secrets file.
-func readSecretFile() (map[string]string, error) {
-	path, err := secretStorePath()
-	if err != nil {
-		return nil, err
-	}
-	b, err := os.ReadFile(path)
-	switch {
-	case os.IsNotExist(err):
-		return nil, nil
-	case err != nil:
-		return nil, err
-	}
-	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-	return m, nil
-}
-
-// writeSecretFile writes the fallback secrets file with 0600 permissions.
-func writeSecretFile(m map[string]string) error {
-	path, err := secretStorePath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o600)
-}
-
-// readSecret retrieves a stored password for a named connection, from the OS
-// keyring when available, and otherwise from the fallback secrets file.
+// readSecret retrieves a stored password for a named connection, from the
+// session cache first, then from the encrypted secrets file.
 func readSecret(name string) (string, bool, error) {
-	if kr, ok := secretBackend(); ok {
-		item, err := kr.Get(secretKey(name))
-		switch err {
-		case nil:
-			return string(item.Data), true, nil
-		case keyring.ErrKeyNotFound:
-			return "", false, nil
-		default:
-			// backend present but unusable (e.g. no daemon): fall through to
-			// the fallback file
-		}
-	}
-	m, err := readSecretFile()
+	m, err := readSecrets()
 	if err != nil {
 		return "", false, err
 	}
@@ -514,52 +405,28 @@ func readSecret(name string) (string, bool, error) {
 	return pw, ok, nil
 }
 
-// writeSecret stores a password for a named connection in the OS keyring when
-// available, and otherwise in the fallback secrets file. Failures of an
-// unusable keyring backend (e.g. no daemon on a headless host) fall back to
-// the file.
+// writeSecret stores a password for a named connection in the encrypted
+// secrets file.
 func writeSecret(name, password string) error {
-	if kr, ok := secretBackend(); ok {
-		if err := kr.Set(keyring.Item{
-			Key:   secretKey(name),
-			Label: "usql connection " + name,
-			Data:  []byte(password),
-		}); err == nil {
-			return nil
-		}
-	}
-	m, err := readSecretFile()
+	m, err := readSecrets()
 	if err != nil {
 		return err
 	}
-	if m == nil {
-		m = make(map[string]string)
-	}
 	m[secretKey(name)] = password
-	return writeSecretFile(m)
+	return writeSecrets(m)
 }
 
 // removeSecret removes a stored password for a named connection.
 func removeSecret(name string) error {
-	kr, krok := secretBackend()
-	if krok {
-		if err := kr.Remove(secretKey(name)); err == nil {
-			return nil
-		}
-		// fall through to the fallback file
-	}
-	m, err := readSecretFile()
+	m, err := readSecrets()
 	if err != nil {
 		return err
-	}
-	if m == nil {
-		return nil
 	}
 	if _, ok := m[secretKey(name)]; !ok {
 		return nil
 	}
 	delete(m, secretKey(name))
-	return writeSecretFile(m)
+	return writeSecrets(m)
 }
 
 // ReadConnPassword returns the stored password for a named connection, from

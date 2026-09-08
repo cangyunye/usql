@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,16 +19,35 @@ var (
 	_ LineEditor = (*tuiRline)(nil)
 )
 
+// syncBuffer is a mutex-guarded bytes.Buffer: the readline engine goroutine
+// renders into it while the test polls its contents.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Bytes()
+}
+
 func TestRlineSetLine(t *testing.T) {
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer stdinW.Close()
-	var out bytes.Buffer
+	out := &syncBuffer{}
 	l, err := readline.NewEx(&readline.Config{
 		Stdin:          stdinR,
-		Stdout:         &out,
+		Stdout:         out,
 		Stderr:         io.Discard,
 		FuncIsTerminal: func() bool { return true },
 	})
@@ -36,7 +56,7 @@ func TestRlineSetLine(t *testing.T) {
 	}
 	defer l.Close()
 
-	r := &Rline{Inst: l, Out: &out, Err: io.Discard, Int: true}
+	r := &Rline{Inst: l, Out: out, Err: io.Discard, Int: true}
 	// cursor at the $ placeholder ("select * from " is 14 runes)
 	r.SetLine([]rune("select * from $tablename"), 14)
 

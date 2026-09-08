@@ -1546,6 +1546,10 @@ $ USQL_INPUT=tui usql pg://
 $ export USQL_INPUT=tui
 ```
 
+TUI 引擎依赖 raw 模式和 VT 渲染。在无法提供它们的终端上——cygwin pty
+（管道 stdin）或 `TERM=dumb`——即使设置了 `USQL_INPUT=tui`，usql 也会自动
+回退到 readline 引擎。
+
 TUI 模式下，输入行以 **chroma 语法高亮**回显（与输出使用相同的 `SYNTAX_HL`
 样式，包括多行语句上下文），并随输入实时重新高亮。补全候选显示为提示符
 下方的**单列菜单**（类似中日韩输入法），完整单词展示、高亮当前选项、可用
@@ -1575,6 +1579,7 @@ pg:postgres@=> select * from us█ers where ...
   `<Ctrl>`+`<U>`、`<Ctrl>`+`<Y>`、`<Alt>`+`<Y>` 循环）、对调
   （`<Ctrl>`+`<T>`、`<Alt>`+`<T>`）以及数字前缀参数
   （`<Alt>`+`<3>` 将下一条命令重复三次）
+- `<Ctrl>`+`<L>` 清屏并原位重绘当前行
 - `<Ctrl>`+`<C>` 取消当前行，空行上的 `<Ctrl>`+`<D>` 退出
 
 注意：`<Ctrl>`+`<S>` 只在读取一行时被捕获（终端处于 raw 模式）；行间仍保留

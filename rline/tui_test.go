@@ -185,6 +185,40 @@ func TestLineModelGhostAccept(t *testing.T) {
 	}
 }
 
+func TestLineModelCtrlLClearScreen(t *testing.T) {
+	tr := newTUI(nil, nil, nil, "", nil)
+	tr.hist = &tuiHistory{lines: []string{"select * from align"}}
+	tr.Prompt("usql> ")
+	m := newLineModel(tr, "usql> ", -1)
+	m = typeLine(m, "sel")
+	if len(m.ghost) == 0 {
+		t.Fatal("expected a ghost suggestion")
+	}
+	// ctrl+l clears the screen and repaints the line in place: buffer and
+	// ghost survive, the line is not submitted, and a repaint is requested
+	mod, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlL})
+	m = mod.(*lineModel)
+	if cmd == nil {
+		t.Fatal("ctrl+l should request a repaint")
+	}
+	if got := string(m.ed.buf); got != "sel" {
+		t.Fatalf("ctrl+l changed the buffer: %q", got)
+	}
+	if len(m.ghost) == 0 {
+		t.Fatal("ctrl+l should keep the ghost (repaint, not dismissal)")
+	}
+	if m.done {
+		t.Fatal("ctrl+l must not submit the line")
+	}
+	// editing continues afterwards and the line still submits normally
+	m = typeLine(m, "ect 1")
+	mod, _ = m.Update(keyName("enter"))
+	m = mod.(*lineModel)
+	if got := string(m.ed.buf); !m.done || got != "select 1" {
+		t.Fatalf("after ctrl+l: done=%v buf=%q", m.done, got)
+	}
+}
+
 func TestLineModelInterruptAndEOF(t *testing.T) {
 	tr := newTUI(nil, nil, nil, "", nil)
 	tr.Prompt("> ")
@@ -509,17 +543,21 @@ func keyAlt(s string) tea.KeyMsg {
 
 func TestInputMode(t *testing.T) {
 	t.Setenv("USQL_INPUT", "tui")
-	if !inputMode(true, false) {
+	t.Setenv("TERM", "xterm-256color")
+	if !inputMode(true, false, false) {
 		t.Error("tui mode should activate when interactive")
 	}
-	if inputMode(false, false) {
+	if inputMode(false, false, false) {
 		t.Error("tui mode must not activate when non-interactive")
 	}
-	if inputMode(true, true) {
+	if inputMode(true, true, false) {
 		t.Error("tui mode must not activate when forced non-interactive")
 	}
+	if inputMode(true, false, true) {
+		t.Error("tui mode must not activate under cygwin")
+	}
 	t.Setenv("USQL_INPUT", "readline")
-	if inputMode(true, false) {
+	if inputMode(true, false, false) {
 		t.Error("readline must stay the default engine")
 	}
 }

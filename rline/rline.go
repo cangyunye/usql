@@ -216,79 +216,90 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 	}
 	// the bubbletea input engine (USQL_INPUT=tui) serves interactive
 	// sessions; non-interactive input is line-at-a-time either way
-	if inputMode(interactive, forceNonInteractive) {
+	if inputMode(interactive, forceNonInteractive, cygwin) {
 		// the console file backs terminal queries (cursor position); the
 		// transcode wrapper hides it
 		cons, _ := stdin.(*os.File)
 		return newTUI(charset.ConsoleDecoder(stdin, inEnc), stdout, stderr, histfile, cons), nil
 	}
-	if interactive {
-		// wrap it with cancelable stdin
-		stdin = readline.NewCancelableStdin(stdin)
-	}
-	// create readline instance
-	l, err := readline.NewEx(&readline.Config{
-		HistoryFile:            histfile,
-		DisableAutoSaveHistory: true,
-		InterruptPrompt:        "^C",
-		HistorySearchFold:      true,
-		Stdin:                  stdin,
-		Stdout:                 stdout,
-		Stderr:                 stderr,
-		// typing-time candidate menu (display-only); TAB still completes
-		LiveComplete: interactive || cygwin,
-		FuncIsTerminal: func() bool {
-			return interactive || cygwin
-		},
-		FuncFilterInputRune: func(r rune) (rune, bool) {
-			if r == readline.CharCtrlZ {
-				return r, false
-			}
-			return r, true
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	closers = append(closers, l.Close)
-	n := l.Operation.Runes
-	pw := func(prompt string) (string, error) {
-		buf, err := l.ReadPassword(prompt)
-		if err != nil {
-			return "", err
+	if interactive || cygwin {
+		if interactive {
+			// wrap it with cancelable stdin
+			stdin = readline.NewCancelableStdin(stdin)
 		}
-		return string(buf), nil
-	}
-	if forceNonInteractive {
-		n, pw = nil, nil
-	}
-	return &Rline{
-		Inst: l,
-		N:    n,
-		C: func() error {
-			for _, f := range closers {
-				_ = f()
+		// create readline instance
+		l, err := readline.NewEx(&readline.Config{
+			HistoryFile:            histfile,
+			DisableAutoSaveHistory: true,
+			InterruptPrompt:        "^C",
+			HistorySearchFold:      true,
+			Stdin:                  stdin,
+			Stdout:                 stdout,
+			Stderr:                 stderr,
+			// typing-time candidate menu (display-only); TAB still completes
+			LiveComplete: interactive || cygwin,
+			FuncIsTerminal: func() bool {
+				return interactive || cygwin
+			},
+			FuncFilterInputRune: func(r rune) (rune, bool) {
+				if r == readline.CharCtrlZ {
+					return r, false
+				}
+				return r, true
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		closers = append(closers, l.Close)
+		n := l.Operation.Runes
+		pw := func(prompt string) (string, error) {
+			buf, err := l.ReadPassword(prompt)
+			if err != nil {
+				return "", err
 			}
-			return nil
-		},
-		Out: stdout,
-		Err: stderr,
-		Int: interactive || cygwin,
-		Cyg: cygwin,
-		P:   l.SetPrompt,
-		A: func(a Completer) {
-			cfg := l.Config.Clone()
-			cfg.AutoComplete = completerAdapter{c: a}
-			// let the completer re-render the live menu when background
-			// queries land
-			if lc, ok := a.(LiveCompleter); ok {
-				lc.SetLiveKick(l.Operation.LiveKick)
-			}
-			l.SetConfig(cfg)
-		},
-		S:  l.SaveHistory,
-		Pw: pw,
-	}, nil
+			return string(buf), nil
+		}
+		if forceNonInteractive {
+			n, pw = nil, nil
+		}
+		return &Rline{
+			Inst: l,
+			N:    n,
+			C: func() error {
+				for _, f := range closers {
+					_ = f()
+				}
+				return nil
+			},
+			Out: stdout,
+			Err: stderr,
+			Int: interactive || cygwin,
+			Cyg: cygwin,
+			P:   l.SetPrompt,
+			A: func(a Completer) {
+				cfg := l.Config.Clone()
+				cfg.AutoComplete = completerAdapter{c: a}
+				// let the completer re-render the live menu when background
+				// queries land
+				if lc, ok := a.(LiveCompleter); ok {
+					lc.SetLiveKick(l.Operation.LiveKick)
+				}
+				l.SetConfig(cfg)
+			},
+			S:  l.SaveHistory,
+			Pw: pw,
+		}, nil
+	}
+	// non-interactive (pipes, -o, -c/-f): plain line-at-a-time input, no
+	// readline machinery. stdin is nil for -c/-f runs; the plain reader
+	// never touches it there.
+	if stdin == nil {
+		stdin = os.Stdin
+	}
+	p := newPlain(stdin, stdout, stderr, forceNonInteractive)
+	p.closers = closers
+	return p, nil
 }
 
 // newEncodedWriter wraps w with a UTF-8 to enc transcoding writer that

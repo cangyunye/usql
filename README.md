@@ -1546,6 +1546,10 @@ $ USQL_INPUT=tui usql pg://
 $ export USQL_INPUT=tui
 ```
 
+The TUI engine requires raw mode and VT rendering. On terminals that cannot
+provide them — cygwin ptys (pipe stdin) or `TERM=dumb` — usql automatically
+falls back to the readline engine even when `USQL_INPUT=tui` is set.
+
 In TUI mode the input line is echoed with **chroma syntax highlighting**
 (the same `SYNTAX_HL` styling used for output, including multi-line
 statement context), re-highlighted as you type. The completion candidates
@@ -1579,6 +1583,7 @@ pg:postgres@=> select * from us█ers where ...
   `<Ctrl>`+`<U>`, `<Ctrl>`+`<Y>`, `<Alt>`+`<Y>` to cycle), transpositions
   (`<Ctrl>`+`<T>`, `<Alt>`+`<T>`), and numeric prefix arguments
   (`<Alt>`+`<3>` repeats the next command three times)
+- `<Ctrl>`+`<L>` clears the screen and repaints the line in place
 - `<Ctrl>`+`<C>` cancels the line, `<Ctrl>`+`<D>` on an empty line exits
 
 Note: `<Ctrl>`+`<S>` is captured only while reading a line (the terminal is

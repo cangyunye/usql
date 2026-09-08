@@ -190,13 +190,25 @@ func readPassword(prompt string, in io.Reader, out io.Writer) (string, error) {
 }
 
 // inputMode selects the TUI engine: USQL_INPUT=tui opts in for interactive
-// sessions.
-func inputMode(interactive, forceNonInteractive bool) bool {
-	if !interactive || forceNonInteractive {
+// sessions, except on terminals that cannot serve it (see selectEngine).
+func inputMode(interactive, forceNonInteractive, cygwin bool) bool {
+	return selectEngine(interactive, forceNonInteractive, cygwin,
+		os.Getenv("USQL_INPUT"), os.Getenv("TERM"))
+}
+
+// selectEngine is inputMode's decision core (env values passed in for
+// testability): the TUI engine needs raw mode and VT rendering, so a cygwin
+// pty (pipe stdin) or dumb terminal falls back to readline even when
+// explicitly requested.
+func selectEngine(interactive, forceNonInteractive, cygwin bool, input, term string) bool {
+	if !interactive || forceNonInteractive || cygwin {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("USQL_INPUT"))) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
 	case "tui", "bubbletea", "1", "true", "on":
+		if strings.EqualFold(strings.TrimSpace(term), "dumb") {
+			return false
+		}
 		return true
 	}
 	return false
@@ -211,13 +223,11 @@ var rowRE = regexp.MustCompile(`\x1b\[(\d+);(\d+)R`)
 // candidate menu's above/below placement decision.
 func cursorRow(cons *os.File, out io.Writer) int {
 	if cons == nil {
-		os.Stderr.WriteString("PROBE: cons nil\n")
 		return -1
 	}
 	fd := int(cons.Fd())
 	old, err := term.MakeRaw(fd)
 	if err != nil {
-		os.Stderr.WriteString("PROBE: raw: " + err.Error() + "\n")
 		return -1
 	}
 	defer term.Restore(fd, old)
@@ -225,7 +235,6 @@ func cursorRow(cons *os.File, out io.Writer) int {
 	// description of the same console does
 	rd, err := os.OpenFile("/dev/stdin", os.O_RDONLY, 0)
 	if err != nil {
-		os.Stderr.WriteString("PROBE: reopen: " + err.Error() + "\n")
 		return -1
 	}
 	defer rd.Close()
@@ -242,16 +251,26 @@ func cursorRow(cons *os.File, out io.Writer) int {
 			break
 		}
 	}
+	row, ok := parseCursorRow(resp)
+	if !ok {
+		return -1
+	}
+	return row
+}
+
+// parseCursorRow extracts the 0-based row from a DSR 6n response (or a
+// stream of them, taking the last): the final "\x1b[<row>;<col>R" report
+// with row >= 1. (usql fork)
+func parseCursorRow(resp []byte) (int, bool) {
 	m := rowRE.FindAllSubmatch(resp, -1)
 	if len(m) == 0 {
-		os.Stderr.WriteString("PROBE: no match, resp=" + strconv.Quote(string(resp)) + "\n")
-		return -1
+		return -1, false
 	}
 	row, err := strconv.Atoi(string(m[len(m)-1][1]))
 	if err != nil || row < 1 {
-		return -1
+		return -1, false
 	}
-	return row - 1
+	return row - 1, true
 }
 
 // guardedWriter buffers writes while a read session runs (begin/flush

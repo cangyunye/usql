@@ -62,15 +62,37 @@
   新增 `drivers/metadata/oracle/metadata_test.go`（modernc sqlite 内存库模拟缺表
   场景，无需 Docker）覆盖两个降级路径。
 
+## 已完成（第四轮：逐步覆盖 readline）
+
+- [x] **TUI 引擎安全网（非 VT 环境自动回退）** — `rline/tui.go selectEngine`：
+  `inputMode()` 的决策核心提为纯函数（env 注入，可测）；cygwin（管道 stdin 无法
+  raw mode）与 `TERM=dumb` 下即使显式 `USQL_INPUT=tui` 也强制回退 readline；
+  `USQL_INPUT=readline` 显式回退已识别（为默认翻转铺路）。
+- [x] **cursorRow 生产化** — DSR 应答解析提为纯函数 `parseCursorRow`（引擎测试覆盖），
+  清理探测路径上的 4 处 `PROBE:` 调试残留 stderr 输出。
+- [x] **TUI 键位对齐 readline** — 逐键位审计 `operation.go` 键表：补上缺失的
+  **Ctrl-L 清屏**（`tea.ClearScreen` 原位重绘，缓冲区/ghost/菜单不动，行为与
+  readline 一致）；其余 emacs 键位（Ctrl-B/P/N/A/E/K/U/W/Y/T、Alt-B/D/F/T/Y、
+  数字前缀、Ctrl-R/S）此前已覆盖。vi 模式为 readline 死代码（从未接线），见剩余项。
+- [x] **非交互输入脱离 readline** — `rline/plain.go plainReader`：管道/`-o`/`-c`/`-f`
+  场景不再构建 readline 实例（此前 `rline.New` 无条件 `readline.NewEx`）。逐行读
+  （支持超长行、`\r\n`、末行无换行刷新）；`-c/-f` 保持 Next=EOF + 密码不可用语义；
+  密码复用 `readPassword`（文件 stdin 走 x/term 关回显）；`-o` 输出文件 closer 链
+  保留（`plainReader.closers`）。
+- [x] **readline 包裁剪** — 删除 `rline/readline/remote.go`（gohxs 的网络 readline
+  特性，474 行，usql 与包内均无引用）。
+
 ## 剩余项
 
 - [ ] **默认引擎翻转**：`rline/tui.go` 的 `inputMode()` 目前仅在 `USQL_INPUT=tui` 时启用
-  TUI。泡够一个版本后翻转为默认 `tui`（`USQL_INPUT=readline` 显式回退），并同步
-  README「Input Engine」章节。
+  TUI。泡够一个版本后翻转为默认 `tui`（`selectEngine` 已识别 `USQL_INPUT=readline`
+  显式回退），并同步 README「Input Engine」章节。
 - [ ] **Windows conhost VT 模式冒烟**：cp936 检测/转码已实现并交叉编译通过，但 TUI
   引擎在 conhost 的 VT 模式下的实机冒烟需要 Windows 环境（可参照 ptysmoke 场景）。
-- [ ] **Cygwin 路径**：TUI 引擎 `Cygwin()` 恒 false，cygwin 下强制走 readline；如有用户
-  反馈再评估。
+- [ ] **Cygwin 路径评估**：cygwin 下已由 `selectEngine` 强制回退 readline（管道 stdin
+  无法 raw mode）；仅当有用户反馈时再评估 TUI-on-cygwin 可行性。
+- [ ] **vi 模式**（可选）：readline 引擎的 `VimMode` 在 usql 从未接线（死代码）；如需
+  vi 编辑需在 TUI 引擎首次实现。
 - [ ] **tblfmt 上游问题跟进**（本仓库只做了规避）：
   - CJK locale（EastAsianWidth=true）下 `linestyle=unicode` 直接报
     `invalid line style`（tblfmt encode.go 校验要求边框字形宽度恒 1）——table_color

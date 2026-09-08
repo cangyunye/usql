@@ -441,6 +441,10 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		m.startSearch(false)
 	case "ctrl+s":
 		m.startSearch(true)
+	case "ctrl+l":
+		// clear the screen; bubbletea repaints the line (with ghost and
+		// menu) in place, matching readline's Ctrl-L
+		return m, tea.ClearScreen
 	default:
 		if rs := msg.Runes; len(rs) > 0 {
 			ed.insertRunes(rs)

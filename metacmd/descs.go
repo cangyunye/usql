@@ -50,6 +50,7 @@ func init() {
 			{Connect, `connect`, ``, `alias for \c`, true, false},
 			{ConnList, `conns`, ``, `show named connections, or manage (add/edit/delete/connect) interactively`, false, false},
 			{ConnList, `conns NAME|N`, ``, `connect directly to a named connection`, false, false},
+			{ConnList, `conns migrate`, ``, `import OS keyring passwords into the encrypted secret store (one-time)`, false, false},
 			{Disconnect, `Z`, ``, `close (disconnect) database connection`, false, false},
 			{Disconnect, `disconnect`, ``, `alias for \Z`, true, false},
 			{Password, `password`, `[USER]`, `change password for user`, false, false},

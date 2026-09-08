@@ -239,8 +239,9 @@ $ CGO_ENABLED=0 go build -tags 'most no_duckdb no_odbc no_godror no_sqlite3 mode
 
 无 CGO 构建的注意事项：
 
-- 未编译 OS 密钥环后端时，命名连接的密码会使用权限为 0600 的
-  `secrets.json` 兜底文件（见 [`\conns` 一节](#managing-named-connections-conns)）。
+- 命名连接的密码始终保存在 AES-256-GCM 加密的 `secrets.enc` 文件中，与
+  CGO 无关 —— 不涉及任何 OS 密钥环（见 [`\conns` 一节](#managing-named-connections-conns)）；
+  只有从 OS 密钥环一次性迁移密码的 `\conns migrate` 需要 CGO 构建。
 - `\chart` 需要 `chart` 构建标签（它会内嵌 goja JS 引擎和 echarts.min.js）。
   带 `-tags chart` 的无 CGO 构建支持 `\chart ... file=` SVG 导出；终端图片
   输出还需要 cgo 的 resvg 绑定。
@@ -552,12 +553,18 @@ DSN）遵循与 URL 相同的解析规则，可以通过命令行传给 `usql`�
 
 usql 管理的连接持久化到 `$HOME/.config/usql/connections.yaml`（或各平台的
 对应位置），格式与 [`config.yaml` 的 `connections:`][config] 一致 —— 既支持
-组件映射，也支持 DSN 字符串。**密码绝不会写入该文件。** 密码保存在服务名
-为 `usql` 的 OS 密钥环（Secret Service / Keychain / Windows 凭据管理器）
-中；没有可用密钥环时，保存在旁边的兜底文件 `secrets.json` 中，并以 `0600`
-权限创建。存储的密码只在连接该命名连接时注入，且 `\cset` / `\conns` 的输出
-会掩码 URL 中内嵌的密码。定义在 `config.yaml` 中的连接继续可用，并以来源
-`config` 只读列出；两处都定义的同一名称会在启动时报告。
+组件映射，也支持 DSN 字符串。**密码绝不会写入该文件。** 密码保存在旁边
+AES-256-GCM 加密的 `secrets.enc` 文件中，以原子方式写入，权限为 `0600`。
+加密密钥来自机器本地的随机密钥文件 `secret.key`（自动创建，同样 `0600`）；
+若设置了 `USQL_SECRETS_PASSPHRASE`，则改用由该口令派生的密钥
+（PBKDF2-SHA256，每文件独立盐值）—— 模式在文件首次创建时确定。
+`USQL_SECRETS_KEYFILE` 可将密钥指向其他位置（如可移动介质）。usql 不再
+使用 OS 密钥环，因此不会出现钥匙串授权弹窗；`\conns migrate` 可把早期
+版本写入 OS 密钥环的密码迁移出来（并删除密钥环条目），旧的明文兜底文件
+`secrets.json` 会被自动导入并改名为 `secrets.json.imported`。存储的密码
+只在连接该命名连接时注入，且 `\cset` / `\conns` 的输出会掩码 URL 中内嵌
+的密码。定义在 `config.yaml` 中的连接继续可用，并以来源 `config` 只读
+列出；两处都定义的同一名称会在启动时报告。
 
 连接也会自动保存：凡是在命令行传入 DSN 并成功建立的连接，都会以默认名
 `<scheme>_<user>_<host>_<port>_<dbname>`（例如

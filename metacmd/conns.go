@@ -200,6 +200,23 @@ func connsManage(h Handler) error {
 	}
 }
 
+// connsMigrate runs the one-time OS keyring import into the encrypted
+// secrets file.
+func connsMigrate(h Handler) error {
+	names, err := env.MigrateKeyringPasswords()
+	if err != nil {
+		return fmt.Errorf("\\conns migrate: %w", err)
+	}
+	stdout := h.IO().Stdout()
+	if len(names) == 0 {
+		fmt.Fprintln(stdout, "no passwords found in the OS keyring; nothing to migrate")
+		return nil
+	}
+	fmt.Fprintf(stdout, "migrated %d password(s) into the encrypted secret store: %s\n", len(names), strings.Join(names, ", "))
+	fmt.Fprintln(stdout, "the keyring entries were removed; usql no longer touches the OS keyring")
+	return nil
+}
+
 // resolveConnTarget resolves a table row number or connection name.
 func resolveConnTarget(names []string, target string) string {
 	if n, err := strconv.Atoi(target); err == nil && n >= 1 && n <= len(names) {

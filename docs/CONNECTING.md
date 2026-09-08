@@ -163,15 +163,22 @@ Then connect by name — either `\c ob_oracle`, or the one-step
 without entering the manager). Inside the manager, `c <name|#>` does the
 same.
 
-Stored connections live in `connections.yaml` (no passwords) with passwords in
-the OS keyring, or in a `0600`-permission `secrets.json` fallback file. Both
-are in the usql configuration directory:
+Stored connections live in `connections.yaml` (no passwords); passwords live
+in an AES-256-GCM encrypted `secrets.enc` file. Its key is a machine-local
+`secret.key` created automatically (or `USQL_SECRETS_KEYFILE` to relocate it),
+or a `USQL_SECRETS_PASSPHRASE`-derived key. All are in the usql configuration
+directory:
 
 - **Linux/Unix**: `$HOME/.config/usql/` (or `$XDG_CONFIG_HOME/usql/`)
 - **macOS**: `$HOME/Library/Application Support/usql/`
 - **Windows**: `%AppData%/usql/`
 
-So the two files are `connections.yaml` and `secrets.json` in that directory.
+So the files are `connections.yaml`, `secrets.enc`, and `secret.key` in that
+directory — back up the key file (or remember the passphrase), as the stored
+passwords cannot be recovered without it. The OS keyring is never used;
+`\conns migrate` imports passwords stored by earlier builds from the OS
+keyring (one-time, removing the keyring items), and an old plaintext
+`secrets.json` is imported and renamed automatically.
 
 Connecting from a command-line DSN also **saves** it automatically: pass
 `--name <name>` to choose the stored name, otherwise a default identifier is

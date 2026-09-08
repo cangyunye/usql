@@ -354,16 +354,26 @@ func Connect(p *Params) error {
 // ConnList is a Connection meta command (\conns). Lists the stored named
 // connections, and manages them interactively when on a terminal. When
 // passed a name or a row number, connects directly to that stored
-// connection.
+// connection. \conns migrate moves passwords written by earlier builds from
+// the OS keyring into the encrypted secrets file (the OS may ask to approve
+// each keyring read, once); a connection literally named "migrate" must be
+// connected via `\c migrate`.
 //
 // Descs:
 //
 //	conns	show named connections, or manage (add/edit/delete/connect) interactively
 //	conns NAME|N	connect directly to a named connection
+//	conns migrate	import OS keyring passwords into the encrypted secret store (one-time)
 func ConnList(p *Params) error {
-	// \conns NAME|N — connect directly to a stored connection
+	// \conns migrate — one-time OS keyring import
 	vals, err := p.All(true)
 	if err == nil && len(vals) > 0 {
+		if vals[0] == "migrate" {
+			if len(vals) > 1 {
+				return fmt.Errorf("usage: \\conns migrate")
+			}
+			return connsMigrate(p.Handler)
+		}
 		if len(vals) > 1 {
 			return fmt.Errorf("usage: \\conns [NAME|N]")
 		}

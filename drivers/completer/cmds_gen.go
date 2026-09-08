@@ -14,6 +14,7 @@ var backslashCommands = []string{
 	"\\Z",
 	"\\a",
 	"\\abort",
+	"\\alias",
 	"\\begin",
 	"\\bind",
 	"\\c",

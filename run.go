@@ -262,6 +262,11 @@ func Run(ctx context.Context, args *Args) error {
 		fmt.Fprintln(os.Stderr, err)
 	}
 
+	// usql-managed SQL aliases (aliases.yaml)
+	if err := env.LoadAliases(); err != nil && !forceNonInteractive && interactive {
+		fmt.Fprintln(os.Stderr, err)
+	}
+
 	// fmt.Fprintf(os.Stdout, "VARS: %v\nCVARS: %v\nPVARS: %v\n", args.Vars, args.Cvars, args.Pvars)
 
 	// set vars

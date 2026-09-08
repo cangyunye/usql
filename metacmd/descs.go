@@ -81,6 +81,7 @@ func init() {
 		{
 			{Edit, `e`, `[-raw|-exec] [FILE] [LINE]`, `edit the query buffer, raw (non-interpolated) buffer, the exec buffer, or a file with external editor`, false, false},
 			{Edit, `edit`, ``, `alias for \e`, true, false},
+			{Alias, `alias`, `[NAME [ARG...]]`, `list SQL aliases, or expand NAME into the input line, replacing $placeholders with ARGs`, false, false},
 			{Print, `p`, `[-raw|-exec]`, `show the contents of the query buffer, the raw (non-interpolated) buffer or the exec buffer`, false, false},
 			{Print, `print`, ``, `alias for \p`, true, false},
 			{Print, `raw`, ``, `alias for \p`, true, false},

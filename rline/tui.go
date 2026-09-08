@@ -34,6 +34,9 @@ type tuiRline struct {
 	kickCh chan struct{}
 	// cons is the console for terminal queries (nil when unavailable)
 	cons *os.File
+	// pendLine/pendPos preset the next read's buffer and cursor (LineEditor)
+	pendLine []rune
+	pendPos  int
 }
 
 // newTUI creates the bubbletea-backed IO implementation.
@@ -63,6 +66,10 @@ func (t *tuiRline) Next() ([]rune, error) {
 		prompt = "> "
 	}
 	m := newLineModel(t, prompt, cursorRow(t.cons, t.raw))
+	if t.pendLine != nil {
+		m.ed.buf, m.ed.idx = t.pendLine, t.pendPos
+		t.pendLine, t.pendPos = nil, 0
+	}
 	t.gout.begin()
 	t.gerr.begin()
 	defer func() {
@@ -97,6 +104,14 @@ func (t *tuiRline) IsTUI() bool { return true }
 // ConsoleReader is the console input reader (optional IO extension for
 // embedded bubbletea programs).
 func (t *tuiRline) ConsoleReader() io.Reader { return t.in }
+
+// SetLine satisfies LineEditor: preset the next read's buffer and cursor.
+func (t *tuiRline) SetLine(text []rune, pos int) {
+	if pos < 0 || pos > len(text) {
+		pos = len(text)
+	}
+	t.pendLine, t.pendPos = append([]rune(nil), text...), pos
+}
 
 // Stdout is the standard out.
 func (t *tuiRline) Stdout() io.Writer { return t.out }

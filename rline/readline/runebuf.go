@@ -510,15 +510,21 @@ func (r *RuneBuffer) output() []byte {
 }
 
 func (r *RuneBuffer) cursorPosition() []byte {
+	width := r.width
+	if width <= 0 {
+		// degenerate terminal (no known window size): avoid dividing by
+		// zero when placing the cursor mid-line (usql fork)
+		width = 80
+	}
 
 	fullWidth := runes.WidthAll(r.buf) + r.promptLen()             // full line Width
-	lineCount := LineCount(r.width-1, fullWidth) - 1               // Total line count
+	lineCount := LineCount(width-1, fullWidth) - 1                 // Total line count
 	cursorWidth := (runes.WidthAll(r.buf[:r.idx])) + r.promptLen() // cursor line Width
-	desiredLine := (cursorWidth / r.width)                         // get Line position starting from prompt
-	desiredCol := cursorWidth % r.width                            // get column position starting from prompt
+	desiredLine := (cursorWidth / width)                           // get Line position starting from prompt
+	desiredCol := cursorWidth % width                              // get column position starting from prompt
 	tbuf := bytes.NewBuffer(nil)
 
-	if lineCount > 0 || fullWidth == r.width {
+	if lineCount > 0 || fullWidth == width {
 		tbuf.WriteString(fmt.Sprintf("\033[%dA", lineCount))
 	}
 	tbuf.WriteString("\r") // go back anyway

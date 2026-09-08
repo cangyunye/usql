@@ -45,6 +45,11 @@ func (o *Operation) SetBuffer(what string) {
 	o.buf.Set([]rune(what))
 }
 
+// SetBufferIdx sets the buffer contents and cursor position (usql fork).
+func (o *Operation) SetBufferIdx(what string, idx int) {
+	o.buf.SetWithIdx(idx, []rune(what))
+}
+
 // LiveKick re-runs the typing-time completion from any goroutine, used by
 // LiveAutoCompleters to publish late-arriving candidates. (usql fork)
 func (o *Operation) LiveKick() {

@@ -913,6 +913,8 @@ Query View
   \watch [(OPTIONS)] [INTERVAL]     execute query every specified interval
 
 Query Buffer
+  \alias [NAME [ARG...]]            list SQL aliases, or expand NAME into the input line,
+                                    replacing $placeholders with ARGs
   \e [-raw|-exec] [FILE] [LINE]     edit the query buffer, raw (non-interpolated) buffer, the
                                     exec buffer, or a file with external editor
   \edit                             alias for \e
@@ -995,6 +997,40 @@ Operating System/Environment
 ```
 
 Parameters passed to commands [can be backticked][backticks].
+
+### SQL Aliases
+
+This fork adds a `\alias` meta command: user-defined named SQL snippets,
+stored in `<configdir>/aliases.yaml` (`~/Library/Application
+Support/usql/aliases.yaml` on macOS, `~/.config/usql/aliases.yaml` on Linux),
+overridable with the `USQL_ALIASES` environment variable:
+
+```yaml
+common:
+  s1: select * from $tablename limit 20;
+postgres:
+  sessions: select pid, usename, state, query from pg_stat_activity
+            where datname = current_database();
+  conns: select count(*) from pg_stat_activity;
+mysql:
+  sessions: show processlist;
+  conns: show full processlist;
+```
+
+Aliases in the `common:` section are available everywhere; aliases in a
+per-driver section (`postgres:`, `mysql:`, ...) are only visible while
+connected to that driver, and override `common` aliases of the same name.
+
+- `\alias` lists the aliases available in the current session (with their
+  scope and SQL).
+- `\alias s1` expands the alias into the input line, placing the cursor at
+  its first `$placeholder` (`$name` tokens; PostgreSQL-style numeric
+  parameters like `$1` are not treated as placeholders), ready to be edited
+  before hitting enter. Multi-line templates are folded onto the input line.
+- `\alias s1 mytable` additionally replaces placeholders positionally; the
+  cursor stops at the first remaining placeholder.
+- Alias names tab-complete, and the aliases file is reloaded on every
+  `\alias` invocation, so edits take effect immediately.
 
 ## Features and Compatibility
 

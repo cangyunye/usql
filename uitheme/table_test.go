@@ -277,7 +277,7 @@ func TestPaintTablePreservesContentAndAligns(t *testing.T) {
 		t.Fatalf("tblfmt did not render a unicode table:\n%s", plain)
 	}
 	th := Current()
-	painted := th.PaintTable(plain)
+	painted := th.PaintTable(plain, TablePaint{})
 	// painting must not add, remove, or rewrap any character
 	if got := stripANSI(painted); got != plain {
 		t.Errorf("painted content changed:\nwant %q\ngot  %q", plain, got)
@@ -318,7 +318,7 @@ func TestPaintTableGBKConsoleAligns(t *testing.T) {
 			{"3", "ＡＢＣ±①"},
 		},
 	})
-	painted := Current().PaintTable(plain)
+	painted := Current().PaintTable(plain, TablePaint{})
 	plainLines := strings.Split(strings.TrimSuffix(plain, "\n"), "\n")
 	paintedLines := strings.Split(strings.TrimSuffix(painted, "\n"), "\n")
 	for i := range plainLines {
@@ -344,13 +344,13 @@ func TestPaintTablePassthrough(t *testing.T) {
 	th := Current()
 	// non-table text passes through untouched
 	for _, s := range []string{"(4 rows)\n", "Time: 1.234 ms\n", "plain text", ""} {
-		if got := th.PaintTable(s); got != s {
+		if got := th.PaintTable(s, TablePaint{}); got != s {
 			t.Errorf("PaintTable(%q) = %q, want unchanged", s, got)
 		}
 	}
 	// ascii linestyle tables are not painted (the '│' keying would be wrong)
 	ascii := "| a | b |\n|---|---|\n"
-	if got := th.PaintTable(ascii); got != ascii {
+	if got := th.PaintTable(ascii, TablePaint{}); got != ascii {
 		t.Errorf("ascii table painted: %q", got)
 	}
 }
@@ -369,12 +369,13 @@ func TestLineWriterMatchesPaintTable(t *testing.T) {
 			{"3", "你好😀世界"},
 		},
 	})
-	want := Current().PaintTable(plain)
+	kinds := TablePaint{Kinds: func() []Kind { return []Kind{KindInt, KindString} }}
+	want := Current().PaintTable(plain, kinds)
 	// stream the same output through LineWriter in awkward chunk splits
 	// (including mid-rune and mid-line boundaries)
 	for _, chunk := range []int{1, 3, 7, 13} {
 		var buf bytes.Buffer
-		lw := Current().LineWriter(&buf)
+		lw := Current().LineWriter(&buf, kinds)
 		for i := 0; i < len(plain); i += chunk {
 			end := i + chunk
 			if end > len(plain) {
@@ -393,9 +394,196 @@ func TestLineWriterMatchesPaintTable(t *testing.T) {
 	}
 }
 
+// multiResultSet feeds several fixed result sets through the real tblfmt
+// encoder, one per NextResultSet.
+type multiResultSet struct {
+	sets []*fakeResultSet
+	idx  int
+}
+
+func (m *multiResultSet) Columns() ([]string, error) { return m.sets[m.idx].Columns() }
+func (m *multiResultSet) Next() bool                 { return m.sets[m.idx].Next() }
+func (m *multiResultSet) Scan(dst ...any) error      { return m.sets[m.idx].Scan(dst...) }
+func (m *multiResultSet) Close() error               { return nil }
+func (m *multiResultSet) Err() error                 { return nil }
+func (m *multiResultSet) NextResultSet() bool {
+	if m.idx+1 >= len(m.sets) {
+		return false
+	}
+	m.idx++
+	return true
+}
+
+func TestPaintTableValueKinds(t *testing.T) {
+	defer setColor(true)()
+	SetConsoleEncoding(nil)
+	defer SetConsoleEncoding(nil)
+	setEAW(false)
+	defer setEAWLocale()
+	rs := &fakeResultSet{
+		cols: []string{"i", "f", "s", "t", "b", "bin", "n"},
+		vals: [][]any{
+			{"1", "1.5", "hello", "2024-01-02", "true", "\x01\x02", nil},
+			{"2", "2.5", "world", "2024-01-03", "false", "\x03", nil},
+		},
+	}
+	kinds := TablePaint{Kinds: func() []Kind {
+		return []Kind{KindInt, KindFloat, KindString, KindTime, KindBool, KindBinary, KindString}
+	}}
+	plain := tblfmtString(t, rs)
+	painted := Current().PaintTable(plain, kinds)
+	if got := stripANSI(painted); got != plain {
+		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
+	}
+	// each kind's foreground color must reach its value cells
+	for _, code := range []string{
+		"\x1b[38;5;114m", // int
+		"\x1b[38;5;203m", // float
+		"\x1b[38;5;75m",  // string
+		"\x1b[38;5;220m", // time
+		"\x1b[38;5;109m", // bool
+	} {
+		if !strings.Contains(painted, code) {
+			t.Errorf("painted output missing value color %q", code)
+		}
+	}
+	// odd rows must layer the value color inside the zebra background
+	if !strings.Contains(painted, "\x1b[48;5;235m\x1b[38;5;114m") {
+		t.Error("zebra row does not compose background with value color")
+	}
+}
+
+func TestPaintTableBinaryAndUnknownStayPlain(t *testing.T) {
+	defer setColor(true)()
+	SetConsoleEncoding(nil)
+	defer SetConsoleEncoding(nil)
+	setEAW(false)
+	defer setEAWLocale()
+	// a single binary column framed by border=2: the only foreground codes
+	// on a data line must be the two border renders
+	rs := &fakeResultSet{cols: []string{"bin"}, vals: [][]any{{"\x01\x02"}}}
+	plain := tblfmtStringParams(t, rs, map[string]string{"border": "2"})
+	painted := Current().PaintTable(plain, TablePaint{Kinds: func() []Kind { return []Kind{KindBinary} }})
+	if got := stripANSI(painted); got != plain {
+		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
+	}
+	for _, line := range strings.Split(strings.TrimSuffix(painted, "\n"), "\n") {
+		if !strings.Contains(line, "\x01\x02") {
+			continue
+		}
+		if n := strings.Count(line, "\x1b[38;5;"); n != 2 {
+			t.Errorf("binary data line has %d foreground codes, want only the 2 border renders:\n%q", n, line)
+		}
+	}
+	// the same must hold for kinds the painter never saw (nil provider)
+	painted = Current().PaintTable(plain, TablePaint{})
+	for _, line := range strings.Split(strings.TrimSuffix(painted, "\n"), "\n") {
+		if strings.Contains(line, "\x01\x02") && strings.Count(line, "\x1b[38;5;") != 2 {
+			t.Errorf("nil-kinds binary data line has foreground codes:\n%q", line)
+		}
+	}
+}
+
+func TestPaintTableNullMarkerIsFaint(t *testing.T) {
+	defer setColor(true)()
+	SetConsoleEncoding(nil)
+	defer SetConsoleEncoding(nil)
+	setEAW(false)
+	defer setEAWLocale()
+	rs := &fakeResultSet{
+		cols: []string{"i", "n"},
+		vals: [][]any{{"1", nil}, {"2", nil}},
+	}
+	paint := TablePaint{
+		Kinds: func() []Kind { return []Kind{KindInt, KindString} },
+		Null:  "NULL",
+	}
+	plain := tblfmtStringParams(t, rs, map[string]string{"null": "NULL"})
+	painted := Current().PaintTable(plain, paint)
+	if got := stripANSI(painted); got != plain {
+		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
+	}
+	if !strings.Contains(painted, "\x1b[2m NULL ") {
+		t.Error("NULL marker is not faint")
+	}
+	if !strings.Contains(painted, "\x1b[38;5;114m") {
+		t.Error("int cells lost their value color")
+	}
+}
+
+func TestPaintTableValueKindsBorder2(t *testing.T) {
+	defer setColor(true)()
+	SetConsoleEncoding(nil)
+	defer SetConsoleEncoding(nil)
+	setEAW(false)
+	defer setEAWLocale()
+	rs := &fakeResultSet{
+		cols: []string{"i", "s"},
+		vals: [][]any{{"1", "hello"}},
+	}
+	kinds := TablePaint{Kinds: func() []Kind { return []Kind{KindInt, KindString} }}
+	plain := tblfmtStringParams(t, rs, map[string]string{"border": "2"})
+	painted := Current().PaintTable(plain, kinds)
+	if got := stripANSI(painted); got != plain {
+		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
+	}
+	// the framed table's top border must not swallow the header: it stays
+	// bold, and the framed-row column shift must not misplace value colors
+	if !strings.Contains(painted, "\x1b[1m") {
+		t.Error("border=2 header row was not styled bold")
+	}
+	for _, code := range []string{"\x1b[38;5;114m", "\x1b[38;5;75m"} {
+		if !strings.Contains(painted, code) {
+			t.Errorf("painted output missing value color %q", code)
+		}
+	}
+}
+
+func TestPaintTableKindsPerResultSet(t *testing.T) {
+	defer setColor(true)()
+	SetConsoleEncoding(nil)
+	defer SetConsoleEncoding(nil)
+	setEAW(false)
+	defer setEAWLocale()
+	rs := &multiResultSet{sets: []*fakeResultSet{
+		{cols: []string{"a", "a2"}, vals: [][]any{{"1", "3"}, {"2", "4"}}},
+		{cols: []string{"b", "b2"}, vals: [][]any{{"x", "z"}, {"y", "w"}}},
+	}}
+	calls := 0
+	kinds := TablePaint{Kinds: func() []Kind {
+		calls++
+		if calls == 1 {
+			return []Kind{KindInt, KindInt}
+		}
+		return []Kind{KindString, KindString}
+	}}
+	plain := tblfmtString(t, rs)
+	painted := Current().PaintTable(plain, kinds)
+	if got := stripANSI(painted); got != plain {
+		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
+	}
+	// each table takes its kinds from one provider call: the first paints
+	// int green, the second string blue, and no per-row refresh happens
+	if !strings.Contains(painted, "\x1b[38;5;114m") {
+		t.Error("first result set missing int color")
+	}
+	if !strings.Contains(painted, "\x1b[38;5;75m") {
+		t.Error("second result set missing string color")
+	}
+	if calls != 2 {
+		t.Errorf("kinds provider called %d times, want 2 (once per table)", calls)
+	}
+}
+
 // tblfmtString renders rs with the aligned+unicode params the colored table
 // path is keyed on.
 func tblfmtString(t *testing.T, rs tblfmt.ResultSet) string {
+	t.Helper()
+	return tblfmtStringParams(t, rs, nil)
+}
+
+// tblfmtStringParams renders like tblfmtString with parameter overrides.
+func tblfmtStringParams(t *testing.T, rs tblfmt.ResultSet, overrides map[string]string) string {
 	t.Helper()
 	var buf bytes.Buffer
 	params := map[string]string{
@@ -406,6 +594,9 @@ func tblfmtString(t *testing.T, rs tblfmt.ResultSet) string {
 		"null":                     "",
 		"tuples_only":              "off",
 		"unicode_border_linestyle": "single",
+	}
+	for k, v := range overrides {
+		params[k] = v
 	}
 	if err := tblfmt.EncodeAll(&buf, rs, params); err != nil {
 		t.Fatalf("EncodeAll: %v", err)

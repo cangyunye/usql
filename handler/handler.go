@@ -1382,7 +1382,10 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	if h.out == nil && params["pipe"] == "" && params["table_color"] != "off" &&
 		params["format"] == "aligned" && params["linestyle"] == "unicode" &&
 		opt.Exec != metacmd.ExecCrosstab && h.l.Interactive() && uitheme.Enabled() {
-		pw = uitheme.Current().LineWriter(w)
+		pw = uitheme.Current().LineWriter(w, uitheme.TablePaint{
+			Kinds: typeKinds(rows),
+			Null:  params["null"],
+		})
 		w = pw
 	}
 	// encode and handle error conditions
@@ -1413,6 +1416,25 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 		}
 	}
 	return err
+}
+
+// typeKinds returns a lazy per-table column kind provider for the table
+// painter: rows.ColumnTypes describes the current result set and is
+// refreshed after each NextResultSet, which always happens before the
+// set's first table line is painted, so one provider serves every table
+// streamed from a multi-result-set query.
+func typeKinds(rows *sql.Rows) func() []uitheme.Kind {
+	return func() []uitheme.Kind {
+		cts, err := rows.ColumnTypes()
+		if err != nil {
+			return nil
+		}
+		kinds := make([]uitheme.Kind, len(cts))
+		for i, ct := range cts {
+			kinds[i] = uitheme.KindOf(ct)
+		}
+		return kinds
+	}
 }
 
 // doExecRows executes all the columns in the row.

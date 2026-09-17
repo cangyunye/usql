@@ -157,20 +157,30 @@ func sum(widths []int) int {
 	return n
 }
 
+// TablePaint configures the painting of streamed aligned tables: a
+// per-table column kinds provider for value colors (nil paints no value
+// colors), and the null marker tblfmt renders for SQL NULL cells ("" for
+// blank), which gets the faint Null style instead of a value color.
+type TablePaint struct {
+	Kinds func() []Kind
+	Null  string
+}
+
 // PaintTable injects theme SGR sequences into a plain tblfmt "aligned"
 // table rendered with unicode linestyle: the header row is bolded, border
-// glyphs colored, and data rows alternately zebra-shaded.
+// glyphs colored, data rows alternately zebra-shaded, and data cells
+// foreground-colored by their column's Kind (see TablePaint).
 //
 // Only escape sequences are inserted — no characters are added, removed, or
 // rewrapped — so tblfmt's alignment (computed with go-runewidth) is
 // preserved exactly. Lines that are not table rows (footers, timings,
 // blank lines between result sets) pass through untouched, as do lines
 // without unicode column separators (expanded output, errors, notices).
-func (t *Theme) PaintTable(out string) string {
+func (t *Theme) PaintTable(out string, paint TablePaint) string {
 	if colorDisabled || !strings.ContainsAny(out, "│┌└├") {
 		return out
 	}
-	p := &tablePainter{t: t}
+	p := &tablePainter{t: t, paint: paint}
 	var b strings.Builder
 	for line := range strings.Lines(out) {
 		b.WriteString(p.line(strings.TrimSuffix(line, "\n")))
@@ -182,14 +192,14 @@ func (t *Theme) PaintTable(out string) string {
 // LineWriter returns an io.Writer that paints tblfmt table lines as they
 // stream through (see PaintTable), or w unchanged when color is disabled.
 // The returned WriteCloser's Close flushes any buffered partial line.
-func (t *Theme) LineWriter(w io.Writer) io.WriteCloser {
+func (t *Theme) LineWriter(w io.Writer, paint TablePaint) io.WriteCloser {
 	if colorDisabled {
 		if wc, ok := w.(io.WriteCloser); ok {
 			return wc
 		}
 		return nopCloser{w}
 	}
-	return &paintWriter{p: &tablePainter{t: t}, w: w}
+	return &paintWriter{p: &tablePainter{t: t, paint: paint}, w: w}
 }
 
 // nopCloser wraps w with a no-op Close.
@@ -248,13 +258,22 @@ func (pw *paintWriter) Close() error {
 // are framed by leading and trailing '│' and separators start with a corner
 // glyph; with the default border = 1 there are no outer borders and the
 // separator is a bare "───┼───" run. In both shapes the header row is the
-// first line containing '│' and the separator follows it.
+// first line containing '│' and the separator follows it (a framed
+// separator preceding it, when border >= 2).
 type tablePainter struct {
 	t *Theme
 	// rowState tracks the tblfmt structure: 0 outside/between tables
-	// (expecting a header), 1 header seen (expecting data), 2 in data rows.
+	// (expecting a header), 1 inside a framed table after its opening
+	// separator (expecting the header), 2 past the header (data rows).
 	rowState int
 	dataRow  int
+	// paint holds the value-coloring configuration; paint.Kinds is
+	// consulted once per table (on the header or first data row, whichever
+	// comes first) because the painter runs in the same goroutine that
+	// streams the result set, after tblfmt has advanced to it.
+	paint       TablePaint
+	kinds       []Kind
+	kindsLoaded bool
 }
 
 // line paints a single output line.
@@ -263,15 +282,23 @@ func (p *tablePainter) line(line string) string {
 	switch {
 	case isSeparatorLine(line):
 		if p.rowState == 0 {
-			// separator before any header row: an empty table's border
-			p.rowState = 2
+			if isBorderedSeparator(line) {
+				// a framed separator (border >= 2) opens the table: the
+				// header row follows it
+				p.rowState = 1
+			} else {
+				// bare separator before any header row: an empty or
+				// header-less table's border
+				p.rowState = 2
+			}
 		}
 		return t.Border.Render(line)
 	case strings.ContainsRune(line, '│'):
 		kind := rowDataKind
-		if p.rowState == 0 {
+		if p.rowState == 0 || p.rowState == 1 {
 			kind = headerKind
 		}
+		p.loadKinds()
 		out := p.paintRow(line, kind)
 		p.rowState = 2
 		return out
@@ -279,7 +306,19 @@ func (p *tablePainter) line(line string) string {
 		// footers, timings, blank lines between result sets, errors
 		p.rowState = 0
 		p.dataRow = 0
+		p.kinds, p.kindsLoaded = nil, false
 		return line
+	}
+}
+
+// loadKinds fetches the column kinds for the table being entered, once.
+func (p *tablePainter) loadKinds() {
+	if p.kindsLoaded {
+		return
+	}
+	p.kindsLoaded = true
+	if p.paint.Kinds != nil {
+		p.kinds = p.paint.Kinds()
 	}
 }
 
@@ -293,24 +332,68 @@ const (
 func (p *tablePainter) paintRow(line string, kind int) string {
 	t := p.t
 	segs := strings.Split(line, "│")
+	// with border >= 2 rows are framed by a leading separator, so the first
+	// split segment is empty and column indexes shift by one
+	framed := strings.HasPrefix(line, "│")
 	var b strings.Builder
 	for i, seg := range segs {
 		if i != 0 {
 			b.WriteString(t.Border.Render("│"))
 		}
-		switch {
-		case kind == headerKind:
+		if kind == headerKind {
 			b.WriteString(t.Header.Render(seg))
-		case p.dataRow%2 == 1:
-			b.WriteString(t.Zebra.Render(seg))
-		default:
-			b.WriteString(seg)
+			continue
 		}
+		col := i
+		if framed {
+			col = i - 1
+		}
+		b.WriteString(p.dataCell(seg, col))
 	}
 	if kind == rowDataKind {
 		p.dataRow++
 	}
 	return b.String()
+}
+
+// dataCell styles one data-row cell: the value color of the column's kind,
+// plain for binary and unknown kinds, and the faint Null style for cells
+// rendering SQL NULL — blank cells, or those equal to the configured null
+// marker (an empty-string value is indistinguishable from NULL after
+// rendering) — with the zebra background of odd rows wrapped around it.
+func (p *tablePainter) dataCell(seg string, col int) string {
+	t := p.t
+	var inner string
+	trimmed := strings.TrimSpace(seg)
+	switch {
+	case trimmed == "", p.paint.Null != "" && trimmed == p.paint.Null:
+		inner = t.Null.Render(seg)
+	default:
+		if k := p.kindAt(col); k != KindUnknown && k != KindBinary {
+			inner = t.Values[k].Render(seg)
+		} else {
+			inner = seg
+		}
+	}
+	if p.dataRow%2 == 1 {
+		return t.Zebra.Render(inner)
+	}
+	return inner
+}
+
+// kindAt returns the kind of column col, KindUnknown when out of range.
+func (p *tablePainter) kindAt(col int) Kind {
+	if col < 0 || col >= len(p.kinds) {
+		return KindUnknown
+	}
+	return p.kinds[col]
+}
+
+// isBorderedSeparator reports whether a separator line carries corner or tee
+// glyphs, i.e. frames a border >= 2 table rather than being a bare border=1
+// column separator.
+func isBorderedSeparator(line string) bool {
+	return strings.ContainsAny(line, "┌┐└┘├┤┬┴┼")
 }
 
 // isSeparatorLine reports whether line is a horizontal border: only

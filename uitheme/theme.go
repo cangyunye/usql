@@ -33,6 +33,10 @@ type Theme struct {
 	// Header styles table header rows, Border colors table borders, Zebra
 	// is the even-row background, and Null styles NULL cells.
 	Header, Border, Zebra, Null lipgloss.Style
+	// Values holds per-Kind foreground colors for data cells of aligned
+	// tables; a zero style (no foreground) leaves the value in the terminal's
+	// default color, as the plain theme and the binary and unknown kinds do.
+	Values [numKind]lipgloss.Style
 	// Selected styles the highlighted row of an interactive list.
 	Selected lipgloss.Style
 }
@@ -151,6 +155,13 @@ func newTheme(name string) *Theme {
 			Border:   lipgloss.NewStyle().Foreground(lipgloss.Color("137")),
 			Zebra:    lipgloss.NewStyle().Background(lipgloss.Color("237")),
 			Null:     lipgloss.NewStyle().Faint(true),
+			Values: [numKind]lipgloss.Style{
+				KindInt:    lipgloss.NewStyle().Foreground(lipgloss.Color("150")),
+				KindFloat:  lipgloss.NewStyle().Foreground(lipgloss.Color("204")),
+				KindString: lipgloss.NewStyle().Foreground(lipgloss.Color("110")),
+				KindTime:   lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+				KindBool:   lipgloss.NewStyle().Foreground(lipgloss.Color("151")),
+			},
 			Selected: lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("239")),
 		}
 	case "plain":
@@ -176,6 +187,13 @@ func newTheme(name string) *Theme {
 			Border:   lipgloss.NewStyle().Foreground(lipgloss.Color("240")),
 			Zebra:    lipgloss.NewStyle().Background(lipgloss.Color("235")),
 			Null:     lipgloss.NewStyle().Faint(true),
+			Values: [numKind]lipgloss.Style{
+				KindInt:    lipgloss.NewStyle().Foreground(lipgloss.Color("114")),
+				KindFloat:  lipgloss.NewStyle().Foreground(lipgloss.Color("203")),
+				KindString: lipgloss.NewStyle().Foreground(lipgloss.Color("75")),
+				KindTime:   lipgloss.NewStyle().Foreground(lipgloss.Color("220")),
+				KindBool:   lipgloss.NewStyle().Foreground(lipgloss.Color("109")),
+			},
 			Selected: lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("236")),
 		}
 	}

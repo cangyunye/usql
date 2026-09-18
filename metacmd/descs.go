@@ -77,6 +77,7 @@ func init() {
 			{Crosstab, `xtab`, ``, `alias for \crosstab`, true, false},
 			{Chart, `chart`, `CHART [(OPTIONS)]`, `execute query and display results as a chart`, false, false},
 			{Watch, `watch`, `[(OPTIONS)] [INTERVAL]`, `execute query every specified interval`, false, false},
+			{More, `more`, `[N]`, `show the next N (default: previous page size) rows of the last row-limited query`, false, false},
 		},
 		// Query Buffer
 		{

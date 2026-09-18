@@ -14,15 +14,17 @@ import (
 //	fetchfirst append "FETCH FIRST n ROWS ONLY" — Oracle 12c+ and OceanBase
 //	           Oracle mode (OB recommends the row limiting clause over
 //	           ROWNUM subqueries)
-//	top        insert "TOP (n)" after SELECT [DISTINCT|ALL] — SQL Server,
-//	           SAP ASE
+//	top        insert "TOP (n)" after SELECT [DISTINCT|ALL] — SQL Server
+//	topstartat insert "TOP (n) START AT m" — SAP ASE 15.7+ (page clauses;
+//	           the first page just uses the TOP part)
 //	none       drivers whose row limit syntax is neither safe to guess nor
 //	           appendable — never rewritten
 //
 // Syntax verified against vendor documentation (2026-09): OceanBase
 // row-limiting clause recommendation, openGauss SELECT reference, Oracle
-// 12c FETCH FIRST (11g only has ROWNUM), and the SQL Server TOP clause
-// position (after SELECT DISTINCT/ALL).
+// 12c FETCH FIRST (11g only has ROWNUM), the SQL Server TOP clause position
+// (after SELECT DISTINCT/ALL) and OFFSET/FETCH's ORDER BY requirement
+// (satisfied with ORDER BY (SELECT NULL)), and SAP ASE TOP n START AT m.
 var rowLimitStrategies = map[string]string{
 	// Oracle family
 	"oracle":   "fetchfirst",
@@ -30,7 +32,7 @@ var rowLimitStrategies = map[string]string{
 	"oboracle": "fetchfirst",
 	// TOP family
 	"sqlserver": "top",
-	"sapase":    "top",
+	"sapase":    "topstartat",
 	// unguessable or non-appendable syntax
 	"firebird": "none", // SELECT FIRST n (pre-3.0); FETCH FIRST on 3.0+
 	"adodb":    "none", // OLE DB: access (TOP) or others
@@ -54,34 +56,16 @@ func Apply(driver string, sqlstr string, n int) (string, bool) {
 	if strategy == "none" {
 		return sqlstr, false
 	}
-	words := scanWords(sqlstr)
-	if len(words) == 0 {
+	words, ok := pageable(sqlstr)
+	if !ok {
 		return sqlstr, false
-	}
-	switch words[0].upper {
-	case "SELECT", "WITH", "TABLE":
-	default:
-		return sqlstr, false
-	}
-	for _, w := range words {
-		switch w.upper {
-		case "WHERE", "LIMIT", "OFFSET", "FETCH", "TOP", "ROWNUM", "FIRST",
-			"UNION", "INTERSECT", "EXCEPT", "MINUS":
-			// filtered, already limited, or a set operation: the clause
-			// would only apply to the last query block — leave it alone
-			return sqlstr, false
-		case "FOR":
-			// FOR UPDATE/SHARE: the limit clause must precede the lock
-			// clause, which a trailing append would violate
-			return sqlstr, false
-		}
 	}
 	// a leading newline keeps the clause out of a trailing line comment
 	clause := "\nLIMIT " + strconv.Itoa(n)
 	switch strategy {
 	case "fetchfirst":
 		clause = "\nFETCH FIRST " + strconv.Itoa(n) + " ROWS ONLY"
-	case "top":
+	case "top", "topstartat":
 		// TOP is part of the SELECT head: not appendable, and only valid
 		// when the statement starts with SELECT (not WITH/TABLE)
 		if words[0].upper != "SELECT" {
@@ -95,6 +79,80 @@ func Apply(driver string, sqlstr string, n int) (string, bool) {
 		return sqlstr[:at] + " TOP (" + strconv.Itoa(n) + ")" + sqlstr[at:], true
 	}
 	return strings.TrimRight(sqlstr, " \t\r\n;") + clause, true
+}
+
+// Page rewrites the ORIGINAL (un-Apply'd) sqlstr to return rows
+// [offset+1, offset+limit] in the named driver's own paging syntax — the
+// next page of a row-limited interactive query (see the ROWLIMIT variable
+// and \more). The same safety rules as Apply apply; drivers without a
+// safely expressible page clause (strategy none) return false. Note that
+// without an ORDER BY the row order — and therefore page membership — is
+// not guaranteed by the database.
+func Page(driver string, sqlstr string, limit, offset int) (string, bool) {
+	if limit <= 0 || offset < 0 {
+		return sqlstr, false
+	}
+	strategy, ok := rowLimitStrategies[driver]
+	if !ok {
+		strategy = "limit"
+	}
+	words, ok := pageable(sqlstr)
+	if !ok {
+		return sqlstr, false
+	}
+	trimmed := strings.TrimRight(sqlstr, " \t\r\n;")
+	switch strategy {
+	case "none":
+		return sqlstr, false
+	case "fetchfirst":
+		return trimmed + "\nOFFSET " + strconv.Itoa(offset) + " ROWS FETCH FIRST " + strconv.Itoa(limit) + " ROWS ONLY", true
+	case "top":
+		// T-SQL OFFSET/FETCH needs ORDER BY, which the user's statement may
+		// not have; wrapping adds a no-op ordering instead of guessing one
+		return "SELECT * FROM (" + trimmed + ") AS _usql_page ORDER BY (SELECT NULL) OFFSET " +
+			strconv.Itoa(offset) + " ROWS FETCH NEXT " + strconv.Itoa(limit) + " ROWS ONLY", true
+	case "topstartat":
+		// ASE's TOP ... START AT is part of the SELECT head: only valid
+		// when the statement starts with SELECT (not WITH/TABLE)
+		if words[0].upper != "SELECT" {
+			return sqlstr, false
+		}
+		at := words[0].end
+		if len(words) > 1 && (words[1].upper == "DISTINCT" || words[1].upper == "ALL") {
+			at = words[1].end
+		}
+		return sqlstr[:at] + " TOP (" + strconv.Itoa(limit) + ") START AT " + strconv.Itoa(offset+1) + sqlstr[at:], true
+	}
+	return trimmed + "\nLIMIT " + strconv.Itoa(limit) + " OFFSET " + strconv.Itoa(offset), true
+}
+
+// pageable reports whether sqlstr is a bare SELECT-family statement a row
+// limit or page clause can be safely attached to, returning its scanned
+// words (see Apply for what is excluded and why).
+func pageable(sqlstr string) ([]word, bool) {
+	words := scanWords(sqlstr)
+	if len(words) == 0 {
+		return nil, false
+	}
+	switch words[0].upper {
+	case "SELECT", "WITH", "TABLE":
+	default:
+		return nil, false
+	}
+	for _, w := range words {
+		switch w.upper {
+		case "WHERE", "LIMIT", "OFFSET", "FETCH", "TOP", "ROWNUM", "FIRST",
+			"UNION", "INTERSECT", "EXCEPT", "MINUS":
+			// filtered, already limited, or a set operation: the clause
+			// would only apply to the last query block — leave it alone
+			return nil, false
+		case "FOR":
+			// FOR UPDATE/SHARE: the limit clause must precede the lock
+			// clause, which a trailing append would violate
+			return nil, false
+		}
+	}
+	return words, true
 }
 
 // word is a bare (unquoted, uncommented) word in a statement, with the byte

@@ -333,6 +333,30 @@ func Watch(p *Params) error {
 	return nil
 }
 
+// More is a Query View meta command (\more). Shows the next page of the
+// last row-limited query (see the ROWLIMIT variable): the page is fetched
+// with the connected database's own paging syntax and shown below the
+// previous ones. Without a count, the page size of the previous page is
+// reused. Pages of a query without ORDER BY are not guaranteed to be
+// disjoint.
+//
+// Descs:
+//
+//	more	[N]	show the next N (default: previous page size) rows of the last row-limited query
+func More(p *Params) error {
+	n := 0
+	if s, ok, err := p.NextOK(true); err != nil {
+		return err
+	} else if ok {
+		v, err := strconv.Atoi(strings.TrimSpace(s))
+		if err != nil || v <= 0 {
+			return fmt.Errorf("invalid page size: %s", s)
+		}
+		n = v
+	}
+	return p.Handler.More(n)
+}
+
 // Connect is a Connection meta command (\c, \connect). Opens (connects) a
 // database connection.
 //

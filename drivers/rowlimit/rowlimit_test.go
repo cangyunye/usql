@@ -60,3 +60,47 @@ func TestRowLimit(t *testing.T) {
 		})
 	}
 }
+
+func TestPage(t *testing.T) {
+	cases := []struct {
+		name          string
+		driver        string
+		limit, offset int
+		sql           string
+		want          string
+		changed       bool
+	}{
+		// LIMIT family
+		{"postgres next page", "postgres", 100, 100, "SELECT * FROM film", "SELECT * FROM film\nLIMIT 100 OFFSET 100", true},
+		{"mysql first page", "mysql", 100, 0, "SELECT * FROM t", "SELECT * FROM t\nLIMIT 100 OFFSET 0", true},
+		{"sqlite trailing semicolon", "sqlite3", 50, 50, "SELECT * FROM t;", "SELECT * FROM t\nLIMIT 50 OFFSET 50", true},
+		// FETCH FIRST family
+		{"oracle offset fetch", "oracle", 100, 200, "SELECT * FROM film", "SELECT * FROM film\nOFFSET 200 ROWS FETCH FIRST 100 ROWS ONLY", true},
+		{"oboracle offset fetch", "oboracle", 100, 100, "SELECT * FROM t", "SELECT * FROM t\nOFFSET 100 ROWS FETCH FIRST 100 ROWS ONLY", true},
+		// TOP family
+		{"sqlserver wrapped offset fetch", "sqlserver", 100, 100, "SELECT * FROM film", "SELECT * FROM (SELECT * FROM film) AS _usql_page ORDER BY (SELECT NULL) OFFSET 100 ROWS FETCH NEXT 100 ROWS ONLY", true},
+		{"sqlserver wraps cte fine", "sqlserver", 100, 100, "WITH x AS (SELECT 1) SELECT * FROM x", "SELECT * FROM (WITH x AS (SELECT 1) SELECT * FROM x) AS _usql_page ORDER BY (SELECT NULL) OFFSET 100 ROWS FETCH NEXT 100 ROWS ONLY", true},
+		{"sapase top start at", "sapase", 100, 200, "SELECT * FROM t", "SELECT TOP (100) START AT 201 * FROM t", true},
+		{"sapase distinct start at", "sapase", 10, 10, "SELECT DISTINCT a FROM t", "SELECT DISTINCT TOP (10) START AT 11 a FROM t", true},
+		{"sapase cte skipped", "sapase", 100, 100, "WITH x AS (SELECT 1) SELECT * FROM x", "WITH x AS (SELECT 1) SELECT * FROM x", false},
+		// never rewritten
+		{"where filter", "postgres", 100, 100, "SELECT * FROM t WHERE id = 1", "SELECT * FROM t WHERE id = 1", false},
+		{"existing offset", "mysql", 100, 100, "SELECT * FROM t OFFSET 5", "SELECT * FROM t OFFSET 5", false},
+		{"none strategy firebird", "firebird", 100, 100, "SELECT * FROM t", "SELECT * FROM t", false},
+		{"none strategy odbc", "odbc", 100, 100, "SELECT * FROM t", "SELECT * FROM t", false},
+		{"zero limit", "postgres", 0, 100, "SELECT * FROM t", "SELECT * FROM t", false},
+		{"negative offset", "postgres", 100, -1, "SELECT * FROM t", "SELECT * FROM t", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, changed := Page(c.driver, c.sql, c.limit, c.offset)
+			if changed != c.changed {
+				t.Fatalf("Page(%q, %q, %d, %d) changed = %v, want %v", c.driver, c.sql, c.limit, c.offset, changed, c.changed)
+			}
+			if got != c.want {
+				t.Errorf("Page(%q, %q, %d, %d) = %q, want %q", c.driver, c.sql, c.limit, c.offset, got, c.want)
+			}
+		})
+	}
+}

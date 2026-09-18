@@ -65,6 +65,8 @@ type Handler interface {
 	GetTiming() bool
 	// SetTiming mode.
 	SetTiming(bool)
+	// More shows the next page of the last row-limited interactive query.
+	More(n int) error
 	// EncodingName returns the name of the client encoding used to decode
 	// database output.
 	EncodingName() string

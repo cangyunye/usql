@@ -105,6 +105,10 @@ type Handler struct {
 	encName string
 	// enc decodes database output to UTF-8 (nil means UTF-8 passthrough).
 	enc encoding.Encoding
+	// page is the continuation state of the last row-limited interactive
+	// query (see the ROWLIMIT variable and \more); nil when the last query
+	// was not page-able or its pages are exhausted.
+	page *pageState
 }
 
 // New creates a new input handler.
@@ -484,10 +488,18 @@ func (h *Handler) Execute(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	}
 	// interactive, unfiltered SELECT queries are capped at ROWLIMIT rows,
 	// in the connected driver's row limit syntax; scripted (-c/-f) runs are
-	// never rewritten
-	if qtyp && h.l.Interactive() {
+	// never rewritten. One extra row is fetched as a probe: the page shows
+	// ROWLIMIT rows, and a found probe row arms the \more continuation
+	h.page = nil
+	if qtyp && h.l.Interactive() && opt.Exec == metacmd.ExecOnly && opt.Params["pipe"] == "" {
 		if n := env.RowLimit(); n > 0 {
-			if limited, changed := rowlimit.Apply(h.u.Driver, sqlstr, n); changed {
+			if limited, changed := rowlimit.Apply(h.u.Driver, sqlstr, n+1); changed {
+				h.page = &pageState{
+					sqlstr: sqlstr,
+					bind:   append([]interface{}(nil), bind...),
+					driver: h.u.Driver,
+					size:   n,
+				}
 				sqlstr = limited
 			}
 		}
@@ -510,6 +522,8 @@ func (h *Handler) Execute(ctx context.Context, w io.Writer, opt metacmd.Option, 
 		f = h.doExecChart
 	}
 	if err = drivers.WrapErr(h.u.Driver, f(ctx, w, opt, prefix, sqlstr, qtyp, bind)); err != nil {
+		// a failed page never happened: drop its continuation state
+		h.page = nil
 		if forceTrans {
 			defer h.tx.Rollback()
 			h.tx = nil
@@ -1011,6 +1025,8 @@ func (h *Handler) Close() error {
 	if h.tx != nil {
 		return text.ErrPreviousTransactionExists
 	}
+	// the paged result belonged to the closed connection
+	h.page = nil
 	if h.db != nil {
 		err := h.db.Close()
 		drv := h.u.Driver
@@ -1363,7 +1379,23 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	case drivers.UseColumnTypes(h.u):
 		extra = append(extra, tblfmt.WithUseColumnTypes(true))
 	}
-	resultSet := charset.NewResultSet(tblfmt.ResultSet(rows), h.enc)
+	// a page-able interactive query shows at most page.size rows and probes
+	// one further, so the continuation hint (\more) knows another page
+	// exists; the wrapped rows satisfy everything *sql.Rows did
+	var limited *limitedRows
+	var resultSet tblfmt.ResultSet
+	if h.page != nil && opt.Exec == metacmd.ExecOnly && opt.Params["pipe"] == "" {
+		limited = &limitedRows{
+			Rows: rows,
+			rowLimiter: rowLimiter{
+				limit: h.page.size,
+				next:  rows.Next,
+			},
+		}
+		resultSet = charset.NewResultSet(tblfmt.ResultSet(limited), h.enc)
+	} else {
+		resultSet = charset.NewResultSet(tblfmt.ResultSet(rows), h.enc)
+	}
 	// wrap query with crosstab
 	if opt.Exec == metacmd.ExecCrosstab {
 		var err error
@@ -1414,6 +1446,9 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 		if cmd != nil {
 			cmd.Wait()
 		}
+	}
+	if limited != nil && err == nil {
+		h.pageShown(limited)
 	}
 	return err
 }

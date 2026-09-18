@@ -2,6 +2,8 @@ package completer
 
 import (
 	"testing"
+
+	"github.com/xo/usql/rline"
 )
 
 func TestFuzzyScore(t *testing.T) {
@@ -61,60 +63,6 @@ func TestFuzzyScoreRanking(t *testing.T) {
 	}
 }
 
-func TestCompleteFuzzy(t *testing.T) {
-	cases := []struct {
-		name    string
-		text    string
-		options []string
-		want    []string
-	}{
-		{
-			"exact prefix first, fuzzy second",
-			"sel",
-			[]string{"SELECT", "SET", "name"},
-			[]string{"ect"},
-		},
-		{
-			"lowercase input keeps lowercase suffix",
-			"se",
-			[]string{"SELECT"},
-			[]string{"lect"},
-		},
-		{
-			"ranked matches",
-			"up",
-			[]string{"backup", "UPDATE", "user_password"},
-			[]string{"date", "er_password", "ckup"},
-		},
-		{
-			"non matching options excluded",
-			"zz",
-			[]string{"SELECT", "FROM"},
-			nil,
-		},
-		{
-			"empty text returns everything in length order",
-			"",
-			[]string{"actor", "film", "address"},
-			[]string{"film", "actor", "address"},
-		},
-	}
-
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			got := completeFuzzy([]rune(test.text), test.options...)
-			if len(got) != len(test.want) {
-				t.Fatalf("completeFuzzy(%q, %v) = %q, want %q", test.text, test.options, got, test.want)
-			}
-			for i := range got {
-				if string(got[i]) != test.want[i] {
-					t.Errorf("got[%d] = %q, want %q", i, got[i], test.want[i])
-				}
-			}
-		})
-	}
-}
-
 func TestCompletePrefixFull(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -156,12 +104,12 @@ func TestCompletePrefixFull(t *testing.T) {
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			got := completePrefixFull(test.pattern, test.options)
+			got := completePrefixFull(test.pattern, rline.Cands(test.options...))
 			if len(got) != len(test.want) {
 				t.Fatalf("completePrefixFull(%q, %v) = %q, want %q", test.pattern, test.options, got, test.want)
 			}
 			for i := range got {
-				if string(got[i]) != test.want[i] {
+				if got[i].Text != test.want[i] {
 					t.Errorf("got[%d] = %q, want %q", i, got[i], test.want[i])
 				}
 			}

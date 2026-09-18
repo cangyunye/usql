@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/xo/usql/rline"
 )
 
 // prefixBonus is added when the candidate starts with the whole pattern, so
@@ -67,17 +69,17 @@ func isBoundaryByte(b byte) bool {
 // first, then fuzzy score, then length. When pattern starts with a
 // lower-case letter the whole candidate is lower-cased, mirroring
 // CompleteFromList's case behavior for keywords.
-func completeFuzzyFull(pattern string, options []string) [][]rune {
+func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 	lowerPattern := strings.ToLower(pattern)
 	type match struct {
-		option string
+		cand   rline.Cand
 		score  int
 		prefix bool
 	}
 	matches := make([]match, 0, len(options))
 	for _, o := range options {
-		if s := fuzzyScore(pattern, o); s >= 0 {
-			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(o), lowerPattern)})
+		if s := fuzzyScore(pattern, o.Text); s >= 0 {
+			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(o.Text), lowerPattern)})
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -87,58 +89,15 @@ func completeFuzzyFull(pattern string, options []string) [][]rune {
 		if matches[i].score != matches[j].score {
 			return matches[i].score > matches[j].score
 		}
-		return len(matches[i].option) < len(matches[j].option)
+		return len(matches[i].cand.Text) < len(matches[j].cand.Text)
 	})
 	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
-	result := make([][]rune, 0, len(matches))
+	result := make([]rline.Cand, 0, len(matches))
 	for _, m := range matches {
 		if lower {
-			m.option = strings.ToLower(m.option)
+			m.cand.Text = strings.ToLower(m.cand.Text)
 		}
-		result = append(result, []rune(m.option))
-	}
-	return result
-}
-
-// completeFuzzy returns the suffixes of options that fuzzily match text,
-// best matches first. Candidates that start with the whole pattern rank
-// first, then fuzzy score, then length. Case handling mirrors
-// CompleteFromList: when text starts with a lower-case letter, suffixes are
-// lower-cased.
-func completeFuzzy(text []rune, options ...string) [][]rune {
-	if len(options) == 0 {
-		return nil
-	}
-	pattern := string(text)
-	lowerPattern := strings.ToLower(pattern)
-	type match struct {
-		option string
-		score  int
-		prefix bool
-	}
-	matches := make([]match, 0, len(options))
-	for _, o := range options {
-		if s := fuzzyScore(pattern, o); s >= 0 {
-			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(o), lowerPattern)})
-		}
-	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		if matches[i].prefix != matches[j].prefix {
-			return matches[i].prefix
-		}
-		if matches[i].score != matches[j].score {
-			return matches[i].score > matches[j].score
-		}
-		return len(matches[i].option) < len(matches[j].option)
-	})
-	lower := len(text) > 0 && unicode.IsLower(text[0])
-	result := make([][]rune, 0, len(matches))
-	for _, m := range matches {
-		suffix := m.option[len(pattern):]
-		if lower {
-			suffix = strings.ToLower(suffix)
-		}
-		result = append(result, []rune(suffix))
+		result = append(result, m.cand)
 	}
 	return result
 }
@@ -151,12 +110,12 @@ func completeFuzzy(text []rune, options ...string) [][]rune {
 // ("film" matches "public.film"; "db" does not match "foo_db_bar").
 // Results keep a stable shortest-first order, and are lower-cased when the
 // pattern starts with a lower-case letter, mirroring completeFuzzyFull.
-func completePrefixFull(pattern string, options []string) [][]rune {
+func completePrefixFull(pattern string, options []rline.Cand) []rline.Cand {
 	p := strings.ToLower(pattern)
 	dotted := strings.Contains(pattern, ".")
-	var matches []string
+	var matches []rline.Cand
 	for _, o := range options {
-		low := strings.ToLower(o)
+		low := strings.ToLower(o.Text)
 		if strings.HasPrefix(low, p) {
 			matches = append(matches, o)
 			continue
@@ -169,15 +128,15 @@ func completePrefixFull(pattern string, options []string) [][]rune {
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
-		return len(matches[i]) < len(matches[j])
+		return len(matches[i].Text) < len(matches[j].Text)
 	})
 	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
-	result := make([][]rune, 0, len(matches))
+	result := make([]rline.Cand, 0, len(matches))
 	for _, m := range matches {
 		if lower {
-			m = strings.ToLower(m)
+			m.Text = strings.ToLower(m.Text)
 		}
-		result = append(result, []rune(m))
+		result = append(result, m)
 	}
 	return result
 }

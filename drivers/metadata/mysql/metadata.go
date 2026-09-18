@@ -37,12 +37,15 @@ var (
 			// on wire-compatible databases with slow catalogs (OceanBase
 			// MySQL tenants take ~8s for the columns query)
 			metadata.WithTimeout(10 * time.Second),
-			metadata.WithLimit(1000),
+			// completion serves catalogs with thousands of objects
+			metadata.WithLimit(100000),
 		}
 		reader := NewReader(db, readerOpts...)
 		opts = append([]completer.Option{
 			completer.WithReader(reader),
 			completer.WithDB(db),
+			// MySQL calls its namespaces databases; the menu badge says so
+			completer.WithSchemaKind("database"),
 			completer.WithSQLStartCommands(append(completer.CommonSqlStartCommands, "USE")),
 			completer.WithBeforeComplete(complete(reader)),
 		}, opts...)
@@ -51,7 +54,7 @@ var (
 )
 
 func complete(reader metadata.Reader) completer.CompleteFunc {
-	return func(previousWords []string, text []rune) [][]rune {
+	return func(previousWords []string, text []rune) []rline.Cand {
 		if completer.TailMatches(completer.IGNORE_CASE, previousWords, `USE`) {
 			return completeWithSchemas(reader, text)
 		}
@@ -59,7 +62,7 @@ func complete(reader metadata.Reader) completer.CompleteFunc {
 	}
 }
 
-func completeWithSchemas(reader metadata.Reader, text []rune) [][]rune {
+func completeWithSchemas(reader metadata.Reader, text []rune) []rline.Cand {
 	schemaNames := []string{}
 	schemas, err := reader.(metadata.SchemaReader).Schemas(metadata.Filter{WithSystem: true})
 	if err != nil {
@@ -68,5 +71,5 @@ func completeWithSchemas(reader metadata.Reader, text []rune) [][]rune {
 	for schemas.Next() {
 		schemaNames = append(schemaNames, schemas.Get().Schema)
 	}
-	return completer.CompleteFromList(text, schemaNames...)
+	return completer.CompleteFromListKind("database", completer.IGNORE_CASE, text, schemaNames...)
 }

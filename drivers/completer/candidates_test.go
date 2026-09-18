@@ -9,13 +9,14 @@ import (
 	"github.com/xo/usql/drivers/metadata"
 )
 
-// candMockReader serves a small fixed schema:
+// candMockReader serves a small fixed catalog:
 //
 //	public.film         TABLE  (id, name)
 //	public.actor        TABLE  (id, film_id)
 //	public.film_view    VIEW   (id, title)
 //	public.now          FUNCTION
 //	public.actor_id_seq SEQUENCE
+//	other.orders        TABLE
 type candMockReader struct{}
 
 var _ interface {
@@ -29,6 +30,7 @@ var candTables = []metadata.Table{
 	{Catalog: "", Schema: "public", Name: "film", Type: "TABLE"},
 	{Catalog: "", Schema: "public", Name: "actor", Type: "TABLE"},
 	{Catalog: "", Schema: "public", Name: "film_view", Type: "VIEW"},
+	{Catalog: "", Schema: "other", Name: "orders", Type: "TABLE"},
 }
 
 var candColumns = []metadata.Column{
@@ -105,7 +107,7 @@ func (r candMockReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, err
 }
 
 func (r candMockReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
-	return metadata.NewSchemaSet([]metadata.Schema{{Schema: "public"}}), nil
+	return metadata.NewSchemaSet([]metadata.Schema{{Schema: "public"}, {Schema: "other"}}), nil
 }
 
 func containsString(names []string, name string) bool {
@@ -127,8 +129,9 @@ func discardLogger() logger {
 // it can only answer from the mock reader — making it obvious which path
 // produced the result.
 func TestWithContextCompletion(t *testing.T) {
-	c := completer{reader: candMockReader{}, logger: discardLogger()}
+	c := completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
 	WithContextCompletion()(&c)
+	waitForSnapshot(t, c.snap)
 
 	cases := []struct {
 		name    string
@@ -143,14 +146,14 @@ func TestWithContextCompletion(t *testing.T) {
 			[]string{"public.film", "public.film_view"}, 2,
 		},
 		{
-			"from empty word offers namespaces only",
+			"from empty word offers namespaces then selectables",
 			"SELECT * FROM ", 14,
-			[]string{"public"}, 0,
+			[]string{"other", "public", "public.now", "public.film", "public.actor", "other.orders", "public.film_view", "public.actor_id_seq"}, 0,
 		},
 		{
-			"from namespace prefix",
+			"from namespace prefix ranks the namespace first",
 			"SELECT * FROM pu", 16,
-			[]string{"public"}, 2,
+			[]string{"public", "public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 2,
 		},
 		{
 			"from namespace dot lists objects",
@@ -279,7 +282,7 @@ func TestWithContextCompletion(t *testing.T) {
 		{
 			"backslash commands still complete via heuristics",
 			`\dt `, 4,
-			[]string{"public.film", "public.actor"}, 0,
+			[]string{"other", "public"}, 0,
 		},
 	}
 
@@ -293,8 +296,8 @@ func TestWithContextCompletion(t *testing.T) {
 				t.Fatalf("Do(%q, %d) = %q, want %q", test.line, test.start, got, test.want)
 			}
 			for i := range got {
-				if string(got[i]) != test.want[i] {
-					t.Errorf("got[%d] = %q, want %q", i, string(got[i]), test.want[i])
+				if got[i].Text != test.want[i] {
+					t.Errorf("got[%d] = %q, want %q", i, got[i].Text, test.want[i])
 				}
 			}
 		})
@@ -355,8 +358,8 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 				t.Fatalf("Do(%q, %d) = %q, want %q", test.line, test.start, got, test.want)
 			}
 			for i := range got {
-				if string(got[i]) != test.want[i] {
-					t.Errorf("got[%d] = %q, want %q", i, string(got[i]), test.want[i])
+				if got[i].Text != test.want[i] {
+					t.Errorf("got[%d] = %q, want %q", i, got[i].Text, test.want[i])
 				}
 			}
 		})
@@ -367,9 +370,9 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 // order, decides the result: both film and film_view match "fi" with the
 // same score, and the shorter one wins the tie.
 func TestCompleteWithContextOrder(t *testing.T) {
-	c := completer{reader: candMockReader{}, logger: discardLogger()}
+	c := completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
 	got := c.completeWithContext([]string{"FROM", "*", "SELECT"}, []rune("fi"))
-	if len(got) != 2 || string(got[0]) != "public.film" || string(got[1]) != "public.film_view" {
+	if len(got) != 2 || got[0].Text != "public.film" || got[1].Text != "public.film_view" {
 		t.Errorf("completeWithContext(fi) = %q, want [public.film public.film_view]", got)
 	}
 }

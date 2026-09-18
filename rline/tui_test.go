@@ -242,10 +242,10 @@ type stubCompleter struct {
 	cands []string
 }
 
-func (s *stubCompleter) Do(line []rune, pos int) ([][]rune, int) {
-	out := make([][]rune, 0, len(s.cands))
+func (s *stubCompleter) Do(line []rune, pos int) ([]Cand, int) {
+	out := make([]Cand, 0, len(s.cands))
 	for _, c := range s.cands {
-		out = append(out, []rune(c))
+		out = append(out, Cand{Text: c})
 	}
 	return out, len(line)
 }

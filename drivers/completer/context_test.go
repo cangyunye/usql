@@ -280,8 +280,8 @@ func TestContextCandidates(t *testing.T) {
 				t.Fatalf("completeFromContext(%q, %d) = %q, want %q", test.line, test.start, got, test.want)
 			}
 			for i := range got {
-				if string(got[i]) != test.want[i] {
-					t.Errorf("got[%d] = %q, want %q", i, string(got[i]), test.want[i])
+				if got[i].Text != test.want[i] {
+					t.Errorf("got[%d] = %q, want %q", i, got[i].Text, test.want[i])
 				}
 			}
 		})

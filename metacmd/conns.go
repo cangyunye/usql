@@ -482,14 +482,14 @@ func askField(h Handler, label, def string, masked bool, words ...string) (strin
 type noCompleter struct{}
 
 // Do satisfies rline.Completer.
-func (noCompleter) Do([]rune, int) ([][]rune, int) { return nil, 0 }
+func (noCompleter) Do([]rune, int) ([]rline.Cand, int) { return nil, 0 }
 
 // wordCompleter completes a fixed word list, ignoring case; candidates are
 // the append-style suffixes after the typed word.
 type wordCompleter struct{ words []string }
 
 // Do satisfies rline.Completer.
-func (w wordCompleter) Do(line []rune, pos int) ([][]rune, int) {
+func (w wordCompleter) Do(line []rune, pos int) ([]rline.Cand, int) {
 	if pos > len(line) {
 		pos = len(line)
 	}
@@ -506,7 +506,7 @@ func (w wordCompleter) Do(line []rune, pos int) ([][]rune, int) {
 type connsMenuCompleter struct{}
 
 // Do satisfies rline.Completer.
-func (connsMenuCompleter) Do(line []rune, pos int) ([][]rune, int) {
+func (connsMenuCompleter) Do(line []rune, pos int) ([]rline.Cand, int) {
 	if pos > len(line) {
 		pos = len(line)
 	}
@@ -536,14 +536,14 @@ func (connsMenuCompleter) Do(line []rune, pos int) ([][]rune, int) {
 
 // completeWords returns the suffixes of options that case-insensitively
 // start with text.
-func completeWords(text string, options []string) [][]rune {
-	var out [][]rune
+func completeWords(text string, options []string) []rline.Cand {
+	var out []rline.Cand
 	tr := []rune(text)
 	low := strings.ToLower(text)
 	for _, o := range options {
 		or := []rune(o)
 		if strings.HasPrefix(strings.ToLower(o), low) {
-			out = append(out, or[len(tr):])
+			out = append(out, rline.Cand{Text: string(or[len(tr):])})
 		}
 	}
 	return out

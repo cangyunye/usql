@@ -24,6 +24,7 @@ type snapshotReader struct {
 	mu   sync.RWMutex
 	snap *snapshot
 	gen  int64 // guards against a stale load overwriting a newer one
+	seq  int64 // bumps whenever the snapshot state changes (publish, invalidate)
 }
 
 // snapshot holds one kind of catalog rows per reader sub-interface, with a
@@ -54,14 +55,18 @@ func NewSnapshotReader(inner metadata.Reader) *snapshotReader {
 	return s
 }
 
-// load fetches the visible catalog objects; each kind loads independently.
+// load fetches the reachable catalog objects: everything in non-system
+// schemas, not just the current search path/schema — completion must offer
+// cross-schema objects to superusers and users granted across schemas
+// (problem: \dt in Oracle only saw CURRENT_SCHEMA). Each kind loads
+// independently.
 func (s *snapshotReader) load() {
 	s.mu.RLock()
 	g := s.gen
 	s.mu.RUnlock()
 	snap := &snapshot{}
 	if r, ok := s.inner.(metadata.TableReader); ok {
-		if set, err := r.Tables(metadata.Filter{OnlyVisible: true}); err == nil {
+		if set, err := r.Tables(metadata.Filter{WithSystem: false}); err == nil {
 			snap.tablesOK = true
 			defer set.Close()
 			for set.Next() {
@@ -70,7 +75,7 @@ func (s *snapshotReader) load() {
 		}
 	}
 	if r, ok := s.inner.(metadata.FunctionReader); ok {
-		if set, err := r.Functions(metadata.Filter{OnlyVisible: true}); err == nil {
+		if set, err := r.Functions(metadata.Filter{WithSystem: false}); err == nil {
 			snap.functionsOK = true
 			defer set.Close()
 			for set.Next() {
@@ -79,7 +84,7 @@ func (s *snapshotReader) load() {
 		}
 	}
 	if r, ok := s.inner.(metadata.SequenceReader); ok {
-		if set, err := r.Sequences(metadata.Filter{OnlyVisible: true}); err == nil {
+		if set, err := r.Sequences(metadata.Filter{WithSystem: false}); err == nil {
 			snap.sequencesOK = true
 			defer set.Close()
 			for set.Next() {
@@ -88,7 +93,7 @@ func (s *snapshotReader) load() {
 		}
 	}
 	if r, ok := s.inner.(metadata.SchemaReader); ok {
-		if set, err := r.Schemas(metadata.Filter{OnlyVisible: true}); err == nil {
+		if set, err := r.Schemas(metadata.Filter{WithSystem: false}); err == nil {
 			snap.schemasOK = true
 			defer set.Close()
 			for set.Next() {
@@ -98,6 +103,7 @@ func (s *snapshotReader) load() {
 	}
 	s.mu.Lock()
 	if s.gen == g {
+		s.seq++
 		s.snap = snap
 	}
 	s.mu.Unlock()
@@ -107,6 +113,7 @@ func (s *snapshotReader) load() {
 func (s *snapshotReader) Invalidate() {
 	s.mu.Lock()
 	s.gen++
+	s.seq++
 	s.snap = nil
 	s.mu.Unlock()
 	go s.load()
@@ -119,12 +126,42 @@ func (s *snapshotReader) current() *snapshot {
 	return s.snap
 }
 
+// state reports the snapshot's version and whether one has finished
+// loading. The version changes on every state transition — including the
+// very first publish, where gen alone would not move — so callers stamping
+// cached results drop pre-snapshot (empty or fall-through) results the
+// moment the snapshot supersedes them.
+func (s *snapshotReader) state() (int64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.seq, s.snap != nil
+}
+
 // serveable reports whether a filter is answerable from the snapshot: a
-// visible-objects request without name patterns — the shape the completion
-// hot paths use.
+// whole-catalog request without name patterns — the shape the completion hot
+// paths use. The snapshot holds all reachable (non-system) schemas, so an
+// OnlyVisible request is served from it too: bare `\dt foo` completes across
+// schemas, which is the point (the login can query what it can query); the
+// old visible-scope restriction hid granted objects from superusers.
 func serveable(f metadata.Filter) bool {
-	return f.OnlyVisible && !f.WithSystem && f.Name == "" && f.Parent == "" &&
+	return !f.WithSystem && f.Name == "" && f.Parent == "" &&
 		f.Reference == ""
+}
+
+// deferred reports whether a query should be answered empty instead of
+// falling through to the inner reader: while the snapshot is still loading,
+// whole-visible-catalog queries (the exact shapes the snapshot loads, with
+// or without name patterns) would duplicate the in-flight load and block
+// synchronous completion on a slow catalog. Scoped queries (WithSystem),
+// column lookups (Parent) and references are independent of the snapshot
+// and still pass through. Empty results are stamped with the current
+// generation, so the completion caches drop them the moment the snapshot
+// lands and recompute from it.
+func (s *snapshotReader) deferred(f metadata.Filter) bool {
+	if s.current() != nil {
+		return false
+	}
+	return !f.WithSystem && f.Parent == "" && f.Reference == ""
 }
 
 func (s *snapshotReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
@@ -136,6 +173,9 @@ func (s *snapshotReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 			}
 		}
 		return metadata.NewTableSet(rows), nil
+	}
+	if s.deferred(f) {
+		return metadata.NewTableSet(nil), nil
 	}
 	if inner, ok := s.inner.(metadata.TableReader); ok {
 		return inner.Tables(f)
@@ -153,6 +193,9 @@ func (s *snapshotReader) Functions(f metadata.Filter) (*metadata.FunctionSet, er
 		}
 		return metadata.NewFunctionSet(rows), nil
 	}
+	if s.deferred(f) {
+		return metadata.NewFunctionSet(nil), nil
+	}
 	if inner, ok := s.inner.(metadata.FunctionReader); ok {
 		return inner.Functions(f)
 	}
@@ -169,6 +212,9 @@ func (s *snapshotReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, er
 		}
 		return metadata.NewSequenceSet(rows), nil
 	}
+	if s.deferred(f) {
+		return metadata.NewSequenceSet(nil), nil
+	}
 	if inner, ok := s.inner.(metadata.SequenceReader); ok {
 		return inner.Sequences(f)
 	}
@@ -184,6 +230,9 @@ func (s *snapshotReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error)
 			}
 		}
 		return metadata.NewSchemaSet(rows), nil
+	}
+	if s.deferred(f) {
+		return metadata.NewSchemaSet(nil), nil
 	}
 	if inner, ok := s.inner.(metadata.SchemaReader); ok {
 		return inner.Schemas(f)

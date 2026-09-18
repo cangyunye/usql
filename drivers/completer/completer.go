@@ -118,6 +118,7 @@ func NewDefaultCompleter(opts ...Option) rline.Completer {
 		sqlStartCommands: CommonSqlStartCommands,
 		// TODO do we need to add built-in functions like, COALESCE, CAST, NULLIF, CONCAT etc?
 		sqlCommands: CommonSqlCommands,
+		schemaKind:  "schema",
 	}
 	for _, o := range opts {
 		o(&c)
@@ -179,6 +180,18 @@ func WithAliasNames(names []string) Option {
 	}
 }
 
+// WithSchemaKind sets the display kind reported for namespace (schema)
+// candidates. Databases name namespaces differently — "schema" (PostgreSQL),
+// "user" (Oracle, where schemas and users are the same thing) or "database"
+// (MySQL) — and the menu badge says which.
+func WithSchemaKind(kind string) Option {
+	return func(c *completer) {
+		if kind != "" {
+			c.schemaKind = kind
+		}
+	}
+}
+
 // WithBeforeComplete option
 func WithBeforeComplete(f CompleteFunc) Option {
 	return func(c *completer) {
@@ -196,6 +209,9 @@ type completer struct {
 	connStrings      []string
 	aliasNames       []string
 	beforeComplete   CompleteFunc
+	// schemaKind is the display kind of namespace candidates (see
+	// WithSchemaKind).
+	schemaKind string
 	// cache is the metadata query cache installed by WithContextCompletion.
 	cache *cachedReader
 	// snap is the connect-time catalog snapshot installed by
@@ -205,23 +221,63 @@ type completer struct {
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context
-type CompleteFunc func(previousWords []string, text []rune) [][]rune
+type CompleteFunc func(previousWords []string, text []rune) []rline.Cand
 
 type logger interface {
 	Println(...interface{})
 }
 
-func (c completer) Do(line []rune, start int) (newLine [][]rune, length int) {
-	var i int
-	for i = start - 1; i > 0; i-- {
-		if strings.ContainsRune(WORD_BREAKS, line[i]) {
-			i++
-			break
+// optionsSource exposes a completer's unfiltered candidate options for a
+// replace-style (context) completion, so the live wrapper can memoize the
+// option set once per statement context and re-filter it client-side as the
+// word grows — zero completer work per keystroke. Implemented by *completer
+// when the context path is installed.
+type optionsSource interface {
+	optionsFor(line []rune, pos int) (opts []rline.Cand, word string, ok bool)
+}
+
+// wordStart returns the index of the first rune of the word at pos.
+func wordStart(line []rune, pos int) int {
+	if pos > len(line) {
+		pos = len(line)
+	}
+	i := pos
+	for i > 0 && !strings.ContainsRune(WORD_BREAKS, line[i-1]) {
+		i--
+	}
+	return i
+}
+
+// optionsFor returns the unfiltered candidate set for the context path at
+// pos, plus the word being typed. Ordered results (VALUES field hints) and
+// non-context paths (meta-command arguments, heuristics) are not memoizable
+// and return ok=false.
+func (c completer) optionsFor(line []rune, pos int) ([]rline.Cand, string, bool) {
+	if pos > len(line) {
+		pos = len(line)
+	}
+	text := line[wordStart(line, pos):pos]
+	if len(text) == 0 || text[0] == '\\' {
+		return nil, "", false
+	}
+	ctx := parseContext(line, pos)
+	opts, ok, ordered := c.contextOptions(ctx)
+	if !ok || ordered {
+		return nil, "", false
+	}
+	return opts, ctx.Qualifier + ctx.Object, true
+}
+
+func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
+	// a terminator ends the statement: complete nothing while no new word is
+	// typed, and complete the new statement as if typed on its own line
+	if k := rline.LastStatementStart(line, start); k > 0 {
+		if rline.AtStatementEnd(line, start) {
+			return nil, 0
 		}
+		line, start = line[k:], start-k
 	}
-	if i == -1 {
-		i = 0
-	}
+	i := wordStart(line, start)
 	previousWords := getPreviousWords(start, line)
 	text := line[i:start]
 
@@ -238,11 +294,11 @@ func (c completer) Do(line []rune, start int) (newLine [][]rune, length int) {
 	return nil, 0
 }
 
-func (c completer) complete(previousWords []string, text []rune) [][]rune {
+func (c completer) complete(previousWords []string, text []rune) []rline.Cand {
 	if len(text) > 0 {
 		if len(previousWords) == 0 && text[0] == '\\' {
 			/* If current word is a backslash command, offer completions for that */
-			return CompleteFromListCase(MATCH_CASE, text, backslashCommands...)
+			return CompleteFromListKind("command", MATCH_CASE, text, backslashCommands...)
 		}
 		if text[0] == ':' {
 			if len(text) == 1 || text[1] == ':' {
@@ -257,6 +313,12 @@ func (c completer) complete(previousWords []string, text []rune) [][]rune {
 			}
 			return completeFromVariables(text, ":", "", true)
 		}
+	}
+	// meta-command argument positions: the policy table decides what, if
+	// anything, each argument of each command completes as; unknown
+	// commands and exhausted positions complete nothing — never SQL keywords
+	if n := len(previousWords); n > 0 && strings.HasPrefix(previousWords[n-1], "\\") {
+		return c.completeMetaArg(previousWords[n-1], n-1, previousWords, text)
 	}
 	if len(previousWords) == 0 {
 		/* If no previous word, suggest one of the basic sql commands */
@@ -372,86 +434,6 @@ func (c completer) complete(previousWords []string, text []rune) [][]rune {
 	/* TABLE, but not TABLE embedded in other commands */
 	if matches(IGNORE_CASE, previousWords, "TABLE") {
 		return c.completeWithUpdatables(text)
-	}
-	/* Backslash commands */
-	if TailMatches(MATCH_CASE, previousWords, `\cd|\e|\edit|\g|\gx|\i|\include|\ir|\include_relative|\o|\out|\s|\w|\write`) {
-		return completeFuzzyFull(string(text), completeFromFiles(text))
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\alias`) {
-		return completeFuzzyFull(string(text), c.aliasNames)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\c|\connect|\copy`) ||
-		TailMatches(MATCH_CASE, previousWords, `\copy`, `*`) {
-		return completeFuzzyFull(string(text), c.connStrings)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\copy`, `*`, `*`) {
-		return nil
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\da*`) {
-		return c.completeWithFunctions(text, []string{"AGGREGATE"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\df*`) {
-		return c.completeWithFunctions(text, []string{})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\di*`) {
-		return c.completeWithIndexes(text)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\dn*`) {
-		return c.completeWithSchemas(text)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\ds*`) {
-		return c.completeWithSequences(text)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\dt*`) {
-		return c.completeWithTables(text, []string{"TABLE", "BASE TABLE", "SYSTEM TABLE", "SYNONYM", "LOCAL TEMPORARY", "GLOBAL TEMPORARY"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\dv*`) {
-		return c.completeWithTables(text, []string{"VIEW", "SYSTEM VIEW"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\dm*`) {
-		return c.completeWithTables(text, []string{"MATERIALIZED VIEW"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\d*`) {
-		return c.completeWithSelectablesFull(text)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\l*`) ||
-		TailMatches(MATCH_CASE, previousWords, `\lo*`) {
-		return c.completeWithCatalogs(text)
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`) {
-		return completeFuzzyFull(string(text), []string{`border`, `columns`, `expanded`, `fieldsep`, `fieldsep_zero`,
-			`footer`, `format`, `linestyle`, `null`, `numericlocale`, `pager`, `pager_min_lines`,
-			`recordsep`, `recordsep_zero`, `tableattr`, `title`, `title`, `tuples_only`,
-			`unicode_border_linestyle`, `unicode_column_linestyle`, `unicode_header_linestyle`})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `expanded`) {
-		return completeFuzzyFull(string(text), []string{"auto", "on", "off"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `pager`) {
-		return completeFuzzyFull(string(text), []string{"always", "on", "off"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `fieldsep_zero|footer|numericlocale|pager|recordsep_zero|tuples_only`) {
-		return completeFuzzyFull(string(text), []string{"on", "off"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `format`) {
-		return completeFuzzyFull(string(text), []string{"unaligned", "aligned", "wrapped", "html", "asciidoc", "latex", "latex-longtable", "troff-ms", "csv", "json", "vertical"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `linestyle`) {
-		return completeFuzzyFull(string(text), []string{"ascii", "old-ascii", "unicode"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `unicode_border_linestyle|unicode_column_linestyle|unicode_header_linestyle`) {
-		return completeFuzzyFull(string(text), []string{"single", "double"})
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\pset`, `*`) ||
-		TailMatches(MATCH_CASE, previousWords, `\pset`, `*`, `*`) {
-		return nil
-	}
-	if TailMatches(MATCH_CASE, previousWords, `\?`) {
-		return completeFuzzyFull(string(text), []string{"commands", "options", "variables"})
-	}
-	// meta-command argument position: never suggest SQL keywords
-	if len(previousWords) > 0 && strings.HasPrefix(previousWords[len(previousWords)-1], "\\") {
-		return nil
 	}
 	// is suggesting basic sql commands better than nothing?
 	return CompleteFromList(text, c.sqlCommands...)
@@ -595,12 +577,17 @@ func wordMatches(ct caseType, pattern, word string) bool {
 }
 
 // CompleteFromList where items starts with text, ignoring case
-func CompleteFromList(text []rune, options ...string) [][]rune {
-	return CompleteFromListCase(IGNORE_CASE, text, options...)
+func CompleteFromList(text []rune, options ...string) []rline.Cand {
+	return CompleteFromListKind("", IGNORE_CASE, text, options...)
 }
 
-// CompleteFromList where items starts with text
-func CompleteFromListCase(ct caseType, text []rune, options ...string) [][]rune {
+// CompleteFromListKind is CompleteFromListCase with the case type explicit.
+func CompleteFromListKind(kind string, ct caseType, text []rune, options ...string) []rline.Cand {
+	return CompleteFromListCase(kind, ct, text, options...)
+}
+
+// CompleteFromListCase where items starts with text
+func CompleteFromListCase(kind string, ct caseType, text []rune, options ...string) []rline.Cand {
 	if len(options) == 0 {
 		return nil
 	}
@@ -612,7 +599,7 @@ func CompleteFromListCase(ct caseType, text []rune, options ...string) [][]rune 
 	if ct == IGNORE_CASE {
 		prefix = strings.ToUpper(prefix)
 	}
-	result := make([][]rune, 0, len(options))
+	result := make([]rline.Cand, 0, len(options))
 	for _, o := range options {
 		if (ct == IGNORE_CASE && !strings.HasPrefix(strings.ToUpper(o), prefix)) ||
 			(ct == MATCH_CASE && !strings.HasPrefix(o, prefix)) {
@@ -622,12 +609,12 @@ func CompleteFromListCase(ct caseType, text []rune, options ...string) [][]rune 
 		if ct == IGNORE_CASE && isLower {
 			match = strings.ToLower(match)
 		}
-		result = append(result, []rune(match))
+		result = append(result, rline.Cand{Text: match, Kind: kind})
 	}
 	return result
 }
 
-func completeFromVariables(text []rune, prefix, suffix string, needValue bool) [][]rune {
+func completeFromVariables(text []rune, prefix, suffix string, needValue bool) []rline.Cand {
 	vars := env.Vars().Vars()
 	names := make([]string, 0, len(vars))
 	for name, value := range vars {
@@ -636,227 +623,99 @@ func completeFromVariables(text []rune, prefix, suffix string, needValue bool) [
 		}
 		names = append(names, prefix+name+suffix)
 	}
-	return CompleteFromListCase(MATCH_CASE, text, names...)
+	return CompleteFromListKind("variable", MATCH_CASE, text, names...)
 }
 
-func (c completer) completeWithSelectables(text []rune) [][]rune {
+// typeKind maps a metadata table type to its display kind.
+func typeKind(t string) string {
+	switch strings.ToUpper(t) {
+	case "TABLE", "BASE TABLE", "SYSTEM TABLE", "LOCAL TEMPORARY", "GLOBAL TEMPORARY":
+		return "table"
+	case "VIEW", "SYSTEM VIEW":
+		return "view"
+	case "MATERIALIZED VIEW":
+		return "matview"
+	case "SYNONYM":
+		return "synonym"
+	case "SEQUENCE":
+		return "sequence"
+	}
+	return ""
+}
+
+// sortCands orders candidates by text, keeping kinds attached.
+func sortCands(cands []rline.Cand) {
+	sort.Slice(cands, func(i, j int) bool { return cands[i].Text < cands[j].Text })
+}
+
+func (c completer) completeWithSelectables(text []rune) []rline.Cand {
 	filter := parseIdentifier(string(text))
 	names := c.getNamespaces(filter)
 	if r, ok := c.reader.(metadata.TableReader); ok {
-		tables := c.getNames(
+		tables := c.getCands(
 			func() (iterator, error) {
 				return r.Tables(filter)
 			},
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name)
+				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name), typeKind(t.Type)
 			},
 		)
 		names = append(names, tables...)
 	}
 	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		functions := c.getNames(
+		functions := c.getCands(
 			func() (iterator, error) {
 				return r.Functions(filter)
 			},
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				f := res.(*metadata.FunctionSet).Get()
-				return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name)
+				return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name), "function"
 			},
 		)
 		names = append(names, functions...)
 	}
 	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		sequences := c.getNames(
+		sequences := c.getCands(
 			func() (iterator, error) {
 				return r.Sequences(filter)
 			},
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				s := res.(*metadata.SequenceSet).Get()
-				return qualifiedIdentifier(filter, s.Catalog, s.Schema, s.Name)
+				return qualifiedIdentifier(filter, s.Catalog, s.Schema, s.Name), "sequence"
 			},
 		)
 		names = append(names, sequences...)
 	}
-	sort.Strings(names)
+	sortCands(names)
 	// TODO make sure CompleteFromList would properly handle quoted identifiers
-	return CompleteFromList(text, names...)
+	return CompleteFromListCands(text, names)
 }
 
-// completeWithSelectablesFull completes `\d`-style listings with fully
-// qualified tables, functions and sequences — no bare namespace names.
-func (c completer) completeWithSelectablesFull(text []rune) [][]rune {
-	var names []string
-	if r, ok := c.reader.(metadata.TableReader); ok {
-		filter := metadata.Filter{OnlyVisible: true}
-		names = append(names, c.getNames(
-			func() (iterator, error) { return r.Tables(filter) },
-			func(res interface{}) string {
-				t := res.(*metadata.TableSet).Get()
-				return fullIdentifier(t.Catalog, t.Schema, t.Name)
-			},
-		)...)
-	}
-	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		names = append(names, c.getNames(
-			func() (iterator, error) { return r.Functions(metadata.Filter{OnlyVisible: true}) },
-			func(res interface{}) string {
-				f := res.(*metadata.FunctionSet).Get()
-				return fullIdentifier(f.Catalog, f.Schema, f.Name)
-			},
-		)...)
-	}
-	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		names = append(names, c.getNames(
-			func() (iterator, error) { return r.Sequences(metadata.Filter{OnlyVisible: true}) },
-			func(res interface{}) string {
-				s := res.(*metadata.SequenceSet).Get()
-				return fullIdentifier(s.Catalog, s.Schema, s.Name)
-			},
-		)...)
-	}
-	return completeFuzzyFull(string(text), names)
-}
-
-func (c completer) completeWithTables(text []rune, types []string) [][]rune {
-	r, ok := c.reader.(metadata.TableReader)
-	if !ok {
-		return nil
-	}
-
-	// stable filter (no typed text): per-keystroke matching happens
-	// client-side; candidates are fully qualified schema.table names
-	filter := metadata.Filter{OnlyVisible: true, Types: types}
-	names := c.getNames(
-		func() (iterator, error) {
-			return r.Tables(filter)
-		},
-		func(res interface{}) string {
-			t := res.(*metadata.TableSet).Get()
-			return fullIdentifier(t.Catalog, t.Schema, t.Name)
-		},
-	)
-	return completeFuzzyFull(string(text), names)
-}
-
-func (c completer) completeWithFunctions(text []rune, types []string) [][]rune {
-	r, ok := c.reader.(metadata.FunctionReader)
-	if !ok {
-		return nil
-	}
-	filter := metadata.Filter{OnlyVisible: true, Types: types}
-	names := c.getNames(
-		func() (iterator, error) {
-			return r.Functions(filter)
-		},
-		func(res interface{}) string {
-			f := res.(*metadata.FunctionSet).Get()
-			return fullIdentifier(f.Catalog, f.Schema, f.Name)
-		},
-	)
-	return completeFuzzyFull(string(text), names)
-}
-
-func (c completer) completeWithIndexes(text []rune) [][]rune {
-	r, ok := c.reader.(metadata.IndexReader)
-	if !ok {
-		return nil
-	}
-	filter := metadata.Filter{OnlyVisible: true}
-	names := c.getNames(
-		func() (iterator, error) {
-			return r.Indexes(filter)
-		},
-		func(res interface{}) string {
-			f := res.(*metadata.IndexSet).Get()
-			return fullIdentifier(f.Catalog, f.Schema, f.Name)
-		},
-	)
-	return completeFuzzyFull(string(text), names)
-}
-
-func (c completer) completeWithSequences(text []rune) [][]rune {
-	r, ok := c.reader.(metadata.SequenceReader)
-	if !ok {
-		return nil
-	}
-	filter := metadata.Filter{OnlyVisible: true}
-	names := c.getNames(
-		func() (iterator, error) {
-			return r.Sequences(filter)
-		},
-		func(res interface{}) string {
-			s := res.(*metadata.SequenceSet).Get()
-			return fullIdentifier(s.Catalog, s.Schema, s.Name)
-		},
-	)
-	return completeFuzzyFull(string(text), names)
-}
-
-func (c completer) completeWithSchemas(text []rune) [][]rune {
-	r, ok := c.reader.(metadata.SchemaReader)
-	if !ok {
-		return nil
-	}
-	filter := parseIdentifier(string(text))
-	names := c.getNames(
-		func() (iterator, error) {
-			if filter.Schema != "" {
-				// name should already have a wildcard appended
-				return r.Schemas(metadata.Filter{Catalog: filter.Schema, Name: filter.Name, WithSystem: true})
-			}
-			return r.Schemas(filter)
-		},
-		func(res interface{}) string {
-			s := res.(*metadata.SchemaSet).Get()
-			return qualifiedIdentifier(filter, "", s.Catalog, s.Schema)
-		},
-	)
-	return completeFuzzyFull(string(text), names)
-}
-
-func (c completer) completeWithCatalogs(text []rune) [][]rune {
-	r, ok := c.reader.(metadata.CatalogReader)
-	if !ok {
-		return nil
-	}
-	filter := parseIdentifier(string(text))
-	names := c.getNames(
-		func() (iterator, error) {
-			return r.Catalogs(filter)
-		},
-		func(res interface{}) string {
-			s := res.(*metadata.CatalogSet).Get()
-			return s.Catalog
-		},
-	)
-	return CompleteFromList(text, names...)
-}
-
-func (c completer) completeWithUpdatables(text []rune) [][]rune {
+func (c completer) completeWithUpdatables(text []rune) []rline.Cand {
 	filter := parseIdentifier(string(text))
 	names := c.getNamespaces(filter)
 	if r, ok := c.reader.(metadata.TableReader); ok {
 		// exclude materialized views, sequences, system tables, synonyms
 		filter.Types = []string{"TABLE", "BASE TABLE", "LOCAL TEMPORARY", "GLOBAL TEMPORARY", "VIEW"}
-		tables := c.getNames(
+		tables := c.getCands(
 			func() (iterator, error) {
 				return r.Tables(filter)
 			},
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name)
+				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name), typeKind(t.Type)
 			},
 		)
 		names = append(names, tables...)
 	}
-	sort.Strings(names)
+	sortCands(names)
 	// TODO make sure CompleteFromList would properly handle quoted identifiers
-	return CompleteFromList(text, names...)
+	return CompleteFromListCands(text, names)
 }
 
-func (c completer) getNamespaces(f metadata.Filter) []string {
-	names := make([]string, 0, 10)
+func (c completer) getNamespaces(f metadata.Filter) []rline.Cand {
+	names := make([]rline.Cand, 0, 10)
 	// Catalogs (database names) are not offered as namespaces: in FROM/JOIN/
 	// UPDATE/INSERT INTO positions one picks schema-qualified objects, and
 	// for PostgreSQL-style databases the catalog list is the database list,
@@ -867,7 +726,7 @@ func (c completer) getNamespaces(f metadata.Filter) []string {
 		return names
 	}
 	if r, ok := c.reader.(metadata.SchemaReader); ok {
-		schemas := c.getNames(
+		schemas := c.getCands(
 			func() (iterator, error) {
 				if f.Schema != "" {
 					// name should already have a wildcard appended
@@ -875,9 +734,9 @@ func (c completer) getNamespaces(f metadata.Filter) []string {
 				}
 				return r.Schemas(f)
 			},
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				s := res.(*metadata.SchemaSet).Get()
-				return qualifiedIdentifier(f, "", s.Catalog, s.Schema)
+				return qualifiedIdentifier(f, "", s.Catalog, s.Schema), c.schemaKind
 			},
 		)
 		names = append(names, schemas...)
@@ -885,16 +744,16 @@ func (c completer) getNamespaces(f metadata.Filter) []string {
 	return names
 }
 
-func (c completer) completeWithAttributes(_ caseType, selectable string, text []rune, options ...string) [][]rune {
-	names := make([]string, 0, 10)
+func (c completer) completeWithAttributes(_ caseType, selectable string, text []rune, options ...string) []rline.Cand {
+	names := make([]rline.Cand, 0, 10)
 	if r, ok := c.reader.(metadata.ColumnReader); ok {
 		parent := parseParentIdentifier(selectable)
-		columns := c.getNames(
+		columns := c.getCands(
 			func() (iterator, error) {
 				return r.Columns(parent)
 			},
-			func(res interface{}) string {
-				return res.(*metadata.ColumnSet).Get().Name
+			func(res interface{}) (string, string) {
+				return res.(*metadata.ColumnSet).Get().Name, "column"
 			},
 		)
 		names = append(names, columns...)
@@ -903,18 +762,18 @@ func (c completer) completeWithAttributes(_ caseType, selectable string, text []
 		filter := parseIdentifier(string(text))
 		// functions don't have to be fully qualified to be callable
 		filter.OnlyVisible = false
-		functions := c.getNames(
+		functions := c.getCands(
 			func() (iterator, error) {
 				return r.Functions(filter)
 			},
-			func(res interface{}) string {
-				return res.(*metadata.FunctionSet).Get().Name
+			func(res interface{}) (string, string) {
+				return res.(*metadata.FunctionSet).Get().Name, "function"
 			},
 		)
 		names = append(names, functions...)
 	}
-	names = append(names, options...)
-	return CompleteFromList(text, names...)
+	names = append(names, CompleteFromList(text, options...)...)
+	return CompleteFromListCands(text, names)
 }
 
 // parseIdentifier into catalog, schema and name
@@ -993,6 +852,31 @@ func qualifiedIdentifier(filter metadata.Filter, catalog, schema, name string) s
 	return name
 }
 
+// CompleteFromListCands filters already-built candidates by the typed text
+// (case-insensitive prefix), returning the append-style suffix after the
+// typed text, keeping kinds. nil options decline (callers fall through);
+// non-nil options with no matches yield an empty result — nothing to
+// suggest, but the path was authoritative.
+func CompleteFromListCands(text []rune, options []rline.Cand) []rline.Cand {
+	if options == nil {
+		return nil
+	}
+	prefix := strings.ToUpper(string(text))
+	isLower := len(text) > 0 && unicode.IsLower(text[0])
+	result := make([]rline.Cand, 0, len(options))
+	for _, o := range options {
+		if !strings.HasPrefix(strings.ToUpper(o.Text), prefix) {
+			continue
+		}
+		match := o.Text[len(text):]
+		if isLower {
+			match = strings.ToLower(match)
+		}
+		result = append(result, rline.Cand{Text: match, Kind: o.Kind})
+	}
+	return result
+}
+
 func (c completer) getNames(query func() (iterator, error), mapper func(interface{}) string) []string {
 	res, err := query()
 	if err != nil {
@@ -1015,12 +899,36 @@ func (c completer) getNames(query func() (iterator, error), mapper func(interfac
 	return result
 }
 
+// getCands is getNames with a display kind per row, deduplicated by text.
+func (c completer) getCands(query func() (iterator, error), mapper func(interface{}) (string, string)) []rline.Cand {
+	res, err := query()
+	if err != nil {
+		if err != text.ErrNotSupported {
+			c.logger.Println("Error getting selectables", err)
+		}
+		return nil
+	}
+	defer res.Close()
+
+	seen := make(map[string]struct{}, 10)
+	var result []rline.Cand
+	for res.Next() {
+		name, kind := mapper(res)
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, rline.Cand{Text: name, Kind: kind})
+	}
+	return result
+}
+
 type iterator interface {
 	Next() bool
 	Close() error
 }
 
-func completeFromFiles(text []rune) []string {
+func completeFromFiles(text []rune) []rline.Cand {
 	// TODO handle quotes properly
 	dir := filepath.Dir(string(text))
 	dirs, err := os.ReadDir(dir)
@@ -1043,5 +951,9 @@ func completeFromFiles(text []rune) []string {
 		}
 		matches = append(matches, dir+name)
 	}
-	return matches
+	out := make([]rline.Cand, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, rline.Cand{Text: m, Kind: "file"})
+	}
+	return out
 }

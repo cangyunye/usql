@@ -92,6 +92,7 @@ var backslashCommands = []string{
 	"\\ir",
 	"\\l",
 	"\\l+",
+	"\\more",
 	"\\o",
 	"\\out",
 	"\\p",

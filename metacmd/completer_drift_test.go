@@ -25,7 +25,7 @@ func TestCompleterKnowsAllCommands(t *testing.T) {
 				}
 				found := false
 				for _, c := range cands {
-					if string(typed)+string(c) == "\\"+cmd {
+					if string(typed)+c.Text == "\\"+cmd {
 						found = true
 						break
 					}

@@ -284,6 +284,36 @@ func TestCompleter(t *testing.T) {
 			},
 			16,
 		},
+		{
+			"terminated statement completes nothing",
+			"SELECT 1;",
+			9,
+			nil,
+			0,
+		},
+		{
+			"terminated statement with trailing space completes nothing",
+			"SELECT 1; ",
+			10,
+			nil,
+			0,
+		},
+		{
+			"string semicolon then real terminator completes nothing",
+			"SELECT ';' WHERE id = 1; ",
+			25,
+			nil,
+			0,
+		},
+		{
+			"new word after terminator completes normally",
+			"SELECT 1; sel",
+			13,
+			[]string{
+				"ect",
+			},
+			3,
+		},
 	}
 
 	completer := NewDefaultCompleter(WithReader(mockReader{}), WithConnStrings([]string{"pg://"}))
@@ -294,7 +324,7 @@ func TestCompleter(t *testing.T) {
 			for _, exp := range test.expSuggestions {
 				found := false
 				for _, act := range suggestions {
-					if string(act) == exp {
+					if act.Text == exp {
 						found = true
 						break
 					}
@@ -306,13 +336,13 @@ func TestCompleter(t *testing.T) {
 			for _, act := range suggestions {
 				found := false
 				for _, exp := range test.expSuggestions {
-					if string(act) == exp {
+					if act.Text == exp {
 						found = true
 						break
 					}
 				}
 				if !found {
-					t.Errorf("Unexpected suggestion: %s", string(act))
+					t.Errorf("Unexpected suggestion: %s", act.Text)
 				}
 			}
 			if length != test.expLength {

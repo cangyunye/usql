@@ -213,3 +213,75 @@ func TestSnapshotSequencesIgnoreTypes(t *testing.T) {
 		t.Fatalf("sequences with a table Types filter: %v", names)
 	}
 }
+
+// gatedReader holds the snapshot's Tables load open until the gate closes,
+// so tests can inspect the loading window deterministically.
+type gatedReader struct {
+	countingReader
+	gate   chan struct{}
+	tables []metadata.Table
+}
+
+func (r *gatedReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
+	r.count("tables")
+	<-r.gate
+	rows := make([]metadata.Table, 0, len(r.tables))
+	for _, t := range r.tables {
+		if filterMatches(f, t.Catalog, t.Schema, t.Type) {
+			rows = append(rows, t)
+		}
+	}
+	return metadata.NewTableSet(rows), nil
+}
+
+func (r *gatedReader) Functions(metadata.Filter) (*metadata.FunctionSet, error) {
+	return metadata.NewFunctionSet(nil), nil
+}
+
+func (r *gatedReader) Sequences(metadata.Filter) (*metadata.SequenceSet, error) {
+	return metadata.NewSequenceSet(nil), nil
+}
+
+func (r *gatedReader) Schemas(metadata.Filter) (*metadata.SchemaSet, error) {
+	return metadata.NewSchemaSet(nil), nil
+}
+
+func TestSnapshotLoadingWindowDefersQueries(t *testing.T) {
+	inner := &gatedReader{
+		countingReader: countingReader{queries: map[string]int{}},
+		gate:           make(chan struct{}),
+		tables:         []metadata.Table{{Schema: "public", Name: "film", Type: "TABLE"}},
+	}
+	snap := NewSnapshotReader(inner) // the load blocks on the gate
+	tr := metadata.TableReader(snap)
+
+	// during the load, a visible-catalog query is answered empty right away
+	// — nothing blocks on the in-flight load
+	t0 := time.Now()
+	set, err := tr.Tables(metadata.Filter{OnlyVisible: true})
+	if err != nil {
+		t.Fatalf("Tables during load: %v", err)
+	}
+	if elapsed := time.Since(t0); elapsed > 250*time.Millisecond {
+		t.Fatalf("deferred query took %v, must not wait on the load", elapsed)
+	}
+	if names := tableNames(set); len(names) != 0 {
+		t.Fatalf("deferred query returned %v, want empty", names)
+	}
+
+	// once the load lands, the same query is served from the snapshot, and
+	// the inner reader has seen exactly one query — the load itself (the
+	// deferred query above issued none)
+	close(inner.gate)
+	waitForSnapshot(t, snap)
+	set, err = tr.Tables(metadata.Filter{OnlyVisible: true})
+	if err != nil {
+		t.Fatalf("Tables after load: %v", err)
+	}
+	if names := tableNames(set); len(names) != 1 || names[0] != "film" {
+		t.Fatalf("tables after load: %v", names)
+	}
+	if n := inner.calls("tables"); n != 1 {
+		t.Fatalf("inner queried %d times in total, want 1 (the load only)", n)
+	}
+}

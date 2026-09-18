@@ -3,6 +3,8 @@ package completer
 import (
 	"reflect"
 	"testing"
+
+	"github.com/xo/usql/rline"
 )
 
 // TestMetaCommandCompletion pins the semantics of meta-command completion:
@@ -17,7 +19,7 @@ func TestMetaCommandCompletion(t *testing.T) {
 	).(*completer)
 
 	// doRepl drives the replace-style path the real readline fork uses.
-	doRepl := func(line string) ([][]rune, int, bool) {
+	doRepl := func(line string) ([]rline.Cand, int, bool) {
 		return c.DoRepl([]rune(line), len([]rune(line)))
 	}
 
@@ -28,23 +30,29 @@ func TestMetaCommandCompletion(t *testing.T) {
 		wantLen  int
 		wantFull bool // DoRepl replace semantics expected
 	}{
-		// \dt — tables only, fully qualified, no bare schema names
-		{"dt all", `\dt `, []string{"public.film", "public.actor"}, 0, true},
+		// \dt — schemas first (the accessible namespaces), then that
+		// namespace's tables when qualified, fully qualified names
+		{"dt all", `\dt `, []string{"other", "public"}, 0, true},
 		{"dt prefix", `\dt fi`, []string{"public.film"}, 2, true},
 		{"dt schema-qualified", `\dt public.`, []string{"public.film", "public.actor"}, 7, true},
-		{"dv views only", `\dv `, []string{"public.film_view"}, 0, true},
-		// \ds — sequences only, no tables, no schema names
-		{"ds sequences only", `\ds `, []string{"public.actor_id_seq"}, 0, true},
-		// \df — functions only
-		{"df functions only", `\df `, []string{"public.now"}, 0, true},
+		{"dt cross-schema", `\dt other.o`, []string{"other.orders"}, 7, true},
+		{"dv views only", `\dv `, []string{"other", "public"}, 0, true},
+		{"dv views qualified", `\dv public.`, []string{"public.film_view"}, 7, true},
+		// \ds — sequences only once qualified
+		{"ds sequences only", `\ds `, []string{"other", "public"}, 0, true},
+		{"ds sequences qualified", `\ds public.`, []string{"public.actor_id_seq"}, 7, true},
+		// \df — functions only once qualified
+		{"df functions only", `\df `, []string{"other", "public"}, 0, true},
+		{"df functions qualified", `\df public.`, []string{"public.now"}, 7, true},
 		// \di — no index reader: nothing, not the SQL fallback
 		{"di unsupported reader", `\di `, nil, 0, false},
 		// \dn — schemas are the object of this command
-		{"dn schemas only", `\dn `, []string{"public"}, 0, true},
+		{"dn schemas only", `\dn `, []string{"other", "public"}, 0, true},
 		// \l — no catalog reader: nothing
 		{"l unsupported reader", `\l `, nil, 0, false},
-		// \d — selectables, fully qualified
-		{"d selectables", `\d `, []string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 0, true},
+		// \d — schemas first, then the selectables of a named namespace
+		{"d selectables", `\d `, []string{"other", "public"}, 0, true},
+		{"d selectables qualified", `\d public.`, []string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 7, true},
 		// \c — connection names only
 		{"c connection names", `\c `, []string{"opengauss_ogadmin_6432", "mysql_root_localhost_3306"}, 0, true},
 		{"c prefix", `\c op`, []string{"opengauss_ogadmin_6432"}, 2, true},
@@ -74,7 +82,7 @@ func TestMetaCommandCompletion(t *testing.T) {
 			}
 			gs := make([]string, len(got))
 			for i := range got {
-				gs[i] = string(got[i])
+				gs[i] = got[i].Text
 			}
 			if !reflect.DeepEqual(gs, test.want) {
 				t.Errorf("DoRepl(%q):\n got  %q\n want %q", test.line, gs, test.want)

@@ -40,6 +40,7 @@ func TestInvalidateDropsReaderCache(t *testing.T) {
 	if c.cache == nil {
 		t.Fatal("WithContextCompletion did not install a cache")
 	}
+	waitForSnapshot(t, c.snap)
 
 	tr := c.reader.(metadata.TableReader)
 	for i := 0; i < 2; i++ {
@@ -50,6 +51,7 @@ func TestInvalidateDropsReaderCache(t *testing.T) {
 	}
 
 	c.Invalidate()
+	waitForSnapshot(t, c.snap) // the reload landed
 	tr.Tables(metadata.Filter{OnlyVisible: true})
 	if n := inner.calls("tables"); n != 2 {
 		t.Errorf("inner queried %d times after invalidate, want 2", n)

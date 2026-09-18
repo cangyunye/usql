@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/xo/usql/drivers/metadata"
+	"github.com/xo/usql/rline"
 )
 
 // updatableTypes are the table types offered in INSERT INTO and UPDATE
@@ -60,12 +61,27 @@ func (c *completer) Invalidate() {
 	}
 }
 
+// snapState reports the catalog snapshot's version and readiness, so the
+// live wrapper can stamp its caches and drop pre-snapshot results when the
+// snapshot supersedes them.
+func (c completer) snapState() (int64, bool) {
+	if c.snap == nil {
+		return 0, false
+	}
+	return c.snap.state()
+}
+
 // WithContextCompletion returns an Option that tries context-aware candidate
 // generation — clause scanning, alias resolution and fuzzy ranking — before
 // the tail-matching heuristics run. Whenever the statement context does not
 // determine a candidate set, completion falls through to the heuristics, so
 // existing completions (backslash commands, variables, INSERT INTO ...
 // VALUES, ...) are unaffected.
+//
+// The context path is also what makes typing-time completion cheap: its
+// candidate options depend only on the clause context (never on the typed
+// word), so the live wrapper memoizes the option set once per statement
+// context and re-filters it client-side as the word grows.
 //
 // Any beforeComplete hook set by an earlier option (e.g. a driver's own
 // completion, as in drivers/metadata/mysql) is preserved and tried after
@@ -83,7 +99,7 @@ func WithContextCompletion() Option {
 			c.reader = c.snap
 		}
 		prev := c.beforeComplete
-		c.beforeComplete = func(previousWords []string, text []rune) [][]rune {
+		c.beforeComplete = func(previousWords []string, text []rune) []rline.Cand {
 			if result := c.completeWithContext(previousWords, text); result != nil {
 				return result
 			}
@@ -99,7 +115,7 @@ func WithContextCompletion() Option {
 // the line up to the cursor from the previous words, parses the clause
 // context, and generates candidates from it. It returns nil when the context
 // is inconclusive.
-func (c completer) completeWithContext(previousWords []string, text []rune) [][]rune {
+func (c completer) completeWithContext(previousWords []string, text []rune) []rline.Cand {
 	line := reconstructLine(previousWords, text)
 	return c.completeFromContext(parseContext(line, len(line)))
 }
@@ -124,7 +140,7 @@ func reconstructLine(previousWords []string, text []rune) []rune {
 // that replace the word at the cursor (see readline.Replacer), ranked
 // fuzzily — prefix matches first. It returns nil when the context does not
 // determine a candidate set, so callers can fall back to the heuristics.
-func (c completer) completeFromContext(ctx Context) [][]rune {
+func (c completer) completeFromContext(ctx Context) []rline.Cand {
 	options, ok, ordered := c.contextOptions(ctx)
 	if !ok || len(options) == 0 {
 		return nil
@@ -132,11 +148,7 @@ func (c completer) completeFromContext(ctx Context) [][]rune {
 	if ordered {
 		// already in the order the user needs (e.g. VALUES field hints);
 		// fuzzy ranking would destroy it
-		res := make([][]rune, len(options))
-		for i, o := range options {
-			res[i] = []rune(o)
-		}
-		return res
+		return options
 	}
 	// anchored (start-anchored) matching: candidates match from the start of
 	// the word or of their last segment, not as fuzzy subsequences
@@ -147,20 +159,19 @@ func (c completer) completeFromContext(ctx Context) [][]rune {
 // candidates are full words replacing the word at the cursor. When the
 // context is inconclusive it returns ok=false, and the readline layer falls
 // back to Do (append-style heuristics).
-func (c *completer) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
+func (c *completer) DoRepl(line []rune, pos int) ([]rline.Cand, int, bool) {
 	if pos > len(line) {
 		pos = len(line)
 	}
-	var i int
-	for i = pos - 1; i > 0; i-- {
-		if strings.ContainsRune(WORD_BREAKS, line[i]) {
-			i++
-			break
+	// a terminator ends the statement: complete nothing while no new word is
+	// typed, and complete the new statement as if typed on its own line
+	if k := rline.LastStatementStart(line, pos); k > 0 {
+		if rline.AtStatementEnd(line, pos) {
+			return nil, 0, false
 		}
+		line, pos = line[k:], pos-k
 	}
-	if i == -1 {
-		i = 0
-	}
+	i := wordStart(line, pos)
 	previousWords := getPreviousWords(pos, line)
 	text := line[i:pos]
 	if res := c.completeWithContext(previousWords, text); res != nil {
@@ -181,25 +192,28 @@ func (c *completer) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
 
 // contextOptions returns the candidate options for the context, or ok=false
 // when the context is inconclusive and the caller should fall back to the
-// tail-matching heuristics.
-func (c completer) contextOptions(ctx Context) ([]string, bool, bool) {
+// tail-matching heuristics. The options depend only on the clause context —
+// never on the typed word — so callers can filter them client-side and the
+// live wrapper can memoize them per statement context. ordered results (the
+// VALUES field hints) are position-sensitive and exempt from that.
+func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 	switch {
 	case ctx.Qualifier != "" && ctx.Clause != "":
 		return c.qualifiedOptions(ctx), true, false
 	case ctx.Clause == "INTO" && ctx.OpenParens > 0:
 		// INSERT INTO film (<cursor> — the column list of the target table
-		return c.scopeColumns(ctx), len(ctx.Tables) > 0, false
+		return candsText(c.scopeColumns(ctx), "column"), len(ctx.Tables) > 0, false
 	case ctx.Clause == "VALUES" && ctx.ValuesParens:
 		// INSERT INTO ... VALUES (<cursor> — hint the fields in written
 		// order, so long column lists stay trackable while filling values
-		return c.valuesFieldHints(ctx), true, true
+		return candsText(c.valuesFieldHints(ctx), "column"), true, true
 	case ctx.Clause == "INTO" && ctx.IntoListDone:
 		// INSERT INTO film (a, b) <cursor> — what may follow the column
 		// group
-		return []string{"VALUES", "SELECT", "TABLE", "OVERRIDING"}, true, false
+		return rline.Cands("VALUES", "SELECT", "TABLE", "OVERRIDING"), true, false
 	case ctx.Clause == "USING" && ctx.OpenParens > 0:
 		// JOIN ... USING (<cursor> — join columns of the tables in scope
-		return c.scopeColumns(ctx), len(ctx.Tables) > 0, false
+		return candsText(c.scopeColumns(ctx), "column"), len(ctx.Tables) > 0, false
 	case tableClauses[ctx.Clause]:
 		if ctx.Object == "" && ctx.TableListed {
 			if ctx.Clause == "INTO" {
@@ -208,30 +222,34 @@ func (c completer) contextOptions(ctx Context) ([]string, bool, bool) {
 				// metadata order; without column metadata decline to the
 				// heuristics ("(", VALUES, ...)
 				if list := c.insertColumnList(ctx); list != "" {
-					return []string{list}, true, false
+					return []rline.Cand{{Text: list}}, true, false
 				}
 			}
 			return nil, false, false
 		}
-		// dotless words complete schema/user/owner names first, keeping
-		// the candidate list small; after "schema." the qualified branch
-		// lists that namespace's objects. Only when no namespace matches
-		// the typed word fall back to fully qualified tables, so direct
-		// table names ("FROM film") still complete. Catalogs (database
-		// names) are deliberately not offered: after FROM/INTO one picks
-		// schema-qualified objects, not databases.
+		// table position: namespace names (schema/user/database) first, then
+		// every fully qualified selectable — one word-independent option set
+		// the client filters as the word grows. Catalogs (database names in
+		// the PostgreSQL sense) are deliberately not offered: after FROM/
+		// INTO one picks schema-qualified objects, not databases.
 		ns := c.getNamespaces(metadata.Filter{OnlyVisible: true})
-		if len(completePrefixFull(ctx.Qualifier+ctx.Object, ns)) > 0 {
-			return ns, true, false
-		}
-		return c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE"), true, false
+		return append(ns, c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE")...), true, false
 	case columnClauses[ctx.Clause]:
-		options := c.scopeColumns(ctx)
-		options = append(options, clauseKeywords[ctx.Clause]...)
+		options := candsText(c.scopeColumns(ctx), "column")
+		options = append(options, CompleteFromList(nil, clauseKeywords[ctx.Clause]...)...)
 		return options, true, false
 	default:
 		return nil, false, false
 	}
+}
+
+// candsText wraps plain words as candidates of one kind.
+func candsText(words []string, kind string) []rline.Cand {
+	out := make([]rline.Cand, 0, len(words))
+	for _, w := range words {
+		out = append(out, rline.Cand{Text: w, Kind: kind})
+	}
+	return out
 }
 
 // valuesFieldHints hints the fields of an INSERT ... VALUES group in
@@ -256,13 +274,13 @@ func (c completer) valuesFieldHints(ctx Context) []string {
 // catalog.schema) and the candidates are that namespace's tables. Candidates
 // are fully qualified, so they replace the whole word including the
 // qualifier.
-func (c completer) qualifiedOptions(ctx Context) []string {
+func (c completer) qualifiedOptions(ctx Context) []rline.Cand {
 	parts := strings.Split(strings.TrimSuffix(ctx.Qualifier, "."), ".")
 	qual := ctx.Qualifier
-	appendColumns := func(ref TableRef) []string {
-		var options []string
+	appendColumns := func(ref TableRef) []rline.Cand {
+		var options []rline.Cand
 		for _, col := range c.tableColumns(ref) {
-			options = append(options, qual+col)
+			options = append(options, rline.Cand{Text: qual + col, Kind: "column"})
 		}
 		return options
 	}
@@ -364,28 +382,26 @@ func (c completer) tableColumns(ref TableRef) []string {
 	return cols
 }
 
-// scopeTables is the fallback for a table position, used only when no
-// namespace matches the typed word: fully qualified selectables — all of
-// them for FROM and JOIN, updatable tables only for INSERT INTO and UPDATE.
-// The query filter is stable (no typed text in it): per-keystroke matching
-// happens client-side in fuzzy ranking, so the cached query is reused while
-// typing.
-func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
+// scopeTables returns fully qualified selectables — all of them for FROM and
+// JOIN, updatable tables only for INSERT INTO and UPDATE. The query filter
+// is stable (no typed text in it): per-keystroke matching happens
+// client-side in fuzzy ranking, so the cached query is reused while typing.
+func (c completer) scopeTables(ctx Context, tablesOnly bool) []rline.Cand {
 	filter := metadata.Filter{OnlyVisible: true}
 	if tablesOnly {
 		filter.Types = updatableTypes
 	} else {
 		filter.Types = selectableTypes
 	}
-	var names []string
+	var names []rline.Cand
 	if r, ok := c.reader.(metadata.TableReader); ok {
-		names = append(names, c.getNames(
+		names = append(names, c.getCands(
 			func() (iterator, error) { return r.Tables(filter) },
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				t := res.(*metadata.TableSet).Get()
 				// schema.table (catalog.schema.table) — full names tell
 				// similarly-named objects apart
-				return fullIdentifier(t.Catalog, t.Schema, t.Name)
+				return fullIdentifier(t.Catalog, t.Schema, t.Name), typeKind(t.Type)
 			},
 		)...)
 	}
@@ -393,20 +409,20 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 		return names
 	}
 	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		names = append(names, c.getNames(
+		names = append(names, c.getCands(
 			func() (iterator, error) { return r.Functions(filter) },
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				f := res.(*metadata.FunctionSet).Get()
-				return fullIdentifier(f.Catalog, f.Schema, f.Name)
+				return fullIdentifier(f.Catalog, f.Schema, f.Name), "function"
 			},
 		)...)
 	}
 	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		names = append(names, c.getNames(
+		names = append(names, c.getCands(
 			func() (iterator, error) { return r.Sequences(filter) },
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				s := res.(*metadata.SequenceSet).Get()
-				return fullIdentifier(s.Catalog, s.Schema, s.Name)
+				return fullIdentifier(s.Catalog, s.Schema, s.Name), "sequence"
 			},
 		)...)
 	}
@@ -415,22 +431,22 @@ func (c completer) scopeTables(ctx Context, tablesOnly bool) []string {
 
 // namespaceTables completes the tables of a schema, or of a catalog and
 // schema — plus, unless tablesOnly, its functions and sequences — returning
-// fully qualified names. The filter is stable across keystrokes; the typed
-// object text is matched client-side by fuzzy ranking.
-func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []string {
+// fully qualified names with kinds. The filter is stable across keystrokes;
+// the typed object text is matched client-side by fuzzy ranking.
+func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []rline.Cand {
 	filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
 	if tablesOnly {
 		filter.Types = updatableTypes
 	} else {
 		filter.Types = selectableTypes
 	}
-	names := make([]string, 0, 10)
+	var names []rline.Cand
 	if r, ok := c.reader.(metadata.TableReader); ok {
-		names = append(names, c.getNames(
+		names = append(names, c.getCands(
 			func() (iterator, error) { return r.Tables(filter) },
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name)
+				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name), typeKind(t.Type)
 			},
 		)...)
 	}
@@ -438,20 +454,20 @@ func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []st
 		return names
 	}
 	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		names = append(names, c.getNames(
+		names = append(names, c.getCands(
 			func() (iterator, error) { return r.Functions(filter) },
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				f := res.(*metadata.FunctionSet).Get()
-				return fullIdentifier(f.Catalog, f.Schema, f.Name)
+				return fullIdentifier(f.Catalog, f.Schema, f.Name), "function"
 			},
 		)...)
 	}
 	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		names = append(names, c.getNames(
+		names = append(names, c.getCands(
 			func() (iterator, error) { return r.Sequences(filter) },
-			func(res interface{}) string {
+			func(res interface{}) (string, string) {
 				s := res.(*metadata.SequenceSet).Get()
-				return fullIdentifier(s.Catalog, s.Schema, s.Name)
+				return fullIdentifier(s.Catalog, s.Schema, s.Name), "sequence"
 			},
 		)...)
 	}

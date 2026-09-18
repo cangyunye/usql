@@ -16,12 +16,12 @@ type stubCompleter struct {
 	delay time.Duration
 }
 
-func (s *stubCompleter) Do(line []rune, pos int) ([][]rune, int) {
+func (s *stubCompleter) Do(line []rune, pos int) ([]rline.Cand, int) {
 	s.mu.Lock()
 	s.calls++
 	s.mu.Unlock()
 	time.Sleep(s.delay)
-	return [][]rune{[]rune("ilm")}, 2
+	return []rline.Cand{{Text: "ilm"}}, 2
 }
 
 func (s *stubCompleter) callCount() int {
@@ -35,7 +35,7 @@ func TestLiveTabPathIsSynchronous(t *testing.T) {
 	live := NewLive(stub).(rline.LiveCompleter)
 
 	cands, length := live.Do([]rune("SELECT * FROM fi"), 16)
-	if len(cands) != 1 || string(cands[0]) != "ilm" || length != 2 {
+	if len(cands) != 1 || cands[0].Text != "ilm" || length != 2 {
 		t.Errorf("Do = %q,%d want [ilm],2", cands, length)
 	}
 	if n := stub.callCount(); n != 1 {
@@ -56,7 +56,7 @@ func TestLiveDoLiveServesFromCache(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if cands, length, _ := live.DoLive(line, 16); cands != nil {
-			if string(cands[0]) != "ilm" || length != 2 {
+			if cands[0].Text != "ilm" || length != 2 {
 				t.Errorf("cached DoLive = %q,%d want [ilm],2", cands, length)
 			}
 			if n := stub.callCount(); n != 1 {

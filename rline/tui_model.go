@@ -7,17 +7,31 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/mattn/go-runewidth"
+
 	"github.com/xo/usql/uitheme"
 )
 
 // menuHeight is the maximum number of candidates shown at once.
 const menuHeight = 10
 
-// compDebounce is how long the typing-time completion (ghost suggestion and
-// its metadata query) waits for the user to stop typing: keystrokes in quick
-// succession — typing, but especially paste — keep pushing the deadline, so
-// the completion fires once per typing pause instead of once per rune.
-const compDebounce = 150 * time.Millisecond
+// Completion debounce policy: the typing-time completion fires after a
+// compIdle pause, but never waits longer than compMax since the word's first
+// keystroke (so continuous typing still gets suggestions), and a backspace
+// that shortened the word holds it off for compBack — a shortened word means
+// the candidate set may need re-searching, which should not flash mid-mash.
+// When the statement-context memo can serve the request, the result is
+// instant anyway and only the idle delay applies.
+const (
+	compIdle = 150 * time.Millisecond
+	compMax  = 1500 * time.Millisecond
+	compBack = 1 * time.Second
+)
+
+// badgeMaxWidth caps the candidate text width below which kind badges are
+// right-aligned; wider candidates push the badge off-screen, so it is
+// dropped instead of wrapping the menu row.
+const badgeMaxWidth = 60
 
 // kickMsg is delivered when an asynchronous completion result lands.
 type kickMsg struct{}
@@ -48,9 +62,9 @@ type lineModel struct {
 	draft   []rune
 
 	// candidate menu
-	menu      [][]rune // candidate suffixes/full words
-	menuLen   int      // replace length for replace-style candidates
-	menuRep   bool     // replace semantics
+	menu      []Cand // candidate suffixes/full words with kinds
+	menuLen   int    // replace length for replace-style candidates
+	menuRep   bool   // replace semantics
 	menuSel   int
 	menuTop   int  // window offset
 	menuMax   int  // window height (terminal height bounded)
@@ -83,10 +97,15 @@ type lineModel struct {
 	// typing-time completion debounce: the ghost/metadata completion wants
 	// to run (compDue) no earlier than compDeadline; while keys keep
 	// arriving the deadline slides forward and compPend holds one armed
-	// tick that re-checks it
-	compDue      bool
-	compDeadline time.Time
-	compPend     bool
+	// tick that re-checks it. compFirst is when the word under the cursor
+	// started changing (compMax cap), compBackAt the last deletion
+	// (compBack cooldown), compWordStart detects word switches.
+	compDue       bool
+	compDeadline  time.Time
+	compPend      bool
+	compFirst     time.Time
+	compBackAt    time.Time
+	compWordStart int
 
 	// result plumbing
 	done        bool
@@ -98,13 +117,14 @@ type lineModel struct {
 // the read starts on (-1 when unknown).
 func newLineModel(t *tuiRline, prompt string, topRow int) *lineModel {
 	return &lineModel{
-		t:       t,
-		prom:    prompt,
-		histPos: len(t.hist.lines),
-		menuMax: menuHeight,
-		menuSel: -1,
-		menuTop: 0,
-		topRow:  topRow,
+		t:             t,
+		prom:          prompt,
+		histPos:       len(t.hist.lines),
+		menuMax:       menuHeight,
+		menuSel:       -1,
+		menuTop:       0,
+		topRow:        topRow,
+		compWordStart: -1,
 	}
 }
 
@@ -179,7 +199,7 @@ func (m *lineModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.ed.delete()
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 
 	case "enter", "ctrl+j":
 		// the menu, not the line, is being submitted while it is open
@@ -348,11 +368,11 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	case "backspace":
 		for k := 0; k < n && ed.backspace(); k++ {
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 	case "delete":
 		for k := 0; k < n && ed.delete(); k++ {
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 	case "left", "ctrl+b":
 		for k := 0; k < n && ed.moveLeft(); k++ {
 		}
@@ -362,7 +382,7 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 			// fish-style: right arrow accepts the whole suggestion
 			ed.insertRunes(m.ghost)
 			m.ghost = nil
-			m.afterEdit(false)
+			m.afterEdit(false, false)
 		} else {
 			for k := 0; k < n && ed.moveRight(); k++ {
 			}
@@ -379,7 +399,7 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 				}
 			}
 			ed.insertRunes(m.ghost[:n])
-			m.afterEdit(false)
+			m.afterEdit(false, false)
 		} else {
 			for k := 0; k < n && ed.moveWordRight(); k++ {
 			}
@@ -394,45 +414,50 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		m.ghost = nil
 	case "ctrl+e", "end":
 		ed.moveEnd()
-		m.afterEdit(false)
+		m.afterEdit(false, false)
 	case "ctrl+k":
 		ed.killToEnd()
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 	case "ctrl+u":
 		ed.killToStart()
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 	case "ctrl+w", "alt+backspace":
 		for k := 0; k < n; k++ {
 			ed.killPrevWord()
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 	case "alt+d":
 		for k := 0; k < n; k++ {
 			ed.killNextWord()
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, true)
 	case "ctrl+y":
 		if !ed.yankN(n) {
 			// no entry at that depth: fall back to the front one
 			ed.yank()
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, false)
 	case "alt+y":
 		ed.yankPop()
-		m.afterEdit(false)
+		m.afterEdit(false, false)
 	case "ctrl+t":
 		for k := 0; k < n; k++ {
 			ed.transpose()
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, false)
 	case "alt+t":
 		for k := 0; k < n; k++ {
 			ed.transposeWords()
 		}
-		m.afterEdit(false)
+		m.afterEdit(false, false)
 	case "tab":
 		m.openMenu()
-		m.afterEdit(true)
+		if m.menu == nil {
+			// nothing to show yet (e.g. the catalog snapshot is still
+			// loading): arm the debounced completion, so a landing
+			// background result still surfaces as a ghost
+			m.afterEdit(true, false)
+		}
 	case "up", "ctrl+p":
 		m.historyPrev()
 	case "down", "ctrl+n":
@@ -448,7 +473,7 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	default:
 		if rs := msg.Runes; len(rs) > 0 {
 			ed.insertRunes(rs)
-			m.afterEdit(false)
+			m.afterEdit(false, false)
 		}
 	}
 	return m, nil
@@ -490,9 +515,12 @@ func (m *lineModel) historyNext() {
 
 // afterEdit recomputes ghost text and live candidates after a buffer edit.
 // When keepMenu is set (Tab completion), an open menu is refreshed instead
-// of closed. The typing-time completion is debounced: it runs when the user
-// pauses typing (compDebounce), so paste does not flash a menu per rune.
-func (m *lineModel) afterEdit(keepMenu bool) {
+// of closed. deleted reports whether the edit removed text (backspace
+// family), which holds the debounced completion off for compBack. The
+// typing-time completion is debounced: it runs when the user pauses typing
+// (compIdle), but never later than compMax after the word's first
+// keystroke.
+func (m *lineModel) afterEdit(keepMenu bool, deleted bool) {
 	if m.menu != nil {
 		m.refreshCompletion()
 		return
@@ -500,13 +528,51 @@ func (m *lineModel) afterEdit(keepMenu bool) {
 	if !keepMenu {
 		m.ghost = nil
 	}
-	if m.ed.atEnd() && !m.ed.empty() && m.t.hist != nil {
+	now := time.Now()
+	if deleted {
+		m.compBackAt = now
+	}
+	if ws := wordStartIdx(m.ed.buf, m.ed.idx); ws != m.compWordStart {
+		m.compWordStart = ws
+		m.compFirst = now
+	}
+	// a terminated statement stays quiet: no history ghost, no candidates
+	// until a new word is typed
+	atEnd := AtStatementEnd(m.ed.buf, m.ed.idx)
+	if m.ed.atEnd() && !m.ed.empty() && !atEnd && m.t.hist != nil {
 		m.ghost = m.t.hist.suggest(m.ed.buf)
 	}
 	// the metadata-sourced best match waits for the typing pause; the ghost
 	// is filled in when the (possibly asynchronous) result lands
-	m.compDue = m.t.comp != nil && m.ed.atEnd() && !m.ed.empty() && len(m.ghost) == 0
-	m.compDeadline = time.Now().Add(compDebounce)
+	m.compDue = m.t.comp != nil && m.ed.atEnd() && !m.ed.empty() && !atEnd && len(m.ghost) == 0
+	idle := compIdle
+	if now.Sub(m.compBackAt) < compBack {
+		idle = compBack
+	}
+	deadline := now.Add(idle)
+	// continuous typing still gets a suggestion, at most compMax after the
+	// word's first keystroke
+	if hard := m.compFirst.Add(compMax); hard.Before(deadline) {
+		deadline = hard
+	}
+	m.compDeadline = deadline
+}
+
+// wordStartIdx returns the index where the word at idx begins — the run of
+// identifier characters (letters, digits, and identifier punctuation)
+// ending at idx. Used to detect that the word under the cursor changed.
+func wordStartIdx(buf []rune, idx int) int {
+	i := idx
+	for i > 0 && isWordCharRune(buf[i-1]) {
+		i--
+	}
+	return i
+}
+
+func isWordCharRune(r rune) bool {
+	return r == '_' || r == '$' || r == '.' || r == '"' ||
+		(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') ||
+		(r >= 'A' && r <= 'Z') || r >= 0x80
 }
 
 // scheduleCompletion arms the trailing completion tick while a debounced
@@ -537,7 +603,7 @@ func (m *lineModel) computeCompletion() {
 
 // requestCandidates asks the completer for candidates at the cursor,
 // preferring the non-blocking live path.
-func (m *lineModel) requestCandidates() ([][]rune, int, bool, bool) {
+func (m *lineModel) requestCandidates() ([]Cand, int, bool, bool) {
 	if m.t.comp == nil {
 		return nil, 0, false, false
 	}
@@ -570,11 +636,11 @@ func (m *lineModel) refreshCompletion() {
 		if replace {
 			start, _ := wordAt(m.ed.buf, m.ed.idx)
 			typed := m.ed.buf[start:m.ed.idx]
-			if c := cands[0]; len(c) > len(typed) {
-				m.ghost = c[len(typed):]
+			if c := cands[0].Text; len(c) > len(typed) {
+				m.ghost = []rune(c[len(typed):])
 			}
 		} else {
-			m.ghost = cands[0]
+			m.ghost = []rune(cands[0].Text)
 		}
 	}
 }
@@ -587,7 +653,8 @@ func (m *lineModel) openMenu() {
 		return
 	}
 	m.menu, m.menuLen, m.menuRep = cands, length, replace
-	m.menuSel, m.menuTop = -1, 0
+	// the first candidate starts selected, so Enter/Tab accept it directly
+	m.menuSel, m.menuTop = 0, 0
 }
 
 // closeMenu closes the candidate menu.
@@ -638,7 +705,7 @@ func (m *lineModel) acceptCandidate(i int) {
 		m.closeMenu()
 		return
 	}
-	cand := m.menu[i]
+	cand := []rune(m.menu[i].Text)
 	n := 0
 	if m.menuRep {
 		n = m.menuLen
@@ -651,7 +718,7 @@ func (m *lineModel) acceptCandidate(i int) {
 	m.ed.replaceBefore(n, cand)
 	m.closeMenu()
 	m.ghost = nil
-	m.afterEdit(false)
+	m.afterEdit(false, false)
 }
 
 // minBelowRows is the smallest candidate list that is worth opening below
@@ -762,7 +829,9 @@ func (m *lineModel) searchView() string {
 	return mark + m.query + markEnd + string(m.ed.buf)
 }
 
-// menuView renders the vertical candidate menu below the input line.
+// menuView renders the vertical candidate menu below the input line: the
+// visible window of candidates, each with its display kind right-aligned as
+// a dim badge, and a footer counting the candidates below the window.
 func (m *lineModel) menuView() string {
 	t := uitheme.Current()
 	h := m.menuMax
@@ -782,24 +851,49 @@ func (m *lineModel) menuView() string {
 		start, end2 := wordAt(m.ed.buf, m.ed.idx)
 		typed = m.ed.buf[start:end2]
 	}
-	var b strings.Builder
+	mark, dots := "▸ ", "… "
+	if uitheme.ConsoleEncoding() != nil {
+		// '▸'/'…' do not exist in GBK-family encodings and would be
+		// transcoded to '?', shifting the menu
+		mark, dots = "> ", "..."
+	}
+	// measure the window's rows once, so kind badges align
+	texts := make([]string, 0, h)
+	widths := make([]int, 0, h)
+	maxw := 0
 	for i := m.menuTop; i < end; i++ {
-		full := append(append([]rune(nil), typed...), m.menu[i]...)
+		full := append(append([]rune(nil), typed...), []rune(m.menu[i].Text)...)
 		text := string(full)
-		if i < 9 && m.menuMax >= 9 {
+		if i-m.menuTop < 9 && m.menuMax >= 9 {
 			text = strconv.Itoa(i+1) + " " + text
 		}
-		mark := "▸ "
-		if uitheme.ConsoleEncoding() != nil {
-			// '▸' does not exist in GBK-family encodings and would be
-			// transcoded to '?', shifting the menu
-			mark = "> "
+		w := runewidth.StringWidth(text)
+		if w > maxw {
+			maxw = w
 		}
+		texts = append(texts, text)
+		widths = append(widths, w)
+	}
+	badge := maxw <= badgeMaxWidth
+	var b strings.Builder
+	for k, i := 0, m.menuTop; i < end; k, i = k+1, i+1 {
+		row := texts[k] + strings.Repeat(" ", maxw-widths[k])
+		kind := m.menu[i].Kind
 		if i == m.menuSel {
-			b.WriteString(t.Selected.Render(mark + text))
+			b.WriteString(t.Selected.Render(mark + row))
+			if badge && kind != "" {
+				b.WriteString(t.Selected.Render("  " + kind))
+			}
 		} else {
-			b.WriteString("  " + text)
+			b.WriteString("  " + row)
+			if badge && kind != "" {
+				b.WriteString(t.Dim.Render("  " + kind))
+			}
 		}
+		b.WriteString("\n")
+	}
+	if more := len(m.menu) - end; more > 0 {
+		b.WriteString(t.Dim.Render("  " + dots + strconv.Itoa(more) + " more"))
 		b.WriteString("\n")
 	}
 	return b.String()

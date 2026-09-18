@@ -490,6 +490,16 @@ func NewMetadataWriter(ctx context.Context, u *dburl.URL, db DB, w io.Writer, op
 	return newMetadataWriter(db, w), nil
 }
 
+// driverSchemaKinds labels namespace candidates for databases that do not
+// call their namespaces "schemas".
+var driverSchemaKinds = map[string]string{
+	"oracle":   "user",
+	"godror":   "user",
+	"oboracle": "user",
+	"mysql":    "database",
+	"mymysql":  "database",
+}
+
 // NewCompleter creates a metadata completer for a driver and database
 // connection.
 func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadata.ReaderOption, opts ...completer.Option) rline.Completer {
@@ -505,14 +515,23 @@ func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadat
 	}
 	// prepend to allow to override default options
 	readerOpts = append([]metadata.ReaderOption{
-		// this needs to be relatively low, since autocomplete is very interactive
-		metadata.WithTimeout(3 * time.Second),
-		metadata.WithLimit(1000),
+		// the connect-time snapshot loads the whole catalog once (thousands
+		// of rows with expensive size computations on some engines); typing
+		// never blocks on it — DoLive is asynchronous and the snapshot +
+		// query cache serve every keystroke afterwards — so the budget can
+		// be generous instead of cutting the snapshot short
+		metadata.WithTimeout(10 * time.Second),
+		// completion serves catalogs with thousands of objects: the limit
+		// only guards runaway queries, it must not truncate the snapshot
+		metadata.WithLimit(100000),
 	}, readerOpts...)
 	opts = append([]completer.Option{
 		completer.WithReader(d.NewMetadataReader(db, readerOpts...)),
 		completer.WithDB(db),
 	}, opts...)
+	if kind, ok := driverSchemaKinds[u.Driver]; ok {
+		opts = append(opts, completer.WithSchemaKind(kind))
+	}
 	return completer.NewDefaultCompleter(opts...)
 }
 

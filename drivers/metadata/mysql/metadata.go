@@ -34,9 +34,10 @@ var (
 		readerOpts := []metadata.ReaderOption{
 			// this needs to be relatively low, since autocomplete is very
 			// interactive — but low enough timeouts break column completion
-			// on wire-compatible databases with slow catalogs (OceanBase
-			// MySQL tenants take ~8s for the columns query)
-			metadata.WithTimeout(10 * time.Second),
+			// on wire-compatible databases with slow catalogs: OceanBase
+			// MySQL tenants measure ~10.5s for a cold 200-column table's
+			// columns query (and ~8s for ordinary ones), so 10s timed out
+			metadata.WithTimeout(20 * time.Second),
 			// completion serves catalogs with thousands of objects
 			metadata.WithLimit(100000),
 		}

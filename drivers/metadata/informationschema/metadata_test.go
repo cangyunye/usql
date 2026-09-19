@@ -399,12 +399,27 @@ func TestFunctions(t *testing.T) {
 		}
 
 		names := []string{}
+		argTypes := []string{}
 		for result.Next() {
 			names = append(names, result.Get().Name)
+			argTypes = append(argTypes, result.Get().ArgTypes)
 		}
 		actual := strings.Join(names, ", ")
 		if actual != expected[dbName] {
 			t.Errorf("Wrong %s function names, expected:\n  %v\ngot:\n  %v", dbName, expected[dbName], names)
+		}
+		// argument signatures are aggregated from information_schema.parameters
+		// in the same call — the sakila schemas define parameterized stored
+		// functions, so at least one signature must be filled
+		anyArgs := false
+		for _, a := range argTypes {
+			if a != "" {
+				anyArgs = true
+				break
+			}
+		}
+		if !anyArgs {
+			t.Errorf("Wrong %s functions, no ArgTypes filled, got:\n  %v", dbName, argTypes)
 		}
 	}
 }

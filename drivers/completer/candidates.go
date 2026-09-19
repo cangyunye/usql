@@ -49,6 +49,111 @@ var verbFollows = map[string]string{
 	"DELETE": "FROM",
 }
 
+// builtinFunc is one built-in function completion: args is the signature
+// shown as dim detail; bare functions take no parentheses.
+type builtinFunc struct {
+	name string
+	args string
+	bare bool
+}
+
+// builtinFunctions is the dialect-neutral core offered in expression
+// positions. Stored routines come from the catalog cache; these cover the
+// everyday calls on engines whose catalogs enumerate only stored routines
+// (MySQL-family information_schema.routines), and on engines without a
+// routine catalog at all — at zero query cost.
+var builtinFunctions = []builtinFunc{
+	{name: "COUNT", args: "expr"},
+	{name: "SUM", args: "expr"},
+	{name: "AVG", args: "expr"},
+	{name: "MIN", args: "expr"},
+	{name: "MAX", args: "expr"},
+	{name: "COALESCE", args: "expr, .."},
+	{name: "NULLIF", args: "a, b"},
+	{name: "CAST", args: "expr AS type"},
+	{name: "EXTRACT", args: "field FROM source"},
+	{name: "CONCAT", args: "str, .."},
+	{name: "SUBSTRING", args: "str, pos, len"},
+	{name: "UPPER", args: "str"},
+	{name: "LOWER", args: "str"},
+	{name: "LENGTH", args: "str"},
+	{name: "TRIM", args: "str"},
+	{name: "REPLACE", args: "str, from, to"},
+	{name: "ABS", args: "x"},
+	{name: "ROUND", args: "x, d"},
+	{name: "FLOOR", args: "x"},
+	{name: "CEIL", args: "x"},
+	{name: "MOD", args: "a, b"},
+	{name: "POWER", args: "a, b"},
+	{name: "CURRENT_DATE", bare: true},
+	{name: "CURRENT_TIME", bare: true},
+	{name: "CURRENT_TIMESTAMP", bare: true},
+	{name: "CURRENT_USER", bare: true},
+	{name: "SESSION_USER", bare: true},
+}
+
+// functionCand renders a function completion: the opening paren is part of
+// the inserted text, and the signature — the argument types closing it,
+// plus the result type when known — rides as dim detail. A candidate with
+// an empty sig still inserts "name(".
+func functionCand(name, sig string) rline.Cand {
+	return rline.Cand{Text: name + "(", Kind: "function", Detail: sig}
+}
+
+// callSignature renders a cached function's dim detail from its argument
+// and result types ("x numeric, y text) → integer"); an argument-less
+// function closes its own paren ("now(" + ")").
+func callSignature(args, result string) string {
+	sig := ")"
+	if args != "" {
+		sig = args + ")"
+	}
+	if result != "" {
+		sig += " → " + result
+	}
+	return sig
+}
+
+// functionCands builds the function tier for expression positions: the
+// current schema's catalog functions (L2; absent until their load lands)
+// followed by the static built-ins, deduplicated by upper-cased name so a
+// catalog function shadows its built-in twin. Candidates insert "name("
+// and carry the signature as dim detail.
+func (c completer) functionCands() []rline.Cand {
+	seen := make(map[string]struct{}, 32)
+	out := make([]rline.Cand, 0, 32)
+	if cur, ok := c.currentSchema(); ok && cur != "" {
+		if objs, loaded := c.schemaObjects("", cur); loaded {
+			for _, o := range objs {
+				if o.kind != "function" {
+					continue
+				}
+				name := o.name
+				if i := strings.LastIndexByte(name, '.'); i >= 0 {
+					name = name[i+1:]
+				}
+				if _, dup := seen[strings.ToUpper(name)]; dup {
+					continue
+				}
+				seen[strings.ToUpper(name)] = struct{}{}
+				out = append(out, functionCand(name, o.detail))
+			}
+		}
+	}
+	for _, f := range builtinFunctions {
+		if _, dup := seen[f.name]; dup {
+			continue
+		}
+		seen[f.name] = struct{}{}
+		if f.bare {
+			out = append(out, rline.Cand{Text: f.name, Kind: "function"})
+			continue
+		}
+		out = append(out, functionCand(f.name, f.args+")"))
+	}
+	return out
+}
+
 // scopeRE matches statements that change the session's default scope: a
 // MySQL/OceanBase USE, a PostgreSQL search_path assignment, or an Oracle
 // CURRENT_SCHEMA change.
@@ -294,8 +399,16 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		return candsText(c.scopeColumns(ctx), "column"), len(ctx.Tables) > 0, false
 	case ctx.Clause == "VALUES" && ctx.ValuesParens:
 		// INSERT INTO ... VALUES (<cursor> — hint the fields in written
-		// order, so long column lists stay trackable while filling values
-		return candsText(c.valuesFieldHints(ctx), "column"), true, true
+		// order (name:type, so long column lists stay trackable while
+		// filling values); once a value is being typed, the matching
+		// function calls follow after the hints. The hints are ordered and
+		// exempt from prefix filtering, so the function tier is filtered
+		// here.
+		options := c.valuesFieldHints(ctx)
+		if ctx.CallName == "" && ctx.Object != "" {
+			options = append(options, completePrefixFull(ctx.Qualifier+ctx.Object, c.functionCands())...)
+		}
+		return options, true, true
 	case ctx.Clause == "INTO" && ctx.IntoListDone:
 		// INSERT INTO film (a, b) <cursor> — what may follow the column group
 		return rline.Cands("VALUES", "SELECT", "TABLE", "OVERRIDING"), true, false
@@ -331,6 +444,13 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		return cands, true, false
 	case columnClauses[ctx.Clause]:
 		options := candsText(c.scopeColumns(ctx), "column")
+		// the function tier joins the columns once a word is being typed —
+		// an empty word keeps the menu to the columns and clause keywords —
+		// and stands down inside a call's argument list (ctx.CallName),
+		// where nested calls are typed, not picked
+		if ctx.CallName == "" && ctx.Object != "" {
+			options = append(options, c.functionCands()...)
+		}
 		options = append(options, CompleteFromList(nil, clauseKeywords[ctx.Clause]...)...)
 		return options, true, false
 	case ctx.Clause == "" && verbFollows[ctx.First] != "":
@@ -354,7 +474,7 @@ func candsText(words []string, kind string) []rline.Cand {
 func candsObjs(objs []obj) []rline.Cand {
 	out := make([]rline.Cand, 0, len(objs))
 	for _, o := range objs {
-		out = append(out, rline.Cand{Text: o.name, Kind: o.kind})
+		out = append(out, rline.Cand{Text: o.name, Kind: o.kind, Detail: o.detail})
 	}
 	return out
 }
@@ -377,19 +497,42 @@ func selectableObjs(objs []obj, relationsOnly bool) []obj {
 }
 
 // valuesFieldHints hints the fields of an INSERT ... VALUES group in
-// written order, starting at the value currently being filled. The column
-// order comes from the written "(a, b, c)" list, or from the table's
-// metadata when no explicit list was given.
-func (c completer) valuesFieldHints(ctx Context) []string {
-	cols := ctx.IntoColumns
-	if len(cols) == 0 && len(ctx.Tables) > 0 {
-		cols = c.tableColumns(ctx.Tables[len(ctx.Tables)-1])
+// written order, starting at the value currently being filled. Each hint
+// shows the column name with its data type as dim detail — "city_id" plus
+// ":number(10)". The column order comes from the written "(a, b, c)" list,
+// resolved against the target table's metadata for the types, or from the
+// table's metadata directly when no explicit list was given.
+func (c completer) valuesFieldHints(ctx Context) []rline.Cand {
+	var cols []obj
+	if len(ctx.IntoColumns) > 0 {
+		cols = make([]obj, 0, len(ctx.IntoColumns))
+		var types map[string]string
+		if len(ctx.Tables) > 0 {
+			types = make(map[string]string)
+			for _, o := range c.tableColumnObjs(ctx.Tables[len(ctx.Tables)-1]) {
+				types[strings.ToUpper(o.name)] = o.detail
+			}
+		}
+		for _, name := range ctx.IntoColumns {
+			cols = append(cols, obj{name: name, detail: types[strings.ToUpper(name)]})
+		}
+	} else if len(ctx.Tables) > 0 {
+		cols = c.tableColumnObjs(ctx.Tables[len(ctx.Tables)-1])
 	}
 	if ctx.ValuesCount >= len(cols) {
 		// more values than columns: nothing left to hint
 		return nil
 	}
-	return cols[ctx.ValuesCount:]
+	cols = cols[ctx.ValuesCount:]
+	out := make([]rline.Cand, 0, len(cols))
+	for _, o := range cols {
+		d := ""
+		if o.detail != "" {
+			d = ":" + o.detail
+		}
+		out = append(out, rline.Cand{Text: o.name, Detail: d, Kind: "column"})
+	}
+	return out
 }
 
 // qualifiedOptions completes a dotted word. In a table position the
@@ -470,26 +613,30 @@ func (c completer) scopeColumns(ctx Context) []string {
 	return options
 }
 
-// tableColumns returns the columns of a table reference from the L3 cache,
-// in metadata (ordinal) order; a miss starts the asynchronous load and
-// returns nothing this round. Without a cache installed the reader is
-// queried directly.
+// tableColumns returns the columns of a table reference, bare names, in
+// metadata (ordinal) order.
 func (c completer) tableColumns(ref TableRef) []string {
-	if ref.Name == "" {
-		return nil
-	}
-	if c.cache == nil {
-		return c.queryColumns(ref)
-	}
-	objs, ok := c.columns(ref)
-	if !ok {
-		return nil
-	}
+	objs := c.tableColumnObjs(ref)
 	names := make([]string, 0, len(objs))
 	for _, o := range objs {
 		names = append(names, o.name)
 	}
 	return names
+}
+
+// tableColumnObjs returns the columns of a table reference as cached
+// objects — name plus data-type detail — in metadata (ordinal) order. A
+// cache miss starts the asynchronous load and returns nothing this round.
+// Without a cache installed the reader is queried directly.
+func (c completer) tableColumnObjs(ref TableRef) []obj {
+	if ref.Name == "" {
+		return nil
+	}
+	if c.cache == nil {
+		return c.queryColumnObjs(ref)
+	}
+	objs, _ := c.columns(ref)
+	return objs
 }
 
 // --- cached catalog access (the three levels) ---
@@ -615,7 +762,11 @@ func (c completer) loadSchemaObjects(catalog, schema string) ([]obj, error) {
 		} else {
 			for set.Next() {
 				f := set.Get()
-				out = append(out, obj{name: fullIdentifier(f.Catalog, f.Schema, f.Name), kind: "function"})
+				out = append(out, obj{
+					name:   fullIdentifier(f.Catalog, f.Schema, f.Name),
+					kind:   "function",
+					detail: callSignature(f.ArgTypes, f.ResultType),
+				})
 			}
 			set.Close()
 		}
@@ -659,14 +810,15 @@ func (c completer) loadColumns(ref TableRef) ([]obj, error) {
 	defer set.Close()
 	var out []obj
 	for set.Next() {
-		out = append(out, obj{name: set.Get().Name, kind: "column"})
+		col := set.Get()
+		out = append(out, obj{name: col.Name, kind: "column", detail: col.DataType})
 	}
 	return out, nil
 }
 
-// queryColumns queries the reader directly — the fallback when no cache is
-// installed.
-func (c completer) queryColumns(ref TableRef) []string {
+// queryColumnObjs queries the reader directly — the fallback when no cache
+// is installed.
+func (c completer) queryColumnObjs(ref TableRef) []obj {
 	r, ok := c.reader.(metadata.ColumnReader)
 	if !ok {
 		return nil
@@ -683,9 +835,10 @@ func (c completer) queryColumns(ref TableRef) []string {
 		return nil
 	}
 	defer set.Close()
-	var cols []string
+	var out []obj
 	for set.Next() {
-		cols = append(cols, set.Get().Name)
+		col := set.Get()
+		out = append(out, obj{name: col.Name, kind: "column", detail: col.DataType})
 	}
-	return cols
+	return out
 }

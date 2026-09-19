@@ -6,6 +6,7 @@ package informationschema
 import (
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/xo/usql/drivers"
@@ -442,10 +443,59 @@ func (s InformationSchema) Functions(f metadata.Filter) (*metadata.FunctionSet, 
 	if rows.Err() != nil {
 		return nil, rows.Err()
 	}
+	if len(results) > 0 {
+		s.fillArgTypes(f, results)
+	}
 	return metadata.NewFunctionSet(results), nil
 }
 
-// FunctionColumns (arguments) from selected catalog (or all, if empty), matching schemas and functions
+// fillArgTypes enriches functions with their argument signatures from
+// information_schema.parameters, aggregated in one query for the whole
+// filter. Failure is not fatal: signatures are display sugar, so a missing
+// or empty parameters table only leaves them blank.
+func (s InformationSchema) fillArgTypes(f metadata.Filter, results []metadata.Function) {
+	cols, err := s.FunctionColumns(metadata.Filter{
+		Catalog:    f.Catalog,
+		Schema:     f.Schema,
+		WithSystem: f.WithSystem,
+	})
+	if err != nil {
+		return
+	}
+	defer cols.Close()
+
+	type arg struct {
+		pos  int
+		text string
+	}
+	args := map[string][]arg{}
+	for cols.Next() {
+		c := cols.Get()
+		if c.OrdinalPosition == 0 {
+			continue // result parameter
+		}
+		a := c.DataType
+		if c.Name != "" {
+			a = c.Name + " " + a
+		}
+		if c.Type != "" && c.Type != "IN" {
+			a = c.Type + " " + a
+		}
+		args[c.FunctionName] = append(args[c.FunctionName], arg{c.OrdinalPosition, a})
+	}
+	for i := range results {
+		list := args[results[i].SpecificName]
+		if len(list) == 0 {
+			continue
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].pos < list[j].pos })
+		parts := make([]string, 0, len(list))
+		for _, a := range list {
+			parts = append(parts, a.text)
+		}
+		results[i].ArgTypes = strings.Join(parts, ", ")
+	}
+}
 func (s InformationSchema) FunctionColumns(f metadata.Filter) (*metadata.FunctionColumnSet, error) {
 	if !s.hasFunctions {
 		return nil, text.ErrNotSupported

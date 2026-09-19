@@ -7,6 +7,11 @@ package rline
 type Cand struct {
 	Text string
 	Kind string // display class: "table", "view", "schema", "user", ... ("" for keywords)
+	// Detail is optional display-only info rendered dim after the candidate
+	// in the TUI menu — a function's argument signature, a column's data
+	// type. It is never inserted, and the classic readline engine ignores
+	// it.
+	Detail string
 }
 
 // Cands wraps plain candidate strings as untyped candidates.

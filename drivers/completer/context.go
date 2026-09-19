@@ -34,6 +34,12 @@ type Context struct {
 	// cursor is '(' — e.g. the column list of INSERT INTO, or function
 	// arguments.
 	AfterParen bool
+	// CallName is the identifier immediately before the innermost unclosed
+	// '(' — the call whose argument list the cursor is typing, "lower" in
+	// "SELECT lower(<cursor>" or "SELECT lower(x, <cursor>". Parenthesized
+	// subqueries and IN/EXISTS/VALUES lists have none: their preceding
+	// token is a keyword, and an inner call's ')' pops it first.
+	CallName string
 	// OpenParens is the number of '(' before the cursor word that are not
 	// yet closed — the cursor is inside a column list, function call or
 	// subquery.
@@ -93,6 +99,7 @@ func parseContext(line []rune, start int) Context {
 	ctx.Qualifier, ctx.Object = splitWord(word)
 	ctx.AfterParen = afterOpenParen(line, start)
 	ctx.OpenParens = openParens(tokens)
+	ctx.CallName = callName(tokens)
 	// the statement's first word token is its verb
 	for _, t := range tokens {
 		if t.kind == tokIdent {
@@ -144,8 +151,14 @@ func scanClauses(tokens []token) Context {
 			case tokLparen:
 				valuesDepth++
 			case tokRparen:
-				valuesDepth = 0
-				ctx.ValuesParens = false
+				// only the ')' matching the VALUES group's own '(' ends the
+				// group; a nested call's paren (e.g. now(), inside the
+				// values) merely closes itself
+				valuesDepth--
+				if valuesDepth <= 0 {
+					valuesDepth = 0
+					ctx.ValuesParens = false
+				}
 			case tokComma:
 				if valuesDepth == 1 {
 					ctx.ValuesCount++
@@ -258,6 +271,32 @@ func openParens(tokens []token) int {
 		}
 	}
 	return depth
+}
+
+// callName returns the identifier immediately before the innermost unclosed
+// '(' — the call whose arguments the cursor is typing. It is best-effort by
+// construction: any identifier that is not a reserved word qualifies, so
+// "INSERT INTO film (" reports "film"; the expression branches are the only
+// consumers, and there a preceding identifier genuinely is a call.
+func callName(tokens []token) string {
+	stack := make([]int, 0, 8)
+	for i, t := range tokens {
+		switch t.kind {
+		case tokLparen:
+			stack = append(stack, i)
+		case tokRparen:
+			if n := len(stack); n > 0 {
+				stack = stack[:n-1]
+			}
+		}
+	}
+	if n := len(stack); n > 0 {
+		i := stack[n-1]
+		if i > 0 && tokens[i-1].kind == tokIdent && !reservedWords[strings.ToUpper(tokens[i-1].text)] {
+			return tokens[i-1].text
+		}
+	}
+	return ""
 }
 
 // splitWord splits a possibly qualified identifier into its dotted qualifier

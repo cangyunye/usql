@@ -616,7 +616,7 @@ func CompleteFromListCands(text []rune, options []rline.Cand) []rline.Cand {
 		if isLower {
 			match = strings.ToLower(match)
 		}
-		result = append(result, rline.Cand{Text: match, Kind: o.Kind})
+		result = append(result, rline.Cand{Text: match, Kind: o.Kind, Detail: o.Detail})
 	}
 	return result
 }

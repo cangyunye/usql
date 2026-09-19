@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/xo/usql/drivers/metadata"
+	"github.com/xo/usql/rline"
 )
 
 // candMockReader serves a small fixed catalog:
@@ -36,16 +37,16 @@ var candTables = []metadata.Table{
 }
 
 var candColumns = []metadata.Column{
-	{Schema: "public", Table: "film", Name: "id", OrdinalPosition: 1},
-	{Schema: "public", Table: "film", Name: "name", OrdinalPosition: 2},
-	{Schema: "public", Table: "actor", Name: "id", OrdinalPosition: 1},
-	{Schema: "public", Table: "actor", Name: "film_id", OrdinalPosition: 2},
-	{Schema: "public", Table: "film_view", Name: "id", OrdinalPosition: 1},
-	{Schema: "public", Table: "film_view", Name: "title", OrdinalPosition: 2},
+	{Schema: "public", Table: "film", Name: "id", OrdinalPosition: 1, DataType: "integer"},
+	{Schema: "public", Table: "film", Name: "name", OrdinalPosition: 2, DataType: "text"},
+	{Schema: "public", Table: "actor", Name: "id", OrdinalPosition: 1, DataType: "integer"},
+	{Schema: "public", Table: "actor", Name: "film_id", OrdinalPosition: 2, DataType: "integer"},
+	{Schema: "public", Table: "film_view", Name: "id", OrdinalPosition: 1, DataType: "integer"},
+	{Schema: "public", Table: "film_view", Name: "title", OrdinalPosition: 2, DataType: "text"},
 }
 
 var candFunctions = []metadata.Function{
-	{Schema: "public", Name: "now"},
+	{Schema: "public", Name: "now", ArgTypes: "x integer", ResultType: "timestamp"},
 }
 
 var candSequences = []metadata.Sequence{
@@ -522,4 +523,141 @@ func TestReconstructLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFunctionCompletion checks the function tier in expression positions:
+// catalog functions (bare names, catalog signature) and static built-ins
+// insert "name(" and carry the signature as dim detail.
+func TestFunctionCompletion(t *testing.T) {
+	c := contextTestCompleter(t)
+	line := "SELECT * FROM film WHERE no"
+	c.DoRepl([]rune(line), len(line)) // arm the lazy loads
+	settleCompleter(t, c)
+	settleColumns(t, c, TableRef{Name: "film"})
+	got, length, ok := c.DoRepl([]rune(line), len(line))
+	if !ok || length != 2 {
+		t.Fatalf("DoRepl(%q) = ok %v, length %d; want ok, 2", line, ok, length)
+	}
+	// the NOT keyword matches the prefix too, and ranks first by length
+	if len(got) != 2 || got[0].Text != "not" || got[1].Text != "now(" ||
+		got[1].Kind != "function" || got[1].Detail != "x integer) → timestamp" {
+		t.Fatalf("DoRepl(%q) = %+v, want [not now( function \"x integer) → timestamp\"]", line, got)
+	}
+
+	// built-ins: a one-letter prefix keeps the menu small, ranked
+	// shortest-first, all lower-cased after the lower-case pattern
+	line = "SELECT * FROM film WHERE s"
+	got, _, _ = c.DoRepl([]rune(line), len(line))
+	want := []string{"sum(", "substring(", "session_user"}
+	if len(got) != len(want) {
+		t.Fatalf("DoRepl(%q) = %q, want %q", line, candTexts(got), want)
+	}
+	for i, w := range want {
+		if got[i].Text != w || got[i].Kind != "function" {
+			t.Errorf("got[%d] = %q (%q), want %q (function)", i, got[i].Text, got[i].Kind, w)
+		}
+	}
+	if got[0].Detail != "expr)" {
+		t.Errorf("sum detail = %q, want %q", got[0].Detail, "expr)")
+	}
+}
+
+// TestFunctionCompletionPlacement pins where functions do NOT appear: the
+// INSERT INTO column list, a call's argument list, and empty-word positions.
+func TestFunctionCompletionPlacement(t *testing.T) {
+	c := contextTestCompleter(t)
+	arm := func(line string) {
+		c.DoRepl([]rune(line), len(line))
+		settleCompleter(t, c)
+		settleColumns(t, c, TableRef{Name: "film"})
+	}
+
+	// the INSERT INTO column list takes plain columns only — matching
+	// nothing here declines outright
+	line := "INSERT INTO film (co"
+	arm(line)
+	if got, _, ok := c.DoRepl([]rune(line), len(line)); ok && len(got) > 0 {
+		t.Fatalf("DoRepl(%q) = %q, want nothing", line, candTexts(got))
+	}
+
+	// inside a call's argument list (ctx.CallName) functions stand down,
+	// columns still complete
+	line = "SELECT * FROM film WHERE lower(x, na"
+	arm(line)
+	got, _, ok := c.DoRepl([]rune(line), len(line))
+	if !ok || len(got) != 1 || got[0].Text != "name" {
+		t.Fatalf("DoRepl(%q) = %q (ok %v), want [name]", line, candTexts(got), ok)
+	}
+
+	// an empty word keeps the menu to columns and clause keywords
+	line = "SELECT * FROM film WHERE "
+	arm(line)
+	got, _, _ = c.DoRepl([]rune(line), len(line))
+	for _, cand := range got {
+		if cand.Kind == "function" {
+			t.Fatalf("DoRepl(%q) offered function %q at an empty word", line, cand.Text)
+		}
+	}
+}
+
+// TestValuesFieldHintsTypes checks the VALUES position's ordered hints: each
+// shows the column with its data type as dim detail, taken from the written
+// column list or the table's metadata order — and a nested call's ')' no
+// longer ends the values group, so hints survive now() values.
+func TestValuesFieldHintsTypes(t *testing.T) {
+	c := contextTestCompleter(t)
+	arm := func(line string) {
+		c.DoRepl([]rune(line), len(line))
+		settleCompleter(t, c)
+		settleColumns(t, c, TableRef{Name: "film"})
+	}
+	type hint struct{ text, detail string }
+	check := func(line string, want []hint) {
+		t.Helper()
+		got, _, ok := c.DoRepl([]rune(line), len(line))
+		if !ok {
+			t.Fatalf("DoRepl(%q) declined", line)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("DoRepl(%q) = %+v, want %d hints", line, got, len(want))
+		}
+		for i, w := range want {
+			if got[i].Text != w.text || got[i].Detail != w.detail || got[i].Kind != "column" {
+				t.Errorf("got[%d] = %q/%q (%q), want %q/%q (column)",
+					i, got[i].Text, got[i].Detail, got[i].Kind, w.text, w.detail)
+			}
+		}
+	}
+
+	arm("INSERT INTO film (id, name) VALUES (")
+	check("INSERT INTO film (id, name) VALUES (",
+		[]hint{{"id", ":integer"}, {"name", ":text"}})
+
+	// without a written list, the table's metadata order
+	arm("INSERT INTO film VALUES (")
+	check("INSERT INTO film VALUES (",
+		[]hint{{"id", ":integer"}, {"name", ":text"}})
+
+	// a now() value no longer closes the values group
+	line := "INSERT INTO film (id, name) VALUES (now(), "
+	arm(line)
+	check(line, []hint{{"name", ":text"}})
+
+	// typing a value offers the matching function calls after the hints
+	line = "INSERT INTO film (id, name) VALUES (100, no"
+	arm(line)
+	got, _, ok := c.DoRepl([]rune(line), len(line))
+	if !ok || len(got) != 2 || got[0].Text != "name" || got[0].Detail != ":text" ||
+		got[1].Text != "now(" || got[1].Kind != "function" {
+		t.Fatalf("DoRepl(%q) = %+v (ok %v), want [name/:text now(]", line, got, ok)
+	}
+}
+
+// candTexts extracts candidates' text.
+func candTexts(cands []rline.Cand) []string {
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.Text)
+	}
+	return out
 }

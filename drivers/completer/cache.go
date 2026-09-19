@@ -9,11 +9,13 @@ import (
 	"time"
 )
 
-// obj is one cached completion candidate: an object name and its display
-// kind ("table", "view", "sequence", "column", ...).
+// obj is one cached completion candidate: an object name, its display
+// kind ("table", "view", "sequence", "column", ...) and optional display
+// detail — a function's argument signature, a column's data type.
 type obj struct {
-	name string
-	kind string
+	name   string
+	kind   string
+	detail string
 }
 
 // bucket is a cache level, in dependency order: L1 schemas visible to the
@@ -158,7 +160,7 @@ func (c *catalogCache) store(full string, objs []obj) {
 	}
 	size := int64(64)
 	for _, o := range objs {
-		size += int64(len(o.name) + len(o.kind) + 16)
+		size += int64(len(o.name) + len(o.kind) + len(o.detail) + 16)
 	}
 	e := &catalogEntry{key: full, objs: objs, at: c.now(), size: size}
 	e.el = c.order.PushFront(e)

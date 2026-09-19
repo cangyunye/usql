@@ -194,6 +194,66 @@ func TestParseContext(t *testing.T) {
 	}
 }
 
+// TestParseContextCallName checks the call-name detection that guards the
+// function tier: the identifier before the innermost unclosed '(' wins,
+// keyword-led parens (IN, VALUES) report none, and a closed argument list
+// clears it.
+func TestParseContextCallName(t *testing.T) {
+	cases := []struct {
+		name  string
+		line  string
+		start int
+		want  string
+	}{
+		{"in a call", "SELECT lower(", 13, "lower"},
+		{"in a call, mid-args", "SELECT lower(x, ", 16, "lower"},
+		{"innermost call wins", "SELECT COALESCE(x, UPPER(", 25, "UPPER"},
+		{"call closed", "SELECT lower(x) ", 16, ""},
+		{"in a subquery", "SELECT * FROM (SELECT count(", 28, "count"},
+		{"in an IN list", "SELECT * FROM film WHERE id IN (", 32, ""},
+		{"in a values group", "INSERT INTO film VALUES (", 25, ""},
+		{"best effort after table", "INSERT INTO film (", 18, "film"},
+		{"no parens", "SELECT * FROM film WHERE ", 25, ""},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := parseContext([]rune(test.line), test.start)
+			if ctx.CallName != test.want {
+				t.Errorf("CallName = %q, want %q", ctx.CallName, test.want)
+			}
+		})
+	}
+}
+
+// TestParseContextValuesParens checks that only the VALUES group's own ')'
+// ends the group: a nested call's paren (now(), inside the values) closes
+// itself, so hints and the value count survive function-call values.
+func TestParseContextValuesParens(t *testing.T) {
+	cases := []struct {
+		name          string
+		line          string
+		start         int
+		wantParens    bool
+		wantValsCount int
+	}{
+		{"open group", "INSERT INTO film VALUES (", 25, true, 0},
+		{"after first value", "INSERT INTO film VALUES (1, ", 28, true, 1},
+		{"nested call value", "INSERT INTO film VALUES (now(), ", 32, true, 1},
+		{"group closed", "INSERT INTO film VALUES (1, 2) ", 31, false, 0},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := parseContext([]rune(test.line), test.start)
+			if ctx.ValuesParens != test.wantParens {
+				t.Errorf("ValuesParens = %v, want %v", ctx.ValuesParens, test.wantParens)
+			}
+			if ctx.ValuesCount != test.wantValsCount {
+				t.Errorf("ValuesCount = %d, want %d", ctx.ValuesCount, test.wantValsCount)
+			}
+		})
+	}
+}
+
 // TestParseContextParensAndTableListed covers the fields the candidate
 // generators branch on: OpenParens distinguishes INSERT INTO column lists,
 // and TableListed distinguishes INSERT INTO film <cursor> (decline) from

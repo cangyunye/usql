@@ -47,6 +47,23 @@ const unknownRowMenuMax = 4
 // dropped instead of wrapping the menu row.
 const badgeMaxWidth = 60
 
+// detailMaxWidth caps a candidate's dim detail (a function signature, a
+// column's data type); longer details are truncated.
+const detailMaxWidth = 36
+
+// truncateDetail caps s to n runes, marking a cut with two ASCII dots ('…'
+// does not survive the GBK-family transcode, like '▸' above).
+func truncateDetail(s string, n int) string {
+	rs := []rune(s)
+	if len(rs) <= n {
+		return s
+	}
+	if n < 2 {
+		n = 2
+	}
+	return string(rs[:n-2]) + ".."
+}
+
 // kickMsg is delivered when an asynchronous completion result lands.
 type kickMsg struct{}
 
@@ -1001,6 +1018,7 @@ func (m *lineModel) menuView() string {
 	// measure the window's rows once, so kind badges align
 	texts := make([]string, 0, h)
 	widths := make([]int, 0, h)
+	details := make([]string, 0, h)
 	maxw := 0
 	for i := m.menuTop; i < end; i++ {
 		full := append(append([]rune(nil), typed...), []rune(m.menu[i].Text)...)
@@ -1014,7 +1032,11 @@ func (m *lineModel) menuView() string {
 		}
 		texts = append(texts, text)
 		widths = append(widths, w)
+		details = append(details, truncateDetail(m.menu[i].Detail, detailMaxWidth))
 	}
+	// badges and details share one width gate: when the widest text row
+	// alone is too wide, both stay off so the menu never pushes past the
+	// terminal's right edge
 	badge := maxw <= badgeMaxWidth
 	var b strings.Builder
 	for k, i := 0, m.menuTop; k < h; k, i = k+1, i+1 {
@@ -1025,14 +1047,21 @@ func (m *lineModel) menuView() string {
 		if i < end {
 			row := texts[k] + strings.Repeat(" ", maxw-widths[k])
 			kind := m.menu[i].Kind
+			detail := details[k]
 			if i == m.menuSel {
 				b.WriteString(t.Selected.Render(mark + row))
-				if badge && kind != "" {
+				switch {
+				case badge && detail != "":
+					b.WriteString(t.Selected.Render(detail))
+				case badge && kind != "":
 					b.WriteString(t.Selected.Render("  " + kind))
 				}
 			} else {
 				b.WriteString("  " + row)
-				if badge && kind != "" {
+				switch {
+				case badge && detail != "":
+					b.WriteString(t.Dim.Render(detail))
+				case badge && kind != "":
 					b.WriteString(t.Dim.Render("  " + kind))
 				}
 			}

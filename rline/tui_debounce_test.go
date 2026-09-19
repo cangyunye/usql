@@ -123,6 +123,39 @@ func TestMenuViewKindsAndFooter(t *testing.T) {
 	}
 }
 
+// TestMenuViewDetails: candidate details render dim after the text — a
+// function's signature, a column's data type — take precedence over the
+// kind badge, and are truncated when too long.
+func TestMenuViewDetails(t *testing.T) {
+	tr := newTUI(nil, nil, nil, "", nil)
+	tr.Completer(&stubCompleter{cands: []string{"x"}})
+	m := newLineModel(tr, "> ", -1)
+	m = typeLine(m, "film")
+	m.menuRep = true
+	long := strings.Repeat("x", 60) + ")"
+	m.menu = []Cand{
+		{Text: "city_id", Detail: ":number(10)", Kind: "column"},
+		{Text: "count(", Detail: "expr)", Kind: "function"},
+		{Text: "now(", Detail: long, Kind: "function"},
+		{Text: "public.film", Kind: "table"},
+	}
+	m.menuSel, m.menuTop, m.menuMax = -1, 0, menuHeight
+	out := stripANSI(m.menuView())
+	if !strings.Contains(out, "city_id") || !strings.Contains(out, ":number(10)") {
+		t.Errorf("menu missing the field:type hint:\n%s", out)
+	}
+	if !strings.Contains(out, "count(") || !strings.Contains(out, "expr)") {
+		t.Errorf("menu missing the function signature:\n%s", out)
+	}
+	if strings.Contains(out, long) {
+		t.Errorf("overlong detail not truncated:\n%s", out)
+	}
+	// the no-detail row still shows its kind badge
+	if !strings.Contains(out, "table") {
+		t.Errorf("menu missing table badge on a no-detail row:\n%s", out)
+	}
+}
+
 // stripANSI removes SGR sequences for plain-text assertions.
 func stripANSI(s string) string {
 	var b strings.Builder

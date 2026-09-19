@@ -465,7 +465,11 @@ func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]strin
 		baseParam++
 	}
 
-	if !filter.WithSystem && formats.notSchemas != "" {
+	// OnlyVisible pins owner to the session's current schema, which may
+	// itself be a system schema (e.g. the SYS login user on OceanBase
+	// Oracle tenants) — the system-schema exclusion would then cancel the
+	// whole query, so it only applies when visibility isn't already pinned.
+	if !filter.WithSystem && formats.notSchemas != "" && !filter.OnlyVisible {
 		conds = append(conds, fmt.Sprintf(formats.notSchemas, r.systemSchemas))
 	}
 	if filter.OnlyVisible && formats.schema != "" {

@@ -1,15 +1,18 @@
 package completer
 
 import (
+	"errors"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/xo/usql/drivers/metadata"
 	"github.com/xo/usql/rline"
+	"github.com/xo/usql/text"
 )
 
 // updatableTypes are the table types offered in INSERT INTO and UPDATE
-// positions, mirroring completeWithUpdatables.
+// positions.
 var updatableTypes = []string{"TABLE", "BASE TABLE", "LOCAL TEMPORARY", "GLOBAL TEMPORARY", "VIEW"}
 
 // selectableTypes are the relation types offered in FROM/JOIN positions:
@@ -37,6 +40,15 @@ var clauseKeywords = map[string][]string{
 	"HAVING": booleanKeywords,
 }
 
+// verbFollows are the keywords that must follow a statement verb when no
+// clause has been recognized yet: "INSERT <cursor>" takes INTO, "DELETE
+// <cursor>" takes FROM. The context engine offers exactly that keyword and
+// nothing else — no query.
+var verbFollows = map[string]string{
+	"INSERT": "INTO",
+	"DELETE": "FROM",
+}
+
 // scopeRE matches statements that change the session's default scope: a
 // MySQL/OceanBase USE, a PostgreSQL search_path assignment, or an Oracle
 // CURRENT_SCHEMA change.
@@ -48,76 +60,148 @@ func ScopeChanged(sqlstr string) bool {
 	return scopeRE.MatchString(sqlstr)
 }
 
-// Invalidate drops all cached completion metadata and schedules a snapshot
-// reload. The installed completer (as wrapped by NewLive) satisfies
-// interface{ Invalidate() }; the handler calls it after statements that
-// change the session scope.
+// Invalidate drops all cached completion metadata. The installed completer
+// (as wrapped by NewLive) satisfies interface{ Invalidate() }; the handler
+// calls it after statements that change the session scope, and \refresh
+// calls it directly.
 func (c *completer) Invalidate() {
 	if c.cache != nil {
-		c.cache.clear()
+		c.cache.Invalidate()
 	}
-	if c.snap != nil {
-		c.snap.Invalidate()
+	if c.caps != nil {
+		c.caps.forget()
 	}
 }
 
-// snapState reports the catalog snapshot's version and readiness, so the
-// live wrapper can stamp its caches and drop pre-snapshot results when the
-// snapshot supersedes them.
-func (c completer) snapState() (int64, bool) {
-	if c.snap == nil {
-		return 0, false
-	}
-	return c.snap.state()
+// catalogCaps remembers, per catalog kind ("tables", "functions",
+// "sequences", ...), that the connected database does not serve it. Engines
+// differ — MySQL has no sequences, others lack functions — so one
+// ErrNotSupported retires the kind for the whole session: its queries are
+// never re-issued (no per-keystroke error storms) and not logged as errors.
+type catalogCaps struct {
+	mu          sync.Mutex
+	unsupported map[string]bool
+	logged      map[string]bool
 }
 
-// WithContextCompletion returns an Option that tries context-aware candidate
-// generation — clause scanning, alias resolution and fuzzy ranking — before
-// the tail-matching heuristics run. Whenever the statement context does not
-// determine a candidate set, completion falls through to the heuristics, so
-// existing completions (backslash commands, variables, INSERT INTO ...
-// VALUES, ...) are unaffected.
-//
-// The context path is also what makes typing-time completion cheap: its
-// candidate options depend only on the clause context (never on the typed
-// word), so the live wrapper memoizes the option set once per statement
-// context and re-filters it client-side as the word grows.
-//
-// Any beforeComplete hook set by an earlier option (e.g. a driver's own
-// completion, as in drivers/metadata/mysql) is preserved and tried after
-// this one, so drivers' NewCompleter implementations compose by prepending
-// their options before the caller's.
+func newCatalogCaps() *catalogCaps {
+	return &catalogCaps{
+		unsupported: map[string]bool{},
+		logged:      map[string]bool{},
+	}
+}
+
+// skip reports whether the kind is known to be unsupported.
+func (cc *catalogCaps) skip(kind string) bool {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	return cc.unsupported[kind]
+}
+
+// failed records a load error for the kind: ErrNotSupported retires it for
+// the session; anything else keeps the kind enabled and is logged once —
+// loaders retry on later requests, so an unthrottled log would repeat per
+// keystroke.
+func (cc *catalogCaps) failed(kind string, err error, log logger) {
+	cc.mu.Lock()
+	if errors.Is(err, text.ErrNotSupported) {
+		cc.unsupported[kind] = true
+		cc.mu.Unlock()
+		return
+	}
+	first := !cc.logged[kind]
+	cc.logged[kind] = true
+	cc.mu.Unlock()
+	if first && log != nil {
+		log.Println("completion:", kind, "load failed:", err)
+	}
+}
+
+// forget drops the retirement marks, so a scope change or manual refresh
+// re-probes every kind.
+func (cc *catalogCaps) forget() {
+	cc.mu.Lock()
+	cc.unsupported = map[string]bool{}
+	cc.logged = map[string]bool{}
+	cc.mu.Unlock()
+}
+
+// WithContextCompletion returns an Option that installs the lazy catalog
+// cache behind the context engine. The cache has three levels — the
+// schemas visible to the login (L1), a named schema's objects (L2) and a
+// table's columns (L3) — all loaded on demand and asynchronously: connecting
+// issues no metadata queries, and typing never blocks on the database. When
+// a load lands, the cache's kick re-renders the pending completion.
 func WithContextCompletion() Option {
 	return func(c *completer) {
-		// cache metadata queries, so typing-time completion stays responsive
-		// even when the catalog is slow (e.g. OceanBase), and snapshot the
-		// visible objects once per connection: keystroke-time queries for
-		// tables/functions/sequences/schemas filter the snapshot in memory
 		if c.reader != nil {
-			c.cache = NewCachedReader(c.reader).(*cachedReader)
-			c.snap = NewSnapshotReader(c.cache)
-			c.reader = c.snap
-		}
-		prev := c.beforeComplete
-		c.beforeComplete = func(previousWords []string, text []rune) []rline.Cand {
-			if result := c.completeWithContext(previousWords, text); result != nil {
-				return result
-			}
-			if prev != nil {
-				return prev(previousWords, text)
-			}
-			return nil
+			c.cache = newCatalogCache()
+			c.caps = newCatalogCaps()
 		}
 	}
 }
 
-// completeWithContext is the beforeComplete-shaped entry point: it rebuilds
-// the line up to the cursor from the previous words, parses the clause
-// context, and generates candidates from it. It returns nil when the context
-// is inconclusive.
+// SetKick wires the cache's re-render hook (used by the live wrapper).
+func (c *completer) SetKick(f func()) {
+	if c.cache != nil {
+		c.cache.SetKick(f)
+	}
+}
+
+// completeWithContext is the context engine's entry point: it rebuilds the
+// line up to the cursor from the previous words, parses the clause context,
+// and generates candidates from it. It returns nil when the context is
+// inconclusive (the caller falls through to the driver hook and the keyword
+// fallback) or when the cursor sits in a string or comment — nothing is
+// completed there.
 func (c completer) completeWithContext(previousWords []string, text []rune) []rline.Cand {
 	line := reconstructLine(previousWords, text)
+	if inStringOrComment(line) {
+		return nil
+	}
 	return c.completeFromContext(parseContext(line, len(line)))
+}
+
+// inStringOrComment reports whether the end of the line — the cursor — sits
+// inside an unterminated string literal, quoted identifier or comment:
+// completion offers nothing there.
+func inStringOrComment(line []rune) bool {
+	var inSingle, inDouble, inBlock, inLine bool
+	for i := 0; i < len(line); i++ {
+		r := line[i]
+		switch {
+		case inLine:
+			return true // a line comment runs to the cursor
+		case inBlock:
+			if r == '*' && i+1 < len(line) && line[i+1] == '/' {
+				inBlock = false
+				i++
+			}
+		case inSingle:
+			if r == '\'' {
+				if i+1 < len(line) && line[i+1] == '\'' {
+					i++ // escaped ''
+				} else {
+					inSingle = false
+				}
+			}
+		case inDouble:
+			if r == '"' {
+				inDouble = false
+			}
+		case r == '-' && i+1 < len(line) && line[i+1] == '-':
+			inLine = true
+			i++
+		case r == '/' && i+1 < len(line) && line[i+1] == '*':
+			inBlock = true
+			i++
+		case r == '\'':
+			inSingle = true
+		case r == '"':
+			inDouble = true
+		}
+	}
+	return inSingle || inDouble || inBlock
 }
 
 // reconstructLine joins the previous words — which Do provides in reverse
@@ -134,12 +218,12 @@ func reconstructLine(previousWords []string, text []rune) []rune {
 	return []rune(strings.Join(words, " "))
 }
 
-// completeFromContext generates the candidates for a parsed context: tables
-// in table positions (fully qualified as schema.table, so candidates are
-// self-describing), columns in column positions. Candidates are full words
-// that replace the word at the cursor (see readline.Replacer), ranked
-// fuzzily — prefix matches first. It returns nil when the context does not
-// determine a candidate set, so callers can fall back to the heuristics.
+// completeFromContext generates the candidates for a parsed context: the
+// schema tier in object positions, a namespace's objects after "schema.",
+// columns in column positions. Candidates are full words that replace the
+// word at the cursor (see readline.Replacer). It returns nil when the
+// context does not determine a candidate set or when the context's data is
+// still loading — the cache's kick re-renders when it lands.
 func (c completer) completeFromContext(ctx Context) []rline.Cand {
 	options, ok, ordered := c.contextOptions(ctx)
 	if !ok || len(options) == 0 {
@@ -147,18 +231,19 @@ func (c completer) completeFromContext(ctx Context) []rline.Cand {
 	}
 	if ordered {
 		// already in the order the user needs (e.g. VALUES field hints);
-		// fuzzy ranking would destroy it
+		// ranking would destroy it
 		return options
 	}
-	// anchored (start-anchored) matching: candidates match from the start of
-	// the word or of their last segment, not as fuzzy subsequences
+	// anchored matching: candidates match from the start of the word or of
+	// their last segment, not as fuzzy subsequences
 	return completePrefixFull(ctx.Qualifier+ctx.Object, options)
 }
 
-// DoRepl provides the fork's replace-style completion: the context path's
-// candidates are full words replacing the word at the cursor. When the
-// context is inconclusive it returns ok=false, and the readline layer falls
-// back to Do (append-style heuristics).
+// DoRepl provides replace-style completion: the context engine's candidates
+// are full words replacing the word at the cursor, and a meta-command
+// argument position completes through the policy table. When neither
+// applies it returns ok=false, and the readline layer falls back to Do
+// (append-style meta and keyword candidates).
 func (c *completer) DoRepl(line []rune, pos int) ([]rline.Cand, int, bool) {
 	if pos > len(line) {
 		pos = len(line)
@@ -174,27 +259,31 @@ func (c *completer) DoRepl(line []rune, pos int) ([]rline.Cand, int, bool) {
 	i := wordStart(line, pos)
 	previousWords := getPreviousWords(pos, line)
 	text := line[i:pos]
+	// meta-command argument position (the command itself is already typed):
+	// object and value candidates are full words replacing the argument
+	if !strings.HasPrefix(string(text), "\\") && len(previousWords) > 0 &&
+		strings.HasPrefix(previousWords[len(previousWords)-1], "\\") {
+		if res := c.completeMetaArg(previousWords[len(previousWords)-1], len(previousWords)-1, previousWords, text); res != nil {
+			return res, len(text), true
+		}
+	}
 	if res := c.completeWithContext(previousWords, text); res != nil {
 		return res, len(text), true
 	}
-	// meta-command argument position (the command itself is already
-	// typed): object and value candidates are full words replacing the
-	// argument. Typing the command itself (text starts with backslash)
-	// stays append-style, since backslash command candidates are suffixes.
-	if !strings.HasPrefix(string(text), "\\") && len(previousWords) > 0 &&
-		strings.HasPrefix(previousWords[len(previousWords)-1], "\\") {
-		if res := c.complete(previousWords, text); res != nil {
-			return res, len(text), true
-		}
+	// a dotted word never falls back to keywords: it names an object whose
+	// metadata is still loading (or unknown) — a keyword flash would be
+	// wrong every time
+	if strings.Contains(string(text), ".") {
+		return nil, 0, false
 	}
 	return nil, 0, false
 }
 
 // contextOptions returns the candidate options for the context, or ok=false
-// when the context is inconclusive and the caller should fall back to the
-// tail-matching heuristics. The options depend only on the clause context —
-// never on the typed word — so callers can filter them client-side and the
-// live wrapper can memoize them per statement context. ordered results (the
+// when the context is inconclusive (the caller falls through to the driver
+// hook and the keyword fallback). The options depend only on the clause
+// context — never on the typed word — so the client filters them per
+// keystroke and the cache is reused while typing. ordered results (the
 // VALUES field hints) are position-sensitive and exempt from that.
 func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 	switch {
@@ -208,8 +297,7 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		// order, so long column lists stay trackable while filling values
 		return candsText(c.valuesFieldHints(ctx), "column"), true, true
 	case ctx.Clause == "INTO" && ctx.IntoListDone:
-		// INSERT INTO film (a, b) <cursor> — what may follow the column
-		// group
+		// INSERT INTO film (a, b) <cursor> — what may follow the column group
 		return rline.Cands("VALUES", "SELECT", "TABLE", "OVERRIDING"), true, false
 	case ctx.Clause == "USING" && ctx.OpenParens > 0:
 		// JOIN ... USING (<cursor> — join columns of the tables in scope
@@ -217,27 +305,37 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 	case tableClauses[ctx.Clause]:
 		if ctx.Object == "" && ctx.TableListed {
 			if ctx.Clause == "INTO" {
-				// INSERT INTO film <cursor> — offer the target table's
-				// full column list as one "(a, b, c)" candidate, in
-				// metadata order; without column metadata decline to the
-				// heuristics ("(", VALUES, ...)
+				// INSERT INTO film <cursor> — offer the target table's full
+				// column list as one "(a, b, c)" candidate, in metadata
+				// order; without column metadata decline ("(", VALUES, ...)
 				if list := c.insertColumnList(ctx); list != "" {
 					return []rline.Cand{{Text: list}}, true, false
 				}
 			}
 			return nil, false, false
 		}
-		// table position: namespace names (schema/user/database) first, then
-		// every fully qualified selectable — one word-independent option set
-		// the client filters as the word grows. Catalogs (database names in
-		// the PostgreSQL sense) are deliberately not offered: after FROM/
-		// INTO one picks schema-qualified objects, not databases.
-		ns := c.getNamespaces(metadata.Filter{OnlyVisible: true})
-		return append(ns, c.scopeTables(ctx, ctx.Clause == "INTO" || ctx.Clause == "UPDATE")...), true, false
+		// object position: the schema tier (L1) first — pick a namespace,
+		// then "schema." completes its objects (L2). The current schema's
+		// own objects ride along once their (lazy) L2 load has landed, so
+		// bare object names keep completing.
+		cands := c.namespaceCands()
+		tablesOnly := ctx.Clause == "INTO" || ctx.Clause == "UPDATE"
+		if cur, ok := c.currentSchema(); ok && cur != "" {
+			if objs, loaded := c.schemaObjects("", cur); loaded {
+				cands = append(cands, candsObjs(selectableObjs(objs, tablesOnly))...)
+			}
+		}
+		if len(cands) == 0 {
+			return nil, false, false // still loading: decline, kick re-renders
+		}
+		return cands, true, false
 	case columnClauses[ctx.Clause]:
 		options := candsText(c.scopeColumns(ctx), "column")
 		options = append(options, CompleteFromList(nil, clauseKeywords[ctx.Clause]...)...)
 		return options, true, false
+	case ctx.Clause == "" && verbFollows[ctx.First] != "":
+		// a statement verb that must be followed by one keyword
+		return rline.Cands(verbFollows[ctx.First]), true, false
 	default:
 		return nil, false, false
 	}
@@ -248,6 +346,32 @@ func candsText(words []string, kind string) []rline.Cand {
 	out := make([]rline.Cand, 0, len(words))
 	for _, w := range words {
 		out = append(out, rline.Cand{Text: w, Kind: kind})
+	}
+	return out
+}
+
+// candsObjs converts cached objects into candidates.
+func candsObjs(objs []obj) []rline.Cand {
+	out := make([]rline.Cand, 0, len(objs))
+	for _, o := range objs {
+		out = append(out, rline.Cand{Text: o.name, Kind: o.kind})
+	}
+	return out
+}
+
+// selectableObjs filters cached schema objects: INSERT INTO and UPDATE
+// positions cannot take functions or sequences, so those are dropped there.
+func selectableObjs(objs []obj, relationsOnly bool) []obj {
+	if !relationsOnly {
+		return objs
+	}
+	out := make([]obj, 0, len(objs))
+	for _, o := range objs {
+		switch o.kind {
+		case "function", "sequence":
+		default:
+			out = append(out, o)
+		}
 	}
 	return out
 }
@@ -268,15 +392,16 @@ func (c completer) valuesFieldHints(ctx Context) []string {
 	return cols[ctx.ValuesCount:]
 }
 
-// qualifiedOptions completes a dotted word. In a column position the
-// qualifier names an alias or table (or schema.table), and the candidates
-// are that table's columns; in a table position it names a schema (or
-// catalog.schema) and the candidates are that namespace's tables. Candidates
-// are fully qualified, so they replace the whole word including the
-// qualifier.
+// qualifiedOptions completes a dotted word. In a table position the
+// qualifier names a schema (or catalog.schema) and the candidates are that
+// namespace's objects (L2); in a column position it names an alias, table
+// or schema.table, and the candidates are that table's columns (L3).
+// Candidates are fully qualified, so they replace the whole word including
+// the qualifier.
 func (c completer) qualifiedOptions(ctx Context) []rline.Cand {
 	parts := strings.Split(strings.TrimSuffix(ctx.Qualifier, "."), ".")
 	qual := ctx.Qualifier
+	tablesOnly := ctx.Clause == "INTO" || ctx.Clause == "UPDATE"
 	appendColumns := func(ref TableRef) []rline.Cand {
 		var options []rline.Cand
 		for _, col := range c.tableColumns(ref) {
@@ -284,19 +409,27 @@ func (c completer) qualifiedOptions(ctx Context) []rline.Cand {
 		}
 		return options
 	}
+	schemaObjects := func(catalog, schema string, relationsOnly bool) []rline.Cand {
+		objs, ok := c.schemaObjects(catalog, schema)
+		if !ok {
+			return nil // still loading: decline, kick re-renders
+		}
+		return candsObjs(selectableObjs(objs, relationsOnly))
+	}
 	switch n := len(parts); {
 	case n == 1 && tableClauses[ctx.Clause]:
-		return c.namespaceTables("", parts[0], ctx.Clause == "INTO" || ctx.Clause == "UPDATE")
+		// FROM sc.<cursor> — the schema's objects
+		return schemaObjects("", parts[0], tablesOnly)
 	case n == 1:
 		// in a column position the qualifier is an alias or table name; if
-		// it is neither, it may still be a schema
+		// it is neither, it may still be a schema (its relations)
 		if ref, ok := ctx.Aliases[parts[0]]; ok {
 			return appendColumns(ref)
 		}
-		return c.namespaceTables("", parts[0], true)
+		return schemaObjects("", parts[0], true)
 	case n == 2 && tableClauses[ctx.Clause]:
 		// remote.default.<cursor>
-		return c.namespaceTables(parts[0], parts[1], ctx.Clause == "INTO" || ctx.Clause == "UPDATE")
+		return schemaObjects(parts[0], parts[1], tablesOnly)
 	case n == 2:
 		// public.film.<cursor>
 		return appendColumns(TableRef{Schema: parts[0], Name: parts[1]})
@@ -313,27 +446,7 @@ func (c completer) insertColumnList(ctx Context) string {
 	if len(ctx.Tables) == 0 {
 		return ""
 	}
-	ref := ctx.Tables[len(ctx.Tables)-1]
-	r, ok := c.reader.(metadata.ColumnReader)
-	if !ok {
-		return ""
-	}
-	filter := metadata.Filter{
-		Catalog:     ref.Catalog,
-		Schema:      ref.Schema,
-		Parent:      ref.Name,
-		OnlyVisible: ref.Catalog == "" && ref.Schema == "",
-		WithSystem:  ref.Catalog != "" || ref.Schema != "",
-	}
-	set, err := r.Columns(filter)
-	if err != nil {
-		return ""
-	}
-	defer set.Close()
-	var cols []string
-	for set.Next() {
-		cols = append(cols, set.Get().Name)
-	}
+	cols := c.tableColumns(ctx.Tables[len(ctx.Tables)-1])
 	if len(cols) == 0 {
 		return ""
 	}
@@ -341,7 +454,8 @@ func (c completer) insertColumnList(ctx Context) string {
 }
 
 // scopeColumns returns the columns of every table in scope, in metadata
-// order, deduplicated by name.
+// order, deduplicated by name. Tables whose L3 load has not landed yet
+// contribute nothing this round.
 func (c completer) scopeColumns(ctx Context) []string {
 	var options []string
 	seen := map[string]bool{}
@@ -356,11 +470,205 @@ func (c completer) scopeColumns(ctx Context) []string {
 	return options
 }
 
-// tableColumns queries the reader for the columns of a table reference, in
-// metadata (ordinal) order.
+// tableColumns returns the columns of a table reference from the L3 cache,
+// in metadata (ordinal) order; a miss starts the asynchronous load and
+// returns nothing this round. Without a cache installed the reader is
+// queried directly.
 func (c completer) tableColumns(ref TableRef) []string {
+	if ref.Name == "" {
+		return nil
+	}
+	if c.cache == nil {
+		return c.queryColumns(ref)
+	}
+	objs, ok := c.columns(ref)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(objs))
+	for _, o := range objs {
+		names = append(names, o.name)
+	}
+	return names
+}
+
+// --- cached catalog access (the three levels) ---
+
+// namespaceCands returns the L1 schema list as candidates. A nil result
+// means the load has not landed yet.
+func (c completer) namespaceCands() []rline.Cand {
+	objs, ok := c.schemas()
+	if !ok {
+		return nil
+	}
+	return candsObjs(objs)
+}
+
+func (c completer) schemas() ([]obj, bool) {
+	if c.cache == nil {
+		return nil, false
+	}
+	return c.cache.get(bucketSchema, "all", c.loadSchemas)
+}
+
+// currentSchema returns the session's default schema, resolved lazily with
+// its own L1 entry. MySQL names it via DATABASE(), PostgreSQL via
+// search_path, Oracle via CURRENT_SCHEMA — the readers express each as the
+// OnlyVisible restriction, so one query serves all.
+func (c completer) currentSchema() (string, bool) {
+	if c.cache == nil {
+		return "", false
+	}
+	objs, ok := c.cache.get(bucketSchema, "current", c.loadCurrentSchema)
+	if !ok || len(objs) == 0 {
+		return "", false
+	}
+	return objs[0].name, true
+}
+
+func (c completer) schemaObjects(catalog, schema string) ([]obj, bool) {
+	if c.cache == nil || schema == "" {
+		return nil, false
+	}
+	key := catalog + "\x00" + schema
+	return c.cache.get(bucketObject, key, func() ([]obj, error) {
+		return c.loadSchemaObjects(catalog, schema)
+	})
+}
+
+func (c completer) columns(ref TableRef) ([]obj, bool) {
+	if c.cache == nil {
+		return nil, false
+	}
+	key := ref.Catalog + "\x00" + ref.Schema + "\x00" + ref.Name
+	return c.cache.get(bucketColumn, key, func() ([]obj, error) {
+		return c.loadColumns(ref)
+	})
+}
+
+// loadSchemas loads L1: every schema the login can reach, minus the system
+// schemas (the readers' WithSystem:false restriction).
+func (c completer) loadSchemas() ([]obj, error) {
+	r, ok := c.reader.(metadata.SchemaReader)
+	if !ok {
+		return []obj{}, nil
+	}
+	if c.caps.skip("schemas") {
+		return []obj{}, nil
+	}
+	set, err := r.Schemas(metadata.Filter{WithSystem: false})
+	if err != nil {
+		c.caps.failed("schemas", err, c.logger)
+		return nil, err
+	}
+	defer set.Close()
+	var out []obj
+	for set.Next() {
+		s := set.Get()
+		out = append(out, obj{name: s.Schema, kind: c.schemaKind})
+	}
+	return out, nil
+}
+
+// loadCurrentSchema loads the session's default schema (L1, dedicated key).
+func (c completer) loadCurrentSchema() ([]obj, error) {
+	r, ok := c.reader.(metadata.SchemaReader)
+	if !ok {
+		return []obj{}, nil
+	}
+	set, err := r.Schemas(metadata.Filter{OnlyVisible: true})
+	if err != nil {
+		return nil, err
+	}
+	defer set.Close()
+	var out []obj
+	for set.Next() && len(out) == 0 {
+		out = append(out, obj{name: set.Get().Schema, kind: c.schemaKind})
+	}
+	return out, nil
+}
+
+// loadSchemaObjects loads L2: a namespace's relations, functions and
+// sequences, with fully qualified names. One bucket per schema — typing
+// "schema." is what triggers it. Each kind loads and fails independently:
+// an engine without a catalog (MySQL has no information_schema.sequences)
+// skips that kind instead of failing the whole bucket, so the rest stays
+// cached.
+func (c completer) loadSchemaObjects(catalog, schema string) ([]obj, error) {
+	var out []obj
+	if r, ok := c.reader.(metadata.TableReader); ok && !c.caps.skip("tables") {
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: selectableTypes}
+		if set, err := r.Tables(filter); err != nil {
+			c.caps.failed("tables", err, c.logger)
+		} else {
+			for set.Next() {
+				t := set.Get()
+				out = append(out, obj{name: fullIdentifier(t.Catalog, t.Schema, t.Name), kind: typeKind(t.Type)})
+			}
+			set.Close()
+		}
+	}
+	if r, ok := c.reader.(metadata.FunctionReader); ok && !c.caps.skip("functions") {
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
+		if set, err := r.Functions(filter); err != nil {
+			c.caps.failed("functions", err, c.logger)
+		} else {
+			for set.Next() {
+				f := set.Get()
+				out = append(out, obj{name: fullIdentifier(f.Catalog, f.Schema, f.Name), kind: "function"})
+			}
+			set.Close()
+		}
+	}
+	if r, ok := c.reader.(metadata.SequenceReader); ok && !c.caps.skip("sequences") {
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
+		if set, err := r.Sequences(filter); err != nil {
+			c.caps.failed("sequences", err, c.logger)
+		} else {
+			for set.Next() {
+				s := set.Get()
+				out = append(out, obj{name: fullIdentifier(s.Catalog, s.Schema, s.Name), kind: "sequence"})
+			}
+			set.Close()
+		}
+	}
+	return out, nil
+}
+
+// loadColumns loads L3: a table's columns, bare names.
+func (c completer) loadColumns(ref TableRef) ([]obj, error) {
 	r, ok := c.reader.(metadata.ColumnReader)
-	if !ok || ref.Name == "" {
+	if !ok || c.caps.skip("columns") {
+		return []obj{}, nil // unsupported: cache the emptiness
+	}
+	filter := metadata.Filter{
+		Catalog:     ref.Catalog,
+		Schema:      ref.Schema,
+		Parent:      ref.Name,
+		OnlyVisible: ref.Catalog == "" && ref.Schema == "",
+		WithSystem:  ref.Catalog != "" || ref.Schema != "",
+	}
+	set, err := r.Columns(filter)
+	if err != nil {
+		c.caps.failed("columns", err, c.logger)
+		if errors.Is(err, text.ErrNotSupported) {
+			return []obj{}, nil
+		}
+		return nil, err
+	}
+	defer set.Close()
+	var out []obj
+	for set.Next() {
+		out = append(out, obj{name: set.Get().Name, kind: "column"})
+	}
+	return out, nil
+}
+
+// queryColumns queries the reader directly — the fallback when no cache is
+// installed.
+func (c completer) queryColumns(ref TableRef) []string {
+	r, ok := c.reader.(metadata.ColumnReader)
+	if !ok {
 		return nil
 	}
 	filter := metadata.Filter{
@@ -380,96 +688,4 @@ func (c completer) tableColumns(ref TableRef) []string {
 		cols = append(cols, set.Get().Name)
 	}
 	return cols
-}
-
-// scopeTables returns fully qualified selectables — all of them for FROM and
-// JOIN, updatable tables only for INSERT INTO and UPDATE. The query filter
-// is stable (no typed text in it): per-keystroke matching happens
-// client-side in fuzzy ranking, so the cached query is reused while typing.
-func (c completer) scopeTables(ctx Context, tablesOnly bool) []rline.Cand {
-	filter := metadata.Filter{OnlyVisible: true}
-	if tablesOnly {
-		filter.Types = updatableTypes
-	} else {
-		filter.Types = selectableTypes
-	}
-	var names []rline.Cand
-	if r, ok := c.reader.(metadata.TableReader); ok {
-		names = append(names, c.getCands(
-			func() (iterator, error) { return r.Tables(filter) },
-			func(res interface{}) (string, string) {
-				t := res.(*metadata.TableSet).Get()
-				// schema.table (catalog.schema.table) — full names tell
-				// similarly-named objects apart
-				return fullIdentifier(t.Catalog, t.Schema, t.Name), typeKind(t.Type)
-			},
-		)...)
-	}
-	if tablesOnly {
-		return names
-	}
-	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		names = append(names, c.getCands(
-			func() (iterator, error) { return r.Functions(filter) },
-			func(res interface{}) (string, string) {
-				f := res.(*metadata.FunctionSet).Get()
-				return fullIdentifier(f.Catalog, f.Schema, f.Name), "function"
-			},
-		)...)
-	}
-	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		names = append(names, c.getCands(
-			func() (iterator, error) { return r.Sequences(filter) },
-			func(res interface{}) (string, string) {
-				s := res.(*metadata.SequenceSet).Get()
-				return fullIdentifier(s.Catalog, s.Schema, s.Name), "sequence"
-			},
-		)...)
-	}
-	return names
-}
-
-// namespaceTables completes the tables of a schema, or of a catalog and
-// schema — plus, unless tablesOnly, its functions and sequences — returning
-// fully qualified names with kinds. The filter is stable across keystrokes;
-// the typed object text is matched client-side by fuzzy ranking.
-func (c completer) namespaceTables(catalog, schema string, tablesOnly bool) []rline.Cand {
-	filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
-	if tablesOnly {
-		filter.Types = updatableTypes
-	} else {
-		filter.Types = selectableTypes
-	}
-	var names []rline.Cand
-	if r, ok := c.reader.(metadata.TableReader); ok {
-		names = append(names, c.getCands(
-			func() (iterator, error) { return r.Tables(filter) },
-			func(res interface{}) (string, string) {
-				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name), typeKind(t.Type)
-			},
-		)...)
-	}
-	if tablesOnly {
-		return names
-	}
-	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		names = append(names, c.getCands(
-			func() (iterator, error) { return r.Functions(filter) },
-			func(res interface{}) (string, string) {
-				f := res.(*metadata.FunctionSet).Get()
-				return fullIdentifier(f.Catalog, f.Schema, f.Name), "function"
-			},
-		)...)
-	}
-	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		names = append(names, c.getCands(
-			func() (iterator, error) { return r.Sequences(filter) },
-			func(res interface{}) (string, string) {
-				s := res.(*metadata.SequenceSet).Get()
-				return fullIdentifier(s.Catalog, s.Schema, s.Name), "sequence"
-			},
-		)...)
-	}
-	return names
 }

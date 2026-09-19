@@ -165,17 +165,15 @@ func main() {
 	}
 	tc := time.Now()
 	c := completer.NewDefaultCompleter(opts...)
-	fmt.Printf("== completer built (snapshot loading in background) in %v\n", time.Since(tc).Round(time.Microsecond))
+	fmt.Printf("== completer built in %v\n", time.Since(tc).Round(time.Microsecond))
 
-	// settle: while the connect-time snapshot is still loading, whole-catalog
-	// completion queries are answered empty (snapshotReader's deferred mode)
-	// while typed-prefix probes can still fall back to legacy patterned
-	// queries — so wait on the empty-word enumeration, which only the landed
-	// snapshot can serve
+	// settle: the lazy cache loads the schema tier on demand and
+	// asynchronously, so the empty-word enumeration is answered only once
+	// the first load has landed — poll until it is served
 	settled := time.Now()
 	for {
 		if cands, _ := doComplete(c, "SELECT * FROM "); len(cands) > 0 {
-			fmt.Printf("== snapshot settled (empty-word enumeration served) after %v\n", time.Since(settled).Round(time.Millisecond))
+			fmt.Printf("== completion cache settled (empty-word enumeration served) after %v\n", time.Since(settled).Round(time.Millisecond))
 			break
 		}
 		if time.Since(settled) > 15*time.Second {

@@ -34,6 +34,8 @@ func init() {
 		{
 			{Quit, `q`, ``, `quit ` + text.CommandName + ``, false, false},
 			{Quit, `quit`, ``, `alias for \q`, true, false},
+			{Clear, `clear`, ``, `clear the terminal screen and pending input`, false, false},
+			{Refresh, `refresh`, ``, `drop the completion cache, re-reading the catalog on demand`, false, false},
 			{Copyright, `copyright`, ``, `show usage and distribution terms for ` + text.CommandName + ``, false, false},
 			{Drivers, `drivers`, ``, `show database drivers available to ` + text.CommandName + ``, false, false},
 		},

@@ -17,6 +17,8 @@ import (
 //	public.now          FUNCTION
 //	public.actor_id_seq SEQUENCE
 //	other.orders        TABLE
+//
+// OnlyVisible resolves to the "public" schema (the session default).
 type candMockReader struct{}
 
 var _ interface {
@@ -34,12 +36,12 @@ var candTables = []metadata.Table{
 }
 
 var candColumns = []metadata.Column{
-	{Table: "film", Name: "id", OrdinalPosition: 1},
-	{Table: "film", Name: "name", OrdinalPosition: 2},
-	{Table: "actor", Name: "id", OrdinalPosition: 1},
-	{Table: "actor", Name: "film_id", OrdinalPosition: 2},
-	{Table: "film_view", Name: "id", OrdinalPosition: 1},
-	{Table: "film_view", Name: "title", OrdinalPosition: 2},
+	{Schema: "public", Table: "film", Name: "id", OrdinalPosition: 1},
+	{Schema: "public", Table: "film", Name: "name", OrdinalPosition: 2},
+	{Schema: "public", Table: "actor", Name: "id", OrdinalPosition: 1},
+	{Schema: "public", Table: "actor", Name: "film_id", OrdinalPosition: 2},
+	{Schema: "public", Table: "film_view", Name: "id", OrdinalPosition: 1},
+	{Schema: "public", Table: "film_view", Name: "title", OrdinalPosition: 2},
 }
 
 var candFunctions = []metadata.Function{
@@ -77,9 +79,13 @@ func (r candMockReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 func (r candMockReader) Columns(f metadata.Filter) (*metadata.ColumnSet, error) {
 	var results []metadata.Column
 	for _, col := range candColumns {
-		if strings.EqualFold(col.Table, f.Parent) {
-			results = append(results, col)
+		if !strings.EqualFold(col.Table, f.Parent) {
+			continue
 		}
+		if f.Schema != "" && !strings.EqualFold(col.Schema, f.Schema) {
+			continue
+		}
+		results = append(results, col)
 	}
 	return metadata.NewColumnSet(results), nil
 }
@@ -107,6 +113,9 @@ func (r candMockReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, err
 }
 
 func (r candMockReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
+	if f.OnlyVisible {
+		return metadata.NewSchemaSet([]metadata.Schema{{Schema: "public"}}), nil
+	}
 	return metadata.NewSchemaSet([]metadata.Schema{{Schema: "public"}, {Schema: "other"}}), nil
 }
 
@@ -123,152 +132,182 @@ func discardLogger() logger {
 	return log.New(io.Discard, "", 0)
 }
 
-// TestWithContextCompletion drives readline's Do with the
-// WithContextCompletion option installed. The completer carries no static
-// command lists, so whenever the context path declines, the heuristics below
-// it can only answer from the mock reader — making it obvious which path
-// produced the result.
-func TestWithContextCompletion(t *testing.T) {
-	c := completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
-	WithContextCompletion()(&c)
-	waitForSnapshot(t, c.snap)
+// contextTestCompleter builds a completer with the lazy cache installed.
+func contextTestCompleter(t *testing.T) *completer {
+	t.Helper()
+	c := &completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
+	WithContextCompletion()(c)
+	if c.cache == nil {
+		t.Fatal("WithContextCompletion did not install a cache")
+	}
+	return c
+}
 
+// settleCompleter waits until the L1 levels (all schemas, current schema)
+// and the current schema's L2 objects have loaded. The get calls themselves
+// arm the loads, so polling drives the lazy machinery.
+func settleCompleter(t *testing.T, c *completer) {
+	t.Helper()
+	waitFor(t, func() bool {
+		if _, ok := c.schemas(); !ok {
+			return false
+		}
+		cur, ok := c.currentSchema()
+		if !ok || cur == "" {
+			return false
+		}
+		_, ok = c.schemaObjects("", cur)
+		return ok
+	})
+}
+
+// settleColumns waits until a table's L3 columns have loaded.
+func settleColumns(t *testing.T, c *completer, ref TableRef) {
+	t.Helper()
+	waitFor(t, func() bool {
+		objs, ok := c.columns(ref)
+		return ok && len(objs) > 0
+	})
+}
+
+// TestContextCompletion drives DoRepl — the replace-style path — with the
+// lazy cache installed. Object positions offer the schema tier plus the
+// current schema's objects; "schema." offers that namespace's objects;
+// column positions offer the tables' columns; keywords ride along where the
+// grammar allows them. Candidates are full words replacing the typed word.
+func TestContextCompletion(t *testing.T) {
 	cases := []struct {
 		name    string
 		line    string
 		start   int
 		want    []string
 		wantLen int
+		wantNil bool
 	}{
 		{
 			"from table prefix",
 			"SELECT * FROM fi", 16,
-			[]string{"public.film", "public.film_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2, false,
 		},
 		{
-			"from empty word offers namespaces then selectables",
+			"from empty word offers schemas then current schema objects",
 			"SELECT * FROM ", 14,
-			[]string{"other", "public", "public.now", "public.film", "public.actor", "other.orders", "public.film_view", "public.actor_id_seq"}, 0,
+			[]string{"other", "public", "public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 0, false,
 		},
 		{
 			"from namespace prefix ranks the namespace first",
 			"SELECT * FROM pu", 16,
-			[]string{"public", "public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 2,
+			[]string{"public", "public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 2, false,
 		},
 		{
 			"from namespace dot lists objects",
 			"SELECT * FROM public.", 21,
-			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 7,
+			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 7, false,
 		},
 		{
 			"from bare table name falls back to qualified tables",
 			"SELECT * FROM film", 18,
-			[]string{"public.film", "public.film_view"}, 4,
+			[]string{"public.film", "public.film_view"}, 4, false,
 		},
 		{
 			"insert into offers updatables only",
 			"INSERT INTO fi", 14,
-			[]string{"public.film", "public.film_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2, false,
 		},
 		{
 			"update offers updatables only",
 			"UPDATE fi", 9,
-			[]string{"public.film", "public.film_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2, false,
 		},
 		{
 			"insert into table done offers column list group",
 			"INSERT INTO film ", 17,
-			[]string{"(id, name)"}, 0,
+			[]string{"(id, name)"}, 0, false,
 		},
 		{
 			"insert into column group done offers values",
 			"INSERT INTO film (id, name) v", 29,
-			[]string{"values"}, 1,
+			[]string{"values"}, 1, false,
 		},
 		{
 			"values group hints all fields in written order",
 			"INSERT INTO film (id, name, release_year) VALUES (", 50,
-			[]string{"id", "name", "release_year"}, 0,
+			[]string{"id", "name", "release_year"}, 0, false,
 		},
 		{
 			"values group hints remaining fields after first value",
 			"INSERT INTO film (id, name, release_year) VALUES (1, ", 53,
-			[]string{"name", "release_year"}, 0,
+			[]string{"name", "release_year"}, 0, false,
 		},
 		{
 			"values group skips string literal commas",
 			"INSERT INTO film (id, name, release_year) VALUES (1, 'x, y', ", 61,
-			[]string{"release_year"}, 0,
+			[]string{"release_year"}, 0, false,
 		},
 		{
 			"values group without column list uses table order",
 			"INSERT INTO film VALUES (", 25,
-			[]string{"id", "name"}, 0,
+			[]string{"id", "name"}, 0, false,
 		},
 		{
-			"values group exhausted offers nothing",
+			"values group exhausted declines",
 			"INSERT INTO film VALUES (1, 'a', ", 33,
-			nil, 0,
+			nil, 0, true,
 		},
 		{
 			"insert into column list prefix",
 			"INSERT INTO film (na", 20,
-			[]string{"name"}, 2,
+			[]string{"name"}, 2, false,
 		},
 		{
 			"insert into column list",
 			"INSERT INTO film (", 18,
-			[]string{"id", "name"}, 0,
+			[]string{"id", "name"}, 0, false,
 		},
 		{
 			"alias qualified column",
 			"SELECT * FROM film f WHERE f.", 29,
-			[]string{"f.id", "f.name"}, 2,
+			[]string{"f.id", "f.name"}, 2, false,
 		},
 		{
 			"unqualified column after and",
 			"SELECT * FROM film WHERE id = 1 AND na", 38,
-			[]string{"name"}, 2,
+			[]string{"name"}, 2, false,
 		},
 		{
 			"join on column",
 			"SELECT * FROM film JOIN actor ON fi", 35,
-			[]string{"film_id"}, 2,
+			[]string{"film_id"}, 2, false,
 		},
 		{
 			"group by column",
 			"SELECT * FROM film GROUP BY na", 30,
-			[]string{"name"}, 2,
-		},
-		{
-			"schema qualified table",
-			"SELECT * FROM public.", 21,
-			[]string{"public.now", "public.film", "public.actor", "public.film_view", "public.actor_id_seq"}, 7,
+			[]string{"name"}, 2, false,
 		},
 		{
 			"schema qualified table prefix",
 			"SELECT * FROM public.fi", 23,
-			[]string{"public.film", "public.film_view"}, 9,
+			[]string{"public.film", "public.film_view"}, 9, false,
 		},
 		{
 			"join alias qualified column",
 			"SELECT * FROM film f JOIN actor a ON f.", 39,
-			[]string{"f.id", "f.name"}, 2,
+			[]string{"f.id", "f.name"}, 2, false,
 		},
 		{
 			"unknown qualifier declines",
 			"SELECT * FROM film f WHERE z.", 29,
-			nil, 2,
+			nil, 2, true,
 		},
 		{
 			"table listed after semicolon",
 			"SELECT 1; SELECT * FROM fi", 26,
-			[]string{"public.film", "public.film_view"}, 2,
+			[]string{"public.film", "public.film_view"}, 2, false,
 		},
 		{
 			"using column list",
 			"SELECT * FROM film JOIN actor USING (fi", 39,
-			[]string{"film_id"}, 2,
+			[]string{"film_id"}, 2, false,
 		},
 		{
 			"where offers columns and keywords",
@@ -277,23 +316,48 @@ func TestWithContextCompletion(t *testing.T) {
 				"id", "OR", "IN", "AND", "NOT", "END", "name", "LIKE",
 				"CASE", "WHEN", "THEN", "ELSE", "EXISTS", "IS NULL",
 				"BETWEEN", "IS NOT NULL",
-			}, 0,
+			}, 0, false,
 		},
 		{
-			"backslash commands still complete via heuristics",
-			`\dt `, 4,
-			[]string{"other", "public"}, 0,
+			"insert verb offers INTO",
+			"INSERT IN", 9,
+			[]string{"INTO"}, 2, false,
+		},
+		{
+			"delete verb offers FROM",
+			"DELETE ", 7,
+			[]string{"FROM"}, 0, false,
+		},
+		{
+			"in a string literal declines",
+			"SELECT * FROM film WHERE name = 'x", 34,
+			nil, 2, true,
+		},
+		{
+			"in a comment declines",
+			"SELECT * FROM film -- lo", 24,
+			nil, 2, true,
 		},
 	}
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			got, length := c.Do([]rune(test.line), test.start)
+			c := contextTestCompleter(t)
+			c.DoRepl([]rune(test.line), test.start) // trigger the lazy loads
+			settleCompleter(t, c)
+			settleColumns(t, c, TableRef{Name: "film"})
+			got, length, ok := c.DoRepl([]rune(test.line), test.start)
+			if test.wantNil {
+				if ok && len(got) > 0 {
+					t.Fatalf("DoRepl(%q, %d) = %q, want nothing", test.line, test.start, got)
+				}
+				return
+			}
 			if length != test.wantLen {
 				t.Errorf("length = %d, want %d", length, test.wantLen)
 			}
 			if len(got) != len(test.want) {
-				t.Fatalf("Do(%q, %d) = %q, want %q", test.line, test.start, got, test.want)
+				t.Fatalf("DoRepl(%q, %d) = %q, want %q", test.line, test.start, got, test.want)
 			}
 			for i := range got {
 				if got[i].Text != test.want[i] {
@@ -304,10 +368,10 @@ func TestWithContextCompletion(t *testing.T) {
 	}
 }
 
-// TestWithContextCompletionFallsThrough uses a fully populated completer and
-// checks that when the context path declines, the tail-matching heuristics
-// answer as before.
-func TestWithContextCompletionFallsThrough(t *testing.T) {
+// TestContextCompletionDeclinesToFallback: when the context engine declines
+// (inconclusive position, table already listed), Do answers with keywords —
+// never a query — and empty results decline entirely.
+func TestContextCompletionDeclinesToFallback(t *testing.T) {
 	c := NewDefaultCompleter(
 		WithReader(candMockReader{}),
 		WithLogger(discardLogger()),
@@ -322,29 +386,24 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 		wantLen int
 	}{
 		{
-			"insert into table listed offers column group",
-			"INSERT INTO film ", 17,
-			[]string{"(id, name)"}, 0,
-		},
-		{
-			"insert into without column metadata declines to heuristics",
-			"INSERT INTO pg_catalog.pg_class ", 32,
-			[]string{"(", "DEFAULT VALUES", "SELECT", "TABLE", "VALUES", "OVERRIDING"}, 0,
-		},
-		{
-			"table already listed",
-			"SELECT * FROM film ", 19,
-			CommonSqlCommands, 0,
-		},
-		{
-			"empty line",
+			"empty line offers statement keywords",
 			"", 0,
 			CommonSqlStartCommands, 0,
 		},
 		{
-			"context result replaces whole dotted word",
-			"SELECT * FROM public.fi", 23,
-			[]string{"public.film", "public.film_view"}, 9,
+			"table already listed offers clause keywords",
+			"SELECT * FROM film ", 19,
+			CommonSqlCommands, 0,
+		},
+		{
+			"insert into without column metadata offers keywords",
+			"INSERT INTO pg_catalog.pg_class ", 32,
+			CommonSqlCommands, 0,
+		},
+		{
+			"select statement keyword",
+			"SELECT 1; sel", 13,
+			[]string{"ect"}, 3,
 		},
 	}
 
@@ -366,14 +425,66 @@ func TestWithContextCompletionFallsThrough(t *testing.T) {
 	}
 }
 
-// TestCompleteWithContextOrder checks that fuzzy ranking, not alphabetical
-// order, decides the result: both film and film_view match "fi" with the
-// same score, and the shorter one wins the tie.
+// TestCompleteWithContextOrder checks the ranking, not the data source: both
+// film and film_view match "fi" as prefix-of-last-segment, and the shorter
+// one wins the tie.
 func TestCompleteWithContextOrder(t *testing.T) {
-	c := completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
+	c := contextTestCompleter(t)
+	c.DoRepl([]rune("SELECT * FROM fi"), 16) // arm the loads
+	settleCompleter(t, c)
 	got := c.completeWithContext([]string{"FROM", "*", "SELECT"}, []rune("fi"))
 	if len(got) != 2 || got[0].Text != "public.film" || got[1].Text != "public.film_view" {
 		t.Errorf("completeWithContext(fi) = %q, want [public.film public.film_view]", got)
+	}
+}
+
+// TestCompletionQueryCounts pins the lazy cache's promise: each level loads
+// exactly once per scope, no matter how many keystrokes re-request it. The
+// polls re-issue the request, mirroring the UI's kick-driven re-render.
+func TestCompletionQueryCounts(t *testing.T) {
+	inner := newCountingReader()
+	c := &completer{reader: inner, logger: discardLogger(), schemaKind: "schema"}
+	WithContextCompletion()(c)
+
+	// the FROM position: one schemas load (all + current = 2 queries) and
+	// one public-objects load, however many keystrokes re-request it
+	waitFor(t, func() bool {
+		c.DoRepl([]rune("SELECT * FROM "), 14)
+		return inner.calls("tables") >= 1
+	})
+	if n := inner.calls("schemas"); n != 2 {
+		t.Fatalf("schemas queried %d times, want 2 (all + current)", n)
+	}
+	if n := inner.calls("tables"); n != 1 {
+		t.Fatalf("tables queried %d times, want 1", n)
+	}
+
+	// a second namespace: exactly one more tables query
+	waitFor(t, func() bool {
+		c.DoRepl([]rune("SELECT * FROM other."), 20)
+		return inner.calls("tables") >= 2
+	})
+	if n := inner.calls("tables"); n != 2 {
+		t.Fatalf("tables queried %d times after other., want 2", n)
+	}
+
+	// columns: one query for film, however many times its columns complete
+	waitFor(t, func() bool {
+		c.DoRepl([]rune("SELECT * FROM film f WHERE f."), 29)
+		return inner.calls("columns") >= 1
+	})
+	if n := inner.calls("columns"); n != 1 {
+		t.Fatalf("columns queried %d times, want 1", n)
+	}
+
+	// a scope change drops everything: the next request re-queries
+	c.Invalidate()
+	waitFor(t, func() bool {
+		c.DoRepl([]rune("SELECT * FROM film f WHERE f."), 29)
+		return inner.calls("columns") >= 2
+	})
+	if n := inner.calls("columns"); n != 2 {
+		t.Fatalf("columns queried %d times after invalidate, want 2", n)
 	}
 }
 

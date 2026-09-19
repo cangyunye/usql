@@ -63,6 +63,10 @@ type Context struct {
 	// The alias of a derived table maps to the zero TableRef, because its
 	// columns cannot be resolved without evaluating the subquery.
 	Aliases map[string]TableRef
+	// First is the statement's first word, upper-cased ("INSERT", "DELETE"),
+	// empty when none was recognized. It drives the verb-follows rule: the
+	// keyword that must come next.
+	First string
 }
 
 // parseContext scans line[:start] and derives the completion context at the
@@ -89,6 +93,13 @@ func parseContext(line []rune, start int) Context {
 	ctx.Qualifier, ctx.Object = splitWord(word)
 	ctx.AfterParen = afterOpenParen(line, start)
 	ctx.OpenParens = openParens(tokens)
+	// the statement's first word token is its verb
+	for _, t := range tokens {
+		if t.kind == tokIdent {
+			ctx.First = strings.ToUpper(t.text)
+			break
+		}
+	}
 	return ctx
 }
 

@@ -1,6 +1,7 @@
 package rline
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -250,6 +251,16 @@ func (s *stubCompleter) Do(line []rune, pos int) ([]Cand, int) {
 	return out, len(line)
 }
 
+// funcCompleter delegates to a swappable function, so tests can change the
+// candidate set between keystrokes and count requests.
+type funcCompleter struct {
+	f func(line []rune, pos int) ([]Cand, int)
+}
+
+func (c *funcCompleter) Do(line []rune, pos int) ([]Cand, int) {
+	return c.f(line, pos)
+}
+
 func TestLineModelMenuTabAccept(t *testing.T) {
 	tr := newTUI(nil, nil, nil, "", nil)
 	tr.Completer(&stubCompleter{cands: []string{"ect", "ect 1"}})
@@ -293,6 +304,160 @@ func TestLineModelMenuAltDigit(t *testing.T) {
 	}
 	if got := string(m.ed.buf); got != "select" {
 		t.Fatalf("alt+1 accept: %q", got)
+	}
+}
+
+// TestLineModelMenuFixedFrame: the rendered frame keeps a constant height
+// while the menu stays open, whatever the candidate count does — a shrinking
+// and regrowing frame scrolls the terminal history.
+func TestLineModelMenuFixedFrame(t *testing.T) {
+	five := make([]Cand, 5)
+	for i := range five {
+		five[i] = Cand{Text: fmt.Sprintf("ect %d", i)}
+	}
+	fc := &funcCompleter{f: func([]rune, int) ([]Cand, int) { return five, 3 }}
+	tr := newTUI(nil, nil, nil, "", nil)
+	tr.Completer(fc)
+	tr.Prompt("> ")
+	m := newLineModel(tr, "> ", -1)
+	m = typeLine(m, "sel")
+	mod, _ := m.Update(keyName("tab"))
+	m = mod.(*lineModel)
+	if m.menu == nil {
+		t.Fatal("menu did not open")
+	}
+	open := strings.Split(m.View(), "\n")
+	// the candidate set collapses to one: the frame must not shrink
+	one := []Cand{{Text: "ect"}}
+	fc.f = func([]rune, int) ([]Cand, int) { return one, 3 }
+	mod, _ = m.Update(keyTyped("x"))
+	m = mod.(*lineModel)
+	if m.menu == nil || len(m.menu) != 1 {
+		t.Fatalf("menu did not refilter: %d candidates", len(m.menu))
+	}
+	narrow := strings.Split(m.View(), "\n")
+	if len(open) != len(narrow) {
+		t.Fatalf("frame height changed on refilter: %d -> %d lines", len(open), len(narrow))
+	}
+	// and it closes entirely when no candidates match
+	fc.f = func([]rune, int) ([]Cand, int) { return nil, 0 }
+	mod, _ = m.Update(keyTyped("y"))
+	m = mod.(*lineModel)
+	if m.menu != nil {
+		t.Fatal("menu must close when no candidates match")
+	}
+}
+
+// TestLineModelMenuAutoPop: the typing-time completion pops the menu open
+// by itself, and Enter on a popped-open menu executes the line instead of
+// accepting the selection.
+func TestLineModelMenuAutoPop(t *testing.T) {
+	tr := newTUI(nil, nil, nil, "", nil)
+	tr.Completer(&stubCompleter{cands: []string{"ect", "ect 1"}})
+	tr.Prompt("> ")
+	m := newLineModel(tr, "> ", -1)
+	m = typeLine(m, "sel")
+	// the debounced completion pops the menu without Tab
+	m.compDue = false
+	m.refreshCompletion()
+	if m.menu == nil {
+		t.Fatal("completion did not pop the menu open")
+	}
+	if m.menuExplicit {
+		t.Fatal("popped menu must not be explicit")
+	}
+	if string(m.ghost) != "ect" {
+		t.Fatalf("ghost = %q, want ect", string(m.ghost))
+	}
+	// Enter executes instead of accepting
+	mod, _ := m.Update(keyName("enter"))
+	m = mod.(*lineModel)
+	if !m.done {
+		t.Fatal("enter on a popped-open menu must execute the line")
+	}
+	if got := string(m.ed.buf); got != "sel" {
+		t.Fatalf("buffer changed on enter: %q", got)
+	}
+	// empty-text candidates never pop the menu
+	tr.Completer(&funcCompleter{f: func([]rune, int) ([]Cand, int) { return []Cand{{Text: ""}}, 6 }})
+	m2 := newLineModel(tr, "> ", -1)
+	m2 = typeLine(m2, "select")
+	m2.refreshCompletion()
+	if m2.menu != nil {
+		t.Fatal("empty-text candidates must not pop the menu")
+	}
+}
+
+// TestLineModelMenuGhostCoexist: while the menu is open, the best candidate
+// renders as dim ghost text after the cursor (fish style); right arrow
+// accepts it.
+func TestLineModelMenuGhostCoexist(t *testing.T) {
+	tr := newTUI(nil, nil, nil, "", nil)
+	tr.Completer(&stubCompleter{cands: []string{"ect", "ect 1"}})
+	tr.Prompt("> ")
+	m := newLineModel(tr, "> ", -1)
+	m = typeLine(m, "sel")
+	mod, _ := m.Update(keyName("tab"))
+	m = mod.(*lineModel)
+	if m.menu == nil {
+		t.Fatal("menu did not open")
+	}
+	if string(m.ghost) != "ect" {
+		t.Fatalf("ghost with menu open = %q, want %q", string(m.ghost), "ect")
+	}
+	if v := m.View(); !strings.Contains(v, "ect") {
+		t.Fatal("view missing ghost text")
+	}
+	// right arrow accepts the ghost while the menu is open
+	mod, _ = m.Update(keyName("right"))
+	m = mod.(*lineModel)
+	if got := string(m.ed.buf); got != "select" {
+		t.Fatalf("right accept: %q", got)
+	}
+}
+
+// TestLineModelMenuBackspaceCooldown: backspace with the menu open refilters
+// in place — the menu stays open — and rapid backspaces coalesce into one
+// refresh per cooldown window, with a trailing tick catching the final state.
+func TestLineModelMenuBackspaceCooldown(t *testing.T) {
+	calls := 0
+	fc := &funcCompleter{f: func(line []rune, pos int) ([]Cand, int) {
+		calls++
+		return []Cand{{Text: "ect"}}, 3
+	}}
+	tr := newTUI(nil, nil, nil, "", nil)
+	tr.Completer(fc)
+	tr.Prompt("> ")
+	m := newLineModel(tr, "> ", -1)
+	m = typeLine(m, "select")
+	mod, _ := m.Update(keyName("tab"))
+	m = mod.(*lineModel)
+	if m.menu == nil {
+		t.Fatal("menu did not open")
+	}
+	tabCalls := calls
+	// three rapid backspaces: only the first refilters synchronously
+	for i := 0; i < 3; i++ {
+		mod, _ = m.Update(keyName("backspace"))
+		m = mod.(*lineModel)
+		if m.menu == nil {
+			t.Fatalf("menu closed by backspace %d", i+1)
+		}
+	}
+	if got := string(m.ed.buf); got != "sel" {
+		t.Fatalf("buffer after backspaces: %q", got)
+	}
+	if calls != tabCalls+1 {
+		t.Fatalf("backspaces issued %d extra requests, want 1 (coalesced)", calls-tabCalls)
+	}
+	// the trailing tick refilters the final state
+	mod, _ = m.Update(compMsg{})
+	m = mod.(*lineModel)
+	if calls != tabCalls+2 {
+		t.Fatalf("trailing refresh missing: %d calls", calls)
+	}
+	if m.menu == nil || len(m.menu) != 1 {
+		t.Fatal("menu lost after trailing refresh")
 	}
 }
 
@@ -542,10 +707,11 @@ func keyAlt(s string) tea.KeyMsg {
 }
 
 func TestInputMode(t *testing.T) {
-	t.Setenv("USQL_INPUT", "tui")
 	t.Setenv("TERM", "xterm-256color")
+	// tui is the default engine for interactive sessions
+	t.Setenv("USQL_INPUT", "")
 	if !inputMode(true, false, false) {
-		t.Error("tui mode should activate when interactive")
+		t.Error("tui mode should be the default when interactive")
 	}
 	if inputMode(false, false, false) {
 		t.Error("tui mode must not activate when non-interactive")
@@ -556,9 +722,10 @@ func TestInputMode(t *testing.T) {
 	if inputMode(true, false, true) {
 		t.Error("tui mode must not activate under cygwin")
 	}
+	// readline opts back to the classic engine
 	t.Setenv("USQL_INPUT", "readline")
 	if inputMode(true, false, false) {
-		t.Error("readline must stay the default engine")
+		t.Error("USQL_INPUT=readline must select the readline engine")
 	}
 }
 
@@ -686,42 +853,61 @@ func TestLineModelMenuPlacement(t *testing.T) {
 	m := newLineModel(tr, "> ", -1)
 	mod, _ := m.Update(tea.WindowSizeMsg{Height: 6})
 	m = mod.(*lineModel)
-	if m.menuAbove || m.menuMax != 4 {
-		t.Fatalf("unknown row: above=%v max=%d", m.menuAbove, m.menuMax)
+	if m.menuMax != 4 {
+		t.Fatalf("unknown row: max=%d, want 4", m.menuMax)
+	}
+	// unknown cursor row with a tall terminal: the menu stays capped, so a
+	// misdetected bottom cannot scroll a full menu of history at once
+	mu := newLineModel(tr, "> ", -1)
+	mod, _ = mu.Update(tea.WindowSizeMsg{Height: 30})
+	mu = mod.(*lineModel)
+	if mu.menuMax != unknownRowMenuMax {
+		t.Fatalf("unknown row tall: max=%d, want %d", mu.menuMax, unknownRowMenuMax)
 	}
 	// mid-screen: full menu below the input line
 	m2 := newLineModel(tr, "> ", 10)
 	mod, _ = m2.Update(tea.WindowSizeMsg{Height: 30})
 	m2 = mod.(*lineModel)
-	if m2.menuAbove || m2.menuMax != menuHeight {
-		t.Fatalf("mid-screen: above=%v max=%d", m2.menuAbove, m2.menuMax)
+	if m2.menuMax != menuHeight {
+		t.Fatalf("mid-screen: max=%d, want %d", m2.menuMax, menuHeight)
 	}
-	// shallow space below: shrunk menu under the line
-	m3 := newLineModel(tr, "> ", 24) // 30-24-1 = 5 rows below
+	// shallow space below: shrunk menu under the line (footer row reserved)
+	m3 := newLineModel(tr, "> ", 24) // 30-24-2 = 4 rows below
 	mod, _ = m3.Update(tea.WindowSizeMsg{Height: 30})
 	m3 = mod.(*lineModel)
-	if m3.menuAbove || m3.menuMax != 5 {
-		t.Fatalf("shallow below: above=%v max=%d", m3.menuAbove, m3.menuMax)
+	if m3.menuMax != 4 {
+		t.Fatalf("shallow below: max=%d, want 4", m3.menuMax)
 	}
-	// at the bottom: the menu pops above the input line
+	// at the very bottom: no room below — the menu must not open at all,
+	// because a frame growing downward would scroll the terminal history
 	m4 := newLineModel(tr, "> ", 28)
 	mod, _ = m4.Update(tea.WindowSizeMsg{Height: 30})
 	m4 = mod.(*lineModel)
-	if !m4.menuAbove || m4.menuMax != menuHeight {
-		t.Fatalf("at bottom: above=%v max=%d", m4.menuAbove, m4.menuMax)
+	if m4.menuMax != 0 {
+		t.Fatalf("at bottom: max=%d, want 0", m4.menuMax)
 	}
-	// the rendered view places the menu above the input line
-	m4 = typeLine(m4, "sel")
-	mod, _ = m4.Update(keyName("tab"))
-	m4 = mod.(*lineModel)
-	if m4.menu == nil {
+	// one row above the bottom: exactly one menu row fits
+	m5 := newLineModel(tr, "> ", 27)
+	mod, _ = m5.Update(tea.WindowSizeMsg{Height: 30})
+	m5 = mod.(*lineModel)
+	if m5.menuMax != 1 {
+		t.Fatalf("one above bottom: max=%d, want 1", m5.menuMax)
+	}
+	// mid-screen with the menu open renders menu rows after the input line
+	m6 := newLineModel(tr, "> ", 10)
+	mod, _ = m6.Update(tea.WindowSizeMsg{Height: 30})
+	m6 = mod.(*lineModel)
+	m6 = typeLine(m6, "sel")
+	mod, _ = m6.Update(keyName("tab"))
+	m6 = mod.(*lineModel)
+	if m6.menu == nil {
 		t.Fatal("menu did not open")
 	}
-	v := m4.View()
+	v := m6.View()
 	menuIdx := strings.Index(v, "select")
 	lineIdx := strings.Index(v, "> sel")
-	if menuIdx == -1 || lineIdx == -1 || menuIdx > lineIdx {
-		t.Fatalf("menu not rendered above: menu@%d line@%d", menuIdx, lineIdx)
+	if menuIdx == -1 || lineIdx == -1 || menuIdx < lineIdx {
+		t.Fatalf("menu not rendered below the input line: menu@%d line@%d", menuIdx, lineIdx)
 	}
 }
 

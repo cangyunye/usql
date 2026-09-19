@@ -55,7 +55,7 @@ func (c completer) completeWithSelectablesFull(text []rune) []rline.Cand {
 func (c completer) completeListObjects(text []rune, load func(metadata.Filter) []rline.Cand) []rline.Cand {
 	catalog, schema, object := splitListPattern(string(text))
 	if schema == "" {
-		if matches := completePrefixFull(object, c.getNamespaces(metadata.Filter{OnlyVisible: true})); len(matches) > 0 {
+		if matches := completePrefixFull(object, c.getNamespaces(metadata.Filter{WithSystem: false})); len(matches) > 0 {
 			return matches
 		}
 		return completeFuzzyFull(object, load(metadata.Filter{OnlyVisible: true}))
@@ -175,6 +175,9 @@ func (c completer) completeWithSchemas(text []rune) []rline.Cand {
 				// name should already have a wildcard appended
 				return r.Schemas(metadata.Filter{Catalog: filter.Schema, Name: filter.Name, WithSystem: true})
 			}
+			// every schema the login can reach, not just the current one
+			filter.OnlyVisible = false
+			filter.WithSystem = false
 			return r.Schemas(filter)
 		},
 		func(res interface{}) (string, string) {

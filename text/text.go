@@ -93,6 +93,7 @@ var (
 		`title`:     `Title is unset.`,
 	}
 	TimingSet                 = `Timing is %s.`
+	CompletionRefreshed       = `Completion cache dropped; the catalog is re-read on demand.`
 	TimingDesc                = `Time: %0.3f ms`
 	InvalidValue              = `invalid -%s value %q: %s`
 	NotSupportedByDriver      = `%s not supported by %s driver`

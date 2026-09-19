@@ -153,6 +153,14 @@ func (h *Handler) SetTiming(timing bool) {
 	h.timing = timing
 }
 
+// RefreshCompletions drops the tab completion's cached catalog, so
+// subsequent completions re-query the database on demand (\refresh).
+func (h *Handler) RefreshCompletions() {
+	if h.completerInvalidate != nil {
+		h.completerInvalidate()
+	}
+}
+
 // SetEncoding sets the encoding used to decode database output to UTF-8.
 // Valid names are utf-8 (the default), gbk, gb2312, and gb18030.
 func (h *Handler) SetEncoding(name string) error {

@@ -30,12 +30,25 @@ vars:
   DRIVERS: >-
     postgres mysql oracle opengauss oboracle
     no_sqlite3 no_sqlserver no_clickhouse no_csvq
+  # build metadata stamped into --version (see main.go)
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo none
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  # stamp flags shared by every build task (--version shows them)
+  LDFLAGS: >-
+    -s -w
+    -X main.version={{.VERSION}}
+    -X main.commit={{.COMMIT}}
+    -X main.buildDate={{.DATE}}
 
 tasks:
   default:
     desc: Build usql with the test driver set (CGO-free, pure Go, stripped)
     cmds:
-      - go build -tags "{{.DRIVERS}}" -ldflags "-s -w" -o {{.BIN}} .
+      - go build -tags "{{.DRIVERS}}" -ldflags "{{.LDFLAGS}}" -o {{.BIN}} .
 
   build:
     desc: Alias of default (CGO-free test driver set)
@@ -45,14 +58,14 @@ tasks:
   build:chart:
     desc: Build CGO-free with the ECharts engine (\chart file= SVG export)
     cmds:
-      - go build -tags "{{.DRIVERS}} chart" -ldflags "-s -w" -o {{.BIN}} .
+      - go build -tags "{{.DRIVERS}} chart" -ldflags "{{.LDFLAGS}}" -o {{.BIN}} .
 
   build:cgo:
     desc: Build with CGO enabled (mattn sqlite3, resvg, terminal charts)
     env:
       CGO_ENABLED: "1"
     cmds:
-      - go build -tags "{{.DRIVERS | replace \"no_sqlite3\" \"sqlite3\"}} chart" -ldflags "-s -w" -o {{.BIN}} .
+      - go build -tags "{{.DRIVERS | replace \"no_sqlite3\" \"sqlite3\"}} chart" -ldflags "{{.LDFLAGS}}" -o {{.BIN}} .
 
   drivers:
     desc: List the drivers compiled into the built binary

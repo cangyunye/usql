@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"golang.org/x/term"
@@ -32,6 +33,11 @@ type tuiRline struct {
 	outFn  func(string) string
 	prom   string
 	kickCh chan struct{}
+	// respf filters unsolicited terminal reports from the input stream; it
+	// is session-scoped, so a report split across two reads is still
+	// recognized (a fresh filter per read would forget a held sequence and
+	// pass the tail as typed text)
+	respf *responseFilter
 	// cons is the console for terminal queries (nil when unavailable)
 	cons *os.File
 	// pendLine/pendPos preset the next read's buffer and cursor (LineEditor)
@@ -39,9 +45,13 @@ type tuiRline struct {
 	pendPos  int
 }
 
-// newTUI creates the bubbletea-backed IO implementation.
+// newTUI creates the bubbletea-backed IO implementation. Starting a TUI
+// session also puts the terminal into the session's input state, so late
+// terminal-feature responses are neither echoed nor surfaced as typed text
+// (see quiet.go).
 func newTUI(in io.Reader, out, err io.Writer, histfile string, cons *os.File) *tuiRline {
 	gout, gerr := &guardedWriter{w: out}, &guardedWriter{w: err}
+	BeginConsoleQuiet()
 	return &tuiRline{
 		in:     in,
 		raw:    out,
@@ -52,6 +62,7 @@ func newTUI(in io.Reader, out, err io.Writer, histfile string, cons *os.File) *t
 		int:    true,
 		hist:   loadTUIHistory(histfile),
 		kickCh: make(chan struct{}, 1),
+		respf:  newResponseFilter(in),
 		cons:   cons,
 	}
 }
@@ -65,7 +76,19 @@ func (t *tuiRline) Next() ([]rune, error) {
 	if prompt == "" {
 		prompt = "> "
 	}
-	m := newLineModel(t, prompt, cursorRow(t.cons, t.raw))
+	row, stray := t.probeRow()
+	m := newLineModel(t, prompt, row)
+	// keystrokes typed while output was still printing survive the probe
+	// and open the line
+	if len(stray) > 0 {
+		if t.pendLine != nil {
+			runes := bytesToRunes(stray)
+			t.pendLine = append(runes, t.pendLine...)
+			t.pendPos += len(runes)
+		} else {
+			m.ed.insertRunes(bytesToRunes(stray))
+		}
+	}
 	if t.pendLine != nil {
 		m.ed.buf, m.ed.idx = t.pendLine, t.pendPos
 		t.pendLine, t.pendPos = nil, 0
@@ -76,9 +99,16 @@ func (t *tuiRline) Next() ([]rune, error) {
 		t.gout.flush()
 		t.gerr.flush()
 	}()
-	// hide the live (terminal) cursor: the model renders its own block
+	// ISIG off for the duration of the read: Ctrl-C arrives as a byte the
+	// model turns into a graceful line clear. Between reads ISIG stays on,
+	// so Ctrl-C during a running query raises SIGINT and cancels it.
+	SuppressReadISIG()
+	defer RestoreReadISIG()
+	// hide the live (terminal) cursor: the model renders its own block.
+	// The input goes through the session response filter, so late terminal
+	// reports (DA1 / cursor-position / OSC answers) never reach the editor.
 	prog := tea.NewProgram(m,
-		tea.WithInput(t.in),
+		tea.WithInput(t.respf),
 		tea.WithOutput(t.raw),
 		tea.WithoutSignalHandler(),
 	)
@@ -91,11 +121,56 @@ func (t *tuiRline) Next() ([]rune, error) {
 	if res.interrupted {
 		return res.ed.buf, ErrInterrupt
 	}
+	// Ctrl-D on an empty line is EOF: exit the session
+	if res.done && res.ed.empty() {
+		return nil, io.EOF
+	}
 	return res.ed.buf, nil
 }
 
-// Close is a no-op: every read owns its terminal session.
-func (t *tuiRline) Close() error { return nil }
+// Close ends the session and restores the terminal echo.
+func (t *tuiRline) Close() error {
+	EndConsoleQuiet()
+	return nil
+}
+
+// ClearScreen clears the terminal (screen and scrollback), discards all
+// pending input, and resets the input filter. The next read redraws the
+// prompt at the top of the screen.
+func (t *tuiRline) ClearScreen() {
+	fmt.Fprint(t.raw, "\x1b[2J\x1b[3J\x1b[H")
+	t.respf.reset()
+	t.drainPendingInput()
+}
+
+// drainPendingInput discards every pending terminal input byte, so residue
+// queued while a query or output was running can never surface later.
+func (t *tuiRline) drainPendingInput() {
+	rd := t.cons
+	if rd == nil {
+		if f, ok := t.in.(*os.File); ok {
+			rd = f
+		}
+	}
+	if rd == nil {
+		return
+	}
+	// os.Stdin does not support read deadlines; a fresh description of the
+	// same console does
+	fresh, err := os.OpenFile("/dev/stdin", os.O_RDONLY, 0)
+	if err != nil {
+		return
+	}
+	defer fresh.Close()
+	buf := make([]byte, 128)
+	for {
+		_ = fresh.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+		n, err := fresh.Read(buf)
+		if err != nil || n == 0 {
+			return
+		}
+	}
+}
 
 // IsTUI reports the bubbletea engine (optional IO extension used by embedded
 // modal views, e.g. the \conns manager).
@@ -197,74 +272,87 @@ func inputMode(interactive, forceNonInteractive, cygwin bool) bool {
 }
 
 // selectEngine is inputMode's decision core (env values passed in for
-// testability): the TUI engine needs raw mode and VT rendering, so a cygwin
-// pty (pipe stdin) or dumb terminal falls back to readline even when
-// explicitly requested.
+// testability): the TUI engine is the default for interactive sessions —
+// USQL_INPUT=readline (or plain/off/0/false) opts back to the classic
+// readline engine. The TUI engine needs raw mode and VT rendering, so a
+// cygwin pty (pipe stdin) or dumb terminal falls back to readline.
 func selectEngine(interactive, forceNonInteractive, cygwin bool, input, term string) bool {
 	if !interactive || forceNonInteractive || cygwin {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(input)) {
-	case "tui", "bubbletea", "1", "true", "on":
-		if strings.EqualFold(strings.TrimSpace(term), "dumb") {
-			return false
-		}
-		return true
+	if strings.EqualFold(strings.TrimSpace(term), "dumb") {
+		return false
 	}
-	return false
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "readline", "plain", "classic", "0", "false", "off":
+		return false
+	}
+	return true
 }
 
 // rowRE matches a DSR cursor position report.
 var rowRE = regexp.MustCompile(`\x1b\[(\d+);(\d+)R`)
 
-// cursorRow reports the 0-based terminal row of the cursor, or -1 when it
-// cannot be determined: the console is queried (DSR 6n) in raw mode for the
-// duration of the probe, giving the read its on-screen position for the
-// candidate menu's above/below placement decision.
-func cursorRow(cons *os.File, out io.Writer) int {
-	if cons == nil {
-		return -1
+// bytesToRunes decodes utf-8 input bytes, dropping non-printables: the
+// probe's stray bytes are keystrokes typed during output, and control or
+// escape bytes among them are not line content.
+func bytesToRunes(b []byte) []rune {
+	var rs []rune
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size <= 1 {
+			i++
+			continue
+		}
+		if r < 0x20 && r != '\t' {
+			i += size
+			continue
+		}
+		rs = append(rs, r)
+		i += size
 	}
-	fd := int(cons.Fd())
-	old, err := term.MakeRaw(fd)
-	if err != nil {
-		return -1
+	return rs
+}
+
+// probeRow asks the terminal for its cursor row and returns the 0-based
+// answer, plus any stray printable bytes (typeahead) seen along the way.
+//
+// The terminal is NOT read directly: the session response filter is the
+// single input reader, so an answer split across reads is still recognized.
+// The probe pumps the filter manually — bytes the filter lets through
+// (keystrokes typed while output was still printing) come back as strays
+// and are opened on the input line; the report itself is captured inside
+// the filter.
+func (t *tuiRline) probeRow() (int, []byte) {
+	if t.respf == nil || !t.respf.deadlineOK {
+		return -1, nil
 	}
-	defer term.Restore(fd, old)
-	// the runtime's stdin file object does not support deadlines; a fresh
-	// description of the same console does
-	rd, err := os.OpenFile("/dev/stdin", os.O_RDONLY, 0)
-	if err != nil {
-		return -1
-	}
-	defer rd.Close()
-	// on darwin that open is a dup of fd 0 (one description shared with
-	// stdin/stdout/stderr), and registering the descriptor with the runtime
-	// poller for the deadline below put that shared description into
-	// non-blocking mode. left set, any stdout write larger than the
-	// terminal's output buffer fails with EAGAIN ("resource temporarily
-	// unavailable"), so hand the descriptor back in blocking mode before
-	// close; on platforms where the open created a fresh description this
-	// is a no-op.
-	defer rd.Fd()
-	if err := rd.SetReadDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
-		return -1
-	}
-	fmt.Fprint(out, "\x1b[6n")
-	var resp []byte
-	buf := make([]byte, 32)
-	for !rowRE.Match(resp) {
-		n, err := rd.Read(buf)
-		resp = append(resp, buf[:n]...)
-		if err != nil || len(resp) > 128 {
+	t.respf.takeRow()
+	fmt.Fprint(t.raw, "\x1b[6n")
+	var stray []byte
+	buf := make([]byte, 64)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := t.respf.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
 			break
 		}
+		n, err := t.respf.Read(buf)
+		for _, b := range buf[:n] {
+			if b >= 0x20 && b != 0x7f {
+				stray = append(stray, b)
+			}
+		}
+		if err != nil {
+			// quiet window: nothing more pending
+			if row, ok := t.respf.takeRow(); ok {
+				return row, stray
+			}
+		}
+		if row, ok := t.respf.takeRow(); ok {
+			return row, stray
+		}
 	}
-	row, ok := parseCursorRow(resp)
-	if !ok {
-		return -1
-	}
-	return row
+	return -1, stray
 }
 
 // parseCursorRow extracts the 0-based row from a DSR 6n response (or a

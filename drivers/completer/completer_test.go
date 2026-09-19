@@ -1,11 +1,17 @@
 package completer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xo/usql/drivers/metadata"
+	"github.com/xo/usql/rline"
 )
 
+// TestCompleter pins the append-style Do path: statement and clause
+// keywords, backslash commands, meta-command arguments, variables and files.
+// Object completion is replace-style (DoRepl) and is covered by the context
+// tests; Do never queries the database for objects.
 func TestCompleter(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -66,7 +72,7 @@ func TestCompleter(t *testing.T) {
 			1,
 		},
 		{
-			"3rd word",
+			"mid-statement keywords",
 			"SELECT * F",
 			10,
 			[]string{
@@ -77,62 +83,10 @@ func TestCompleter(t *testing.T) {
 			1,
 		},
 		{
-			"Selectables",
+			"mid-statement empty word offers the clause keywords",
 			"SELECT * FROM ",
 			14,
-			[]string{
-				"default",
-				"system",
-				"film",
-				"factory",
-			},
-			0,
-		},
-		{
-			"Namespaced with catalog",
-			"SELECT * FROM remote.",
-			21,
-			[]string{
-				"film",
-				"factory",
-			},
-			7,
-		},
-		{
-			"Namespaced with schema",
-			"SELECT * FROM system.",
-			21,
-			[]string{
-				"film",
-				"factory",
-			},
-			7,
-		},
-		{
-			"Namespaced with catalog.schema",
-			"SELECT * FROM remote.default.f",
-			30,
-			[]string{
-				"ilm",
-				"actory",
-			},
-			16,
-		},
-		{
-			"Attributes",
-			"SELECT * FROM film WHERE ",
-			25,
-			[]string{
-				"id",
-				"name",
-				"CASE",
-				"AND",
-				"OR",
-				"WHEN",
-				"THEN",
-				"ELSE",
-				"END",
-			},
+			CommonSqlCommands,
 			0,
 		},
 		{
@@ -145,25 +99,17 @@ func TestCompleter(t *testing.T) {
 			3,
 		},
 		{
-			"insert into",
+			"insert keyword continuation falls to clause keywords",
 			"INSERT IN",
 			9,
 			[]string{
-				"TO",
+				"",
+				"NER JOIN",
 			},
 			2,
 		},
 		{
-			"insert into table",
-			"INSERT INTO fi",
-			14,
-			[]string{
-				"lm",
-			},
-			2,
-		},
-		{
-			"insert into table select from",
+			"insert into table select",
 			"INSERT INTO film SE",
 			19,
 			[]string{
@@ -172,117 +118,11 @@ func TestCompleter(t *testing.T) {
 			2,
 		},
 		{
-			"insert into table attrs",
-			"INSERT INTO film (",
-			18,
-			[]string{
-				"id",
-				"name",
-			},
-			0,
-		},
-		{
-			"insert into table values",
-			"INSERT INTO film (a)",
-			20,
-			[]string{
-				"SELECT",
-				"TABLE",
-				"VALUES",
-				"OVERRIDING",
-			},
-			0,
-		},
-		{
-			"update table set attrs",
-			"UPDATE film SET ",
-			16,
-			[]string{
-				"id",
-				"name",
-			},
-			0,
-		},
-		{
-			"update table set",
-			"update film set name ",
-			21,
-			[]string{
-				"=",
-			},
-			0,
-		},
-		{
 			"variables",
 			":a",
 			2,
 			[]string{},
 			2,
-		},
-		{
-			"type on create",
-			"CREATE ",
-			7,
-			[]string{
-				"SCHEMA",
-				"DATABASE",
-				"TABLE",
-				"SEQUENCE",
-				"VIEW",
-				"TEMPORARY",
-			},
-			0,
-		},
-		{
-			"brackets on create table",
-			"CREATE TABLE p ",
-			15,
-			[]string{
-				"(",
-			},
-			0,
-		},
-		{
-			"TABLE Selectables",
-			"TABLE ",
-			6,
-			[]string{
-				"default",
-				"system",
-				"film",
-				"factory",
-			},
-			0,
-		},
-		{
-			"TABLE namespaced with catalog",
-			"TABLE remote.",
-			13,
-			[]string{
-				"film",
-				"factory",
-			},
-			7,
-		},
-		{
-			"TABLE namespaced with schema",
-			"TABLE system.",
-			13,
-			[]string{
-				"film",
-				"factory",
-			},
-			7,
-		},
-		{
-			"TABLE namespaced with catalog.schema",
-			"TABLE remote.default.f",
-			22,
-			[]string{
-				"ilm",
-				"actory",
-			},
-			16,
 		},
 		{
 			"terminated statement completes nothing",
@@ -349,6 +189,32 @@ func TestCompleter(t *testing.T) {
 				t.Errorf("Expected Do() to return length %d, got %d", test.expLength, length)
 			}
 		})
+	}
+}
+
+// TestDriverHookCompletion: a driver's beforeComplete hook (MySQL's USE
+// databases) answers positions the context engine declines.
+func TestDriverHookCompletion(t *testing.T) {
+	c := NewDefaultCompleter(
+		WithReader(mockReader{}),
+		WithBeforeComplete(func(previousWords []string, text []rune) []rline.Cand {
+			if len(previousWords) > 0 && strings.EqualFold(previousWords[len(previousWords)-1], "USE") {
+				return CompleteFromListKind("database", IGNORE_CASE, text, "mysql", "other")
+			}
+			return nil
+		}),
+	).(*completer)
+
+	got, length := c.Do([]rune("USE my"), 6)
+	if length != 2 {
+		t.Fatalf("length = %d, want 2", length)
+	}
+	if len(got) != 1 || got[0].Text != "sql" {
+		t.Fatalf("USE my = %q, want [sql]", got)
+	}
+	// the context engine must not shadow the hook: DoRepl declines USE
+	if _, _, ok := c.DoRepl([]rune("USE my"), 6); ok {
+		t.Fatal("DoRepl should decline a USE position")
 	}
 }
 

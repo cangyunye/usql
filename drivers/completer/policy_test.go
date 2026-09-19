@@ -65,11 +65,11 @@ func TestMetaPolicyTable(t *testing.T) {
 // TestKindsAttached checks that context and listing candidates carry the
 // display kinds the menu badges render.
 func TestKindsAttached(t *testing.T) {
-	c := completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
-	WithContextCompletion()(&c)
-	waitForSnapshot(t, c.snap)
+	c := contextTestCompleter(t)
+	c.DoRepl([]rune("SELECT * FROM fi"), 16) // arm the loads
+	settleCompleter(t, c)
 
-	cands, _ := c.Do([]rune("SELECT * FROM fi"), 16)
+	cands, _, _ := c.DoRepl([]rune("SELECT * FROM fi"), 16)
 	if len(cands) != 2 {
 		t.Fatalf("FROM fi = %v, want 2 candidates", cands)
 	}
@@ -77,12 +77,12 @@ func TestKindsAttached(t *testing.T) {
 		t.Errorf("FROM fi kinds = %q,%q, want table,view", cands[0].Kind, cands[1].Kind)
 	}
 
-	cands, _ = c.Do([]rune("SELECT * FROM "), 14)
+	cands, _, _ = c.DoRepl([]rune("SELECT * FROM "), 14)
 	if len(cands) == 0 || cands[0].Kind != "schema" {
 		t.Errorf("FROM schema candidates: first = %+v, want kind schema", cands[0])
 	}
 
-	cands, _ = c.Do([]rune("SELECT * FROM film WHERE "), 25)
+	cands, _, _ = c.DoRepl([]rune("SELECT * FROM film WHERE "), 25)
 	for _, c := range cands {
 		if c.Text == "id" && c.Kind != "column" {
 			t.Errorf("column candidate kind = %q, want column", c.Kind)

@@ -21,7 +21,39 @@ import (
 	"github.com/xo/usql/text"
 )
 
+// Build information, stamped at link time:
+//
+//	go build -ldflags "-X main.version=v1.2.3 -X main.commit=abc1234 -X main.date=2026-09-19T12:00:00Z"
+//
+// The Taskfile build tasks stamp these from git automatically. When unset,
+// version falls back to the source version in the text package.
+var (
+	version   = ""
+	commit    = "none"
+	buildDate = "unknown"
+)
+
+// versionString composes the --version output.
+func versionString() string {
+	v := version
+	if v == "" {
+		v = text.CommandVersion
+	}
+	if commit != "none" || buildDate != "unknown" {
+		return fmt.Sprintf("%s (commit %s, built %s)", v, commit, buildDate)
+	}
+	return v
+}
+
 func main() {
+	// hold the terminal's echo from the earliest possible moment: the
+	// feature queries sent during package init (background color, device
+	// attributes) are answered at unpredictable times, and an answer
+	// arriving while the line discipline still has echo on is splashed
+	// onto the screen and queued as input. newTUI re-arms this later for
+	// the TUI engine; other engines release it on exit.
+	rline.BeginConsoleQuiet()
+	defer rline.EndConsoleQuiet()
 	// switch the attached Windows console to UTF-8 before anything writes
 	// to it — table borders and CJK text are mojibake on a legacy code page
 	// console otherwise; no-op (with a no-op restore) elsewhere. Must run

@@ -39,6 +39,39 @@ func Quit(p *Params) error {
 	return nil
 }
 
+// Clear is a General meta command (\clear). Clears the terminal screen and
+// discards any pending terminal input, then the prompt is drawn again at
+// the top of the screen. Use it when startup residue or other terminal
+// garbage has polluted the display.
+//
+// Descs:
+//
+//	clear	clear the terminal screen and pending input
+func Clear(p *Params) error {
+	io := p.Handler.IO()
+	if cs, ok := io.(interface{ ClearScreen() }); ok {
+		cs.ClearScreen()
+		return nil
+	}
+	// engines without a native implementation: plain ANSI clear
+	fmt.Fprint(io.Stdout(), "\x1b[2J\x1b[3J\x1b[H")
+	return nil
+}
+
+// Refresh is a General meta command (\refresh). Drops the tab completion
+// cache, so subsequent completions re-query the database's catalog on
+// demand: use it after DDL that creates, drops or renames tables, views,
+// sequences or columns.
+//
+// Descs:
+//
+//	refresh	drop the completion cache, re-reading the catalog on demand
+func Refresh(p *Params) error {
+	p.Handler.RefreshCompletions()
+	p.Handler.Print(text.CompletionRefreshed)
+	return nil
+}
+
 // Copyright is a General meta command (\copyright). Writes the
 // application's copyright message to the output.
 //
@@ -1231,7 +1264,9 @@ func Conditional(p *Params) error {
 //
 //	!	[COMMAND]	execute command in shell or start interactive shell
 func Shell(p *Params) error {
-	return env.Shell(p.Raw())
+	var err error
+	rline.ConsoleShellOut(func() { err = env.Shell(p.Raw()) })
+	return err
 }
 
 // Chdir is a Operating System/Environment meta command (\cd). Changes the

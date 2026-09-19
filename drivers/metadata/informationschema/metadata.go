@@ -350,6 +350,13 @@ FROM information_schema.schemata
 		name:       "schema_name LIKE %s",
 		notSchemas: "schema_name NOT IN (%s)",
 	})
+	// the OnlyVisible restriction filters the schema-name column, which the
+	// schemata query expresses through its name format, so conditions'
+	// schema-based OnlyVisible clause cannot apply; add it here, or
+	// OnlyVisible would be silently ignored
+	if f.OnlyVisible && s.currentSchema != "" {
+		conds = append(conds, fmt.Sprintf("schema_name LIKE %s", s.currentSchema))
+	}
 	rows, closeRows, err := s.query(qstr, conds, "catalog_name, schema_name", vals...)
 	if err != nil {
 		if err == sql.ErrNoRows {

@@ -23,11 +23,11 @@ import (
 // large catalog. Enabled only when USQL_BENCH_DSN is set (comma-separated
 // DSNs); each connection reports:
 //
-//	cold    — connect to first non-empty DoLive candidates (snapshot load)
+//	cold    — connect to first non-empty DoLive candidates (lazy cache load)
 //	typing  — per-keystroke DoLive latency while extending one word
 //	retype  — per-keystroke latency after the word completed
 //	erase   — per-backspace latency (candidate set re-filter)
-//	tab     — synchronous Do latency (TAB path, through the memo)
+//	tab     — synchronous Do latency (TAB path)
 //	list    — \dt argument completion: candidate count and latency
 //	menu    — FROM position: candidate count (namespaces + selectables)
 func TestBenchLiveCatalog(t *testing.T) {

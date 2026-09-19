@@ -8,6 +8,8 @@ import (
 
 // Completion UI knobs, shared by the readline and TUI engines.
 //
+//	USQL_INPUT            interactive input engine: bubbletea (default)
+//	                      or readline (aliases: plain, classic, off)
 //	USQL_COMPLETION_ROWS  maximum candidate rows shown at once (default 10);
 //	                      further candidates stay reachable by scrolling
 //	                      (arrows / PgUp / PgDn) instead of flooding the

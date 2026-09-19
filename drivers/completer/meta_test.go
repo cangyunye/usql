@@ -102,9 +102,9 @@ func TestMetaCommandNoSQLFallback(t *testing.T) {
 
 	for _, line := range []string{`\encoding `, `\timing `, `\x `} {
 		// previousWords = the meta command, text = "" — as Do computes it
-		got := c.complete([]string{line[:len(line)-1]}, nil)
+		got := c.completeMeta([]string{line[:len(line)-1]}, nil)
 		if got != nil {
-			t.Errorf("complete(%q) = %q, want nil (no SQL keyword fallback)", line, got)
+			t.Errorf("completeMeta(%q) = %q, want nil (no SQL keyword fallback)", line, got)
 		}
 	}
 }

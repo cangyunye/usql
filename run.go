@@ -43,7 +43,7 @@ func New(cliargs []string) ContextExecutor {
 	c := &cobra.Command{
 		Use:                text.CommandName + " [flags]... [DSN]",
 		Short:              text.Short(),
-		Version:            text.CommandVersion,
+		Version:            versionString(),
 		SilenceErrors:      true,
 		SilenceUsage:       true,
 		DisableAutoGenTag:  true,

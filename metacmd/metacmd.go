@@ -80,6 +80,8 @@ type Handler interface {
 	MetadataWriter(context.Context) (metadata.Writer, error)
 	// Print formats according to a format specifier and writes to handler's standard output.
 	Print(string, ...interface{})
+	// RefreshCompletions drops the tab completion's cached catalog.
+	RefreshCompletions()
 }
 
 // Dump writes the command descriptions to w, separated by section.

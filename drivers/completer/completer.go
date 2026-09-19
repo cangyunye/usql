@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -104,6 +103,7 @@ var (
 		"ON",
 		"OR",
 		"ORDER BY",
+		"SELECT",
 		"THEN",
 		"WHEN",
 		"WHERE",
@@ -199,7 +199,9 @@ func WithBeforeComplete(f CompleteFunc) Option {
 	}
 }
 
-// completer based on https://github.com/postgres/postgres/blob/9f3665fbfc34b963933e51778c7feaa8134ac885/src/bin/psql/tab-complete.c
+// completer completes SQL statements from the statement's clause context and
+// the database's catalog, and backslash commands from the declarative
+// meta-argument policy table.
 type completer struct {
 	db               metadata.DB
 	reader           metadata.Reader
@@ -212,12 +214,11 @@ type completer struct {
 	// schemaKind is the display kind of namespace candidates (see
 	// WithSchemaKind).
 	schemaKind string
-	// cache is the metadata query cache installed by WithContextCompletion.
-	cache *cachedReader
-	// snap is the connect-time catalog snapshot installed by
-	// WithContextCompletion, serving the hot table/function/sequence/schema
-	// candidate queries from memory.
-	snap *snapshotReader
+	// cache is the lazy catalog cache installed by WithContextCompletion.
+	cache *catalogCache
+	// caps remembers which catalog kinds the database does not serve
+	// (MySQL has no sequences), so failed loads are never re-issued.
+	caps *catalogCaps
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context
@@ -225,15 +226,6 @@ type CompleteFunc func(previousWords []string, text []rune) []rline.Cand
 
 type logger interface {
 	Println(...interface{})
-}
-
-// optionsSource exposes a completer's unfiltered candidate options for a
-// replace-style (context) completion, so the live wrapper can memoize the
-// option set once per statement context and re-filter it client-side as the
-// word grows — zero completer work per keystroke. Implemented by *completer
-// when the context path is installed.
-type optionsSource interface {
-	optionsFor(line []rune, pos int) (opts []rline.Cand, word string, ok bool)
 }
 
 // wordStart returns the index of the first rune of the word at pos.
@@ -248,26 +240,11 @@ func wordStart(line []rune, pos int) int {
 	return i
 }
 
-// optionsFor returns the unfiltered candidate set for the context path at
-// pos, plus the word being typed. Ordered results (VALUES field hints) and
-// non-context paths (meta-command arguments, heuristics) are not memoizable
-// and return ok=false.
-func (c completer) optionsFor(line []rune, pos int) ([]rline.Cand, string, bool) {
-	if pos > len(line) {
-		pos = len(line)
-	}
-	text := line[wordStart(line, pos):pos]
-	if len(text) == 0 || text[0] == '\\' {
-		return nil, "", false
-	}
-	ctx := parseContext(line, pos)
-	opts, ok, ordered := c.contextOptions(ctx)
-	if !ok || ordered {
-		return nil, "", false
-	}
-	return opts, ctx.Qualifier + ctx.Object, true
-}
-
+// Do completes append-style: backslash commands, variable interpolations and
+// meta-command arguments (as suffixes after the typed text), the driver hook
+// (e.g. MySQL USE databases), and — when nothing else applies — SQL
+// keywords, which cost no queries. Object completion (tables, columns) is
+// replace-style and lives in DoRepl; the readline layer tries that first.
 func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
 	// a terminator ends the statement: complete nothing while no new word is
 	// typed, and complete the new statement as if typed on its own line
@@ -281,30 +258,36 @@ func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
 	previousWords := getPreviousWords(start, line)
 	text := line[i:start]
 
+	if res := c.completeMeta(previousWords, text); res != nil {
+		return res, len(text)
+	}
 	if c.beforeComplete != nil {
-		result := c.beforeComplete(previousWords, text)
-		if result != nil {
-			return result, len(text)
+		if res := c.beforeComplete(previousWords, text); res != nil {
+			return res, len(text)
 		}
 	}
-	result := c.complete(previousWords, text)
-	if result != nil {
-		return result, len(text)
+	if len(previousWords) == 0 {
+		// at a statement start, offer the statement keywords
+		return CompleteFromList(text, c.sqlStartCommands...), len(text)
 	}
-	return nil, 0
+	// mid-statement: the common clause keywords, never a query
+	return CompleteFromList(text, c.sqlCommands...), len(text)
 }
 
-func (c completer) complete(previousWords []string, text []rune) []rline.Cand {
+// completeMeta completes the meta layer: a backslash command itself, a
+// variable interpolation, or a meta-command's argument via the declarative
+// policy table. Candidates are append-style suffixes; nil declines.
+func (c completer) completeMeta(previousWords []string, text []rune) []rline.Cand {
 	if len(text) > 0 {
 		if len(previousWords) == 0 && text[0] == '\\' {
-			/* If current word is a backslash command, offer completions for that */
+			// a backslash command: offer the command set
 			return CompleteFromListKind("command", MATCH_CASE, text, backslashCommands...)
 		}
 		if text[0] == ':' {
 			if len(text) == 1 || text[1] == ':' {
 				return nil
 			}
-			/* If current word is a variable interpolation, handle that case */
+			// a variable interpolation
 			if text[1] == '\'' {
 				return completeFromVariables(text, ":'", "'", true)
 			}
@@ -320,123 +303,7 @@ func (c completer) complete(previousWords []string, text []rune) []rline.Cand {
 	if n := len(previousWords); n > 0 && strings.HasPrefix(previousWords[n-1], "\\") {
 		return c.completeMetaArg(previousWords[n-1], n-1, previousWords, text)
 	}
-	if len(previousWords) == 0 {
-		/* If no previous word, suggest one of the basic sql commands */
-		return CompleteFromList(text, c.sqlStartCommands...)
-	}
-	/* DELETE --- can be inside EXPLAIN, RULE, etc */
-	/* ... despite which, only complete DELETE with FROM at start of line */
-	if matches(IGNORE_CASE, previousWords, "DELETE") {
-		return CompleteFromList(text, "FROM")
-	}
-	/* Complete DELETE FROM with a list of tables */
-	if TailMatches(IGNORE_CASE, previousWords, "DELETE", "FROM") {
-		return c.completeWithUpdatables(text)
-	}
-	/* Complete DELETE FROM <table> */
-	if TailMatches(IGNORE_CASE, previousWords, "DELETE", "FROM", "*") {
-		return CompleteFromList(text, "USING", "WHERE")
-	}
-	/* XXX: implement tab completion for DELETE ... USING */
-
-	/* Complete CREATE */
-	if TailMatches(IGNORE_CASE, previousWords, "CREATE") {
-		return CompleteFromList(text, "DATABASE", "SCHEMA", "SEQUENCE", "TABLE", "VIEW", "TEMPORARY")
-	}
-	if TailMatches(IGNORE_CASE, previousWords, "CREATE", "TEMP|TEMPORARY") {
-		return CompleteFromList(text, "TABLE", "VIEW")
-	}
-	if TailMatches(IGNORE_CASE, previousWords, "CREATE", "TABLE", "*") || TailMatches(IGNORE_CASE, previousWords, "CREATE", "TEMP|TEMPORARY", "TABLE", "*") {
-		return CompleteFromList(text, "(")
-	}
-	/* INSERT --- can be inside EXPLAIN, RULE, etc */
-	/* Complete INSERT with "INTO" */
-	if TailMatches(IGNORE_CASE, previousWords, "INSERT") {
-		return CompleteFromList(text, "INTO")
-	}
-	/* Complete INSERT INTO with table names */
-	if TailMatches(IGNORE_CASE, previousWords, "INSERT", "INTO") {
-		return c.completeWithUpdatables(text)
-	}
-	/* Complete "INSERT INTO <table> (" with attribute names */
-	if TailMatches(IGNORE_CASE, previousWords, "INSERT", "INTO", "*", "(") {
-		return c.completeWithAttributes(IGNORE_CASE, previousWords[1], text)
-	}
-
-	/*
-	 * Complete INSERT INTO <table> with "(" or "VALUES" or "SELECT" or
-	 * "TABLE" or "DEFAULT VALUES" or "OVERRIDING"
-	 */
-	if TailMatches(IGNORE_CASE, previousWords, "INSERT", "INTO", "*") {
-		return CompleteFromList(text, "(", "DEFAULT VALUES", "SELECT", "TABLE", "VALUES", "OVERRIDING")
-	}
-
-	/*
-	 * Complete INSERT INTO <table> (attribs) with "VALUES" or "SELECT" or
-	 * "TABLE" or "OVERRIDING"
-	 */
-	if TailMatches(IGNORE_CASE, previousWords, "INSERT", "INTO", "*", "*") &&
-		strings.HasSuffix(previousWords[0], ")") {
-		return CompleteFromList(text, "SELECT", "TABLE", "VALUES", "OVERRIDING")
-	}
-
-	/* Complete OVERRIDING */
-	if TailMatches(IGNORE_CASE, previousWords, "OVERRIDING") {
-		return CompleteFromList(text, "SYSTEM VALUE", "USER VALUE")
-	}
-
-	/* Complete after OVERRIDING clause */
-	if TailMatches(IGNORE_CASE, previousWords, "OVERRIDING", "*", "VALUE") {
-		return CompleteFromList(text, "SELECT", "TABLE", "VALUES")
-	}
-
-	/* Insert an open parenthesis after "VALUES" */
-	if TailMatches(IGNORE_CASE, previousWords, "VALUES") && !TailMatches(IGNORE_CASE, previousWords, "DEFAULT", "VALUES") {
-		return CompleteFromList(text, "(")
-	}
-	/* UPDATE --- can be inside EXPLAIN, RULE, etc */
-	/* If prev. word is UPDATE suggest a list of tables */
-	if TailMatches(IGNORE_CASE, previousWords, "UPDATE") {
-		return c.completeWithUpdatables(text)
-	}
-	/* Complete UPDATE <table> with "SET" */
-	if TailMatches(IGNORE_CASE, previousWords, "UPDATE", "*") {
-		return CompleteFromList(text, "SET")
-	}
-	/* Complete UPDATE <table> SET with list of attributes */
-	if TailMatches(IGNORE_CASE, previousWords, "UPDATE", "*", "SET") {
-		return c.completeWithAttributes(IGNORE_CASE, previousWords[1], text)
-	}
-	/* UPDATE <table> SET <attr> = */
-	if TailMatches(IGNORE_CASE, previousWords, "UPDATE", "*", "SET", "!*=") {
-		return CompleteFromList(text, "=")
-	}
-	/* WHERE */
-	/* Simple case of the word before the where being the table name */
-	if TailMatches(IGNORE_CASE, previousWords, "*", "WHERE") {
-		// TODO would be great to _try_ to parse the (incomplete) query
-		// and get a list of possible selectables to filter by
-		return c.completeWithAttributes(IGNORE_CASE, previousWords[1], text,
-			"AND",
-			"OR",
-			"CASE",
-			"WHEN",
-			"THEN",
-			"ELSE",
-			"END",
-		)
-	}
-
-	/* ... FROM | JOIN ... */
-	if TailMatches(IGNORE_CASE, previousWords, "FROM|JOIN") {
-		return c.completeWithSelectables(text)
-	}
-	/* TABLE, but not TABLE embedded in other commands */
-	if matches(IGNORE_CASE, previousWords, "TABLE") {
-		return c.completeWithUpdatables(text)
-	}
-	// is suggesting basic sql commands better than nothing?
-	return CompleteFromList(text, c.sqlCommands...)
+	return nil
 }
 
 func getPreviousWords(point int, buf []rune) []string {
@@ -648,77 +515,6 @@ func typeKind(t string) string {
 	return ""
 }
 
-// sortCands orders candidates by text, keeping kinds attached.
-func sortCands(cands []rline.Cand) {
-	sort.Slice(cands, func(i, j int) bool { return cands[i].Text < cands[j].Text })
-}
-
-func (c completer) completeWithSelectables(text []rune) []rline.Cand {
-	filter := parseIdentifier(string(text))
-	names := c.getNamespaces(filter)
-	if r, ok := c.reader.(metadata.TableReader); ok {
-		tables := c.getCands(
-			func() (iterator, error) {
-				return r.Tables(filter)
-			},
-			func(res interface{}) (string, string) {
-				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name), typeKind(t.Type)
-			},
-		)
-		names = append(names, tables...)
-	}
-	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		functions := c.getCands(
-			func() (iterator, error) {
-				return r.Functions(filter)
-			},
-			func(res interface{}) (string, string) {
-				f := res.(*metadata.FunctionSet).Get()
-				return qualifiedIdentifier(filter, f.Catalog, f.Schema, f.Name), "function"
-			},
-		)
-		names = append(names, functions...)
-	}
-	if r, ok := c.reader.(metadata.SequenceReader); ok {
-		sequences := c.getCands(
-			func() (iterator, error) {
-				return r.Sequences(filter)
-			},
-			func(res interface{}) (string, string) {
-				s := res.(*metadata.SequenceSet).Get()
-				return qualifiedIdentifier(filter, s.Catalog, s.Schema, s.Name), "sequence"
-			},
-		)
-		names = append(names, sequences...)
-	}
-	sortCands(names)
-	// TODO make sure CompleteFromList would properly handle quoted identifiers
-	return CompleteFromListCands(text, names)
-}
-
-func (c completer) completeWithUpdatables(text []rune) []rline.Cand {
-	filter := parseIdentifier(string(text))
-	names := c.getNamespaces(filter)
-	if r, ok := c.reader.(metadata.TableReader); ok {
-		// exclude materialized views, sequences, system tables, synonyms
-		filter.Types = []string{"TABLE", "BASE TABLE", "LOCAL TEMPORARY", "GLOBAL TEMPORARY", "VIEW"}
-		tables := c.getCands(
-			func() (iterator, error) {
-				return r.Tables(filter)
-			},
-			func(res interface{}) (string, string) {
-				t := res.(*metadata.TableSet).Get()
-				return qualifiedIdentifier(filter, t.Catalog, t.Schema, t.Name), typeKind(t.Type)
-			},
-		)
-		names = append(names, tables...)
-	}
-	sortCands(names)
-	// TODO make sure CompleteFromList would properly handle quoted identifiers
-	return CompleteFromListCands(text, names)
-}
-
 func (c completer) getNamespaces(f metadata.Filter) []rline.Cand {
 	names := make([]rline.Cand, 0, 10)
 	// Catalogs (database names) are not offered as namespaces: in FROM/JOIN/
@@ -749,38 +545,6 @@ func (c completer) getNamespaces(f metadata.Filter) []rline.Cand {
 	return names
 }
 
-func (c completer) completeWithAttributes(_ caseType, selectable string, text []rune, options ...string) []rline.Cand {
-	names := make([]rline.Cand, 0, 10)
-	if r, ok := c.reader.(metadata.ColumnReader); ok {
-		parent := parseParentIdentifier(selectable)
-		columns := c.getCands(
-			func() (iterator, error) {
-				return r.Columns(parent)
-			},
-			func(res interface{}) (string, string) {
-				return res.(*metadata.ColumnSet).Get().Name, "column"
-			},
-		)
-		names = append(names, columns...)
-	}
-	if r, ok := c.reader.(metadata.FunctionReader); ok {
-		filter := parseIdentifier(string(text))
-		// functions don't have to be fully qualified to be callable
-		filter.OnlyVisible = false
-		functions := c.getCands(
-			func() (iterator, error) {
-				return r.Functions(filter)
-			},
-			func(res interface{}) (string, string) {
-				return res.(*metadata.FunctionSet).Get().Name, "function"
-			},
-		)
-		names = append(names, functions...)
-	}
-	names = append(names, CompleteFromList(text, options...)...)
-	return CompleteFromListCands(text, names)
-}
-
 // parseIdentifier into catalog, schema and name
 func parseIdentifier(name string) metadata.Filter {
 	// TODO handle quoted identifiers
@@ -801,31 +565,6 @@ func parseIdentifier(name string) metadata.Filter {
 	}
 
 	if result.Schema != "" || len(result.Name) > 3 {
-		result.WithSystem = true
-	}
-	return result
-}
-
-// parseParentIdentifier into catalog, schema and parent
-func parseParentIdentifier(name string) metadata.Filter {
-	// TODO handle quoted identifiers
-	result := metadata.Filter{}
-	if !strings.ContainsRune(name, '.') {
-		result.Parent = name
-		result.OnlyVisible = true
-	} else {
-		parts := strings.SplitN(name, ".", 3)
-		if len(parts) == 2 {
-			result.Schema = parts[0]
-			result.Parent = parts[1]
-		} else {
-			result.Catalog = parts[0]
-			result.Schema = parts[1]
-			result.Parent = parts[2]
-		}
-	}
-
-	if result.Schema != "" {
 		result.WithSystem = true
 	}
 	return result
@@ -878,28 +617,6 @@ func CompleteFromListCands(text []rune, options []rline.Cand) []rline.Cand {
 			match = strings.ToLower(match)
 		}
 		result = append(result, rline.Cand{Text: match, Kind: o.Kind})
-	}
-	return result
-}
-
-func (c completer) getNames(query func() (iterator, error), mapper func(interface{}) string) []string {
-	res, err := query()
-	if err != nil {
-		if err != text.ErrNotSupported {
-			c.logger.Println("Error getting selectables", err)
-		}
-		return nil
-	}
-	defer res.Close()
-
-	// there can be duplicates if names are not qualified
-	values := make(map[string]struct{}, 10)
-	for res.Next() {
-		values[mapper(res)] = struct{}{}
-	}
-	result := make([]string, 0, len(values))
-	for v := range values {
-		result = append(result, v)
 	}
 	return result
 }

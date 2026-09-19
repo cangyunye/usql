@@ -31,6 +31,17 @@ var (
 	compBack = 1 * time.Second
 )
 
+// menuRefreshCool coalesces delete-driven menu refreshes: a held-backspace
+// would otherwise refilter the candidate set once per key event, churning
+// the rendered frame. One refresh per cooldown window, with a trailing tick
+// catching the final state, is enough.
+const menuRefreshCool = 80 * time.Millisecond
+
+// unknownRowMenuMax caps the menu height when the cursor row is unknown
+// (a failed DSR probe): if the cursor actually sits at the screen bottom, a
+// full-height menu opening below would scroll that much history at once.
+const unknownRowMenuMax = 4
+
 // badgeMaxWidth caps the candidate text width below which kind badges are
 // right-aligned; wider candidates push the badge off-screen, so it is
 // dropped instead of wrapping the menu row.
@@ -65,14 +76,22 @@ type lineModel struct {
 	draft   []rune
 
 	// candidate menu
-	menu      []Cand // candidate suffixes/full words with kinds
-	menuLen   int    // replace length for replace-style candidates
-	menuRep   bool   // replace semantics
-	menuSel   int
-	menuTop   int  // window offset
-	menuMax   int  // window height (terminal height bounded)
-	menuAbove bool // render the menu above the input line
-	topRow    int  // terminal row the read started on (-1 unknown)
+	menu    []Cand // candidate suffixes/full words with kinds
+	menuLen int    // replace length for replace-style candidates
+	menuRep bool   // replace semantics
+	// menuExplicit reports that the menu was opened by an explicit Tab (vs
+	// popped open by the typing-time completion); only an explicit menu
+	// accepts on Enter — a popped-open one must never hijack execution
+	menuExplicit bool
+	menuSel      int
+	menuTop      int // window offset
+	menuMax      int // window height (terminal height bounded)
+	topRow       int // terminal row the read started on (-1 unknown)
+
+	// menu refresh cooldown: while set, delete-driven refreshes are held
+	// off and re-run by a trailing tick (menuPend)
+	menuCoolAt time.Time
+	menuPend   bool
 
 	// ghost suggestion (dim suffix shown at end of line)
 	ghost []rune
@@ -161,6 +180,13 @@ func (m *lineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the typing pause elapsed; typing meanwhile slid the deadline, in
 		// which case the tick re-arms instead of completing now
 		m.compPend = false
+		if !m.done && m.menuPend {
+			// trailing menu refresh: the tick fired at the cooldown point
+			m.menuPend = false
+			if m.menu != nil {
+				m.refreshCompletion()
+			}
+		}
 		if !m.done && m.compDue && time.Until(m.compDeadline) <= 0 {
 			m.computeCompletion()
 		}
@@ -301,7 +327,10 @@ func (m *lineModel) doSearch(edit bool) {
 	}
 }
 
-// handleMenuKey processes keys while the candidate menu is open.
+// handleMenuKey processes keys while the candidate menu is open. Editing
+// keys keep the menu open and refilter it in place — closing and reopening
+// per keystroke would make the frame height oscillate, which scrolls the
+// terminal history.
 func (m *lineModel) handleMenuKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cmd) {
 	switch {
 	case key == "up" || key == "ctrl+p":
@@ -314,7 +343,15 @@ func (m *lineModel) handleMenuKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	case key == "pgdown":
 		m.menuSel += m.menuMax
 		m.clampMenuSel()
-	case key == "tab" || key == "enter" || key == "ctrl+j":
+	case key == "tab":
+		m.acceptCandidate(m.menuSel)
+	case key == "enter" || key == "ctrl+j":
+		if !m.menuExplicit {
+			// the menu popped open from typing: Enter runs the line
+			m.closeMenu()
+			m.ghost = nil
+			return m.handleEditKey(msg, key)
+		}
 		m.acceptCandidate(m.menuSel)
 	case key == "esc" || key == "ctrl+g":
 		m.closeMenu()
@@ -327,10 +364,34 @@ func (m *lineModel) handleMenuKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 		key == "ctrl+left" || key == "ctrl+right" || key == "ctrl+a" || key == "ctrl+e":
 		m.closeMenu()
 		return m.handleEditKey(msg, key)
+	case key == "backspace":
+		n := m.arg
+		m.arg = 0
+		if n <= 0 {
+			n = 1
+		}
+		for k := 0; k < n && m.ed.backspace(); k++ {
+		}
+		// held-backspace refilters once per cooldown window; a trailing
+		// tick catches the final state
+		now := time.Now()
+		if now.Before(m.menuCoolAt) {
+			m.menuPend = true
+			return m, m.scheduleMenuRefresh()
+		}
+		m.menuCoolAt = now.Add(menuRefreshCool)
+		m.refreshCompletion()
 	case key == "ctrl+c" || key == "ctrl+d":
 		return m.handleKey(msg)
 	default:
-		// keep the menu open and refilter while typing (IME behavior)
+		if rs := msg.Runes; len(rs) > 0 && !msg.Alt {
+			// keep the menu open and refilter in place (IME behavior)
+			m.ed.insertRunes(rs)
+			m.refreshCompletion()
+			return m, nil
+		}
+		// other editing keys (kill, transpose, alt-digits, ...): edit, then
+		// reopen a fresh menu
 		m.closeMenu()
 		mod, cmd := m.handleEditKey(msg, key)
 		if !m.done && m.menu == nil {
@@ -621,7 +682,12 @@ func (m *lineModel) requestCandidates() ([]Cand, int, bool, bool) {
 	return cands, length, false, true
 }
 
-// refreshCompletion updates an open menu or the ghost from the completer.
+// refreshCompletion updates an open menu or — when none is open — pops the
+// IME-style dropdown open from the typing-time completion: any pause long
+// enough for the debounced completion shows the candidate list under the
+// cursor, without needing Tab. Enter still executes the line then (only a
+// Tab-opened menu accepts on Enter), so drafting a statement is never
+// hijacked by the popup.
 func (m *lineModel) refreshCompletion() {
 	cands, length, replace, ok := m.requestCandidates()
 	if !ok || len(cands) == 0 {
@@ -632,48 +698,111 @@ func (m *lineModel) refreshCompletion() {
 	if m.menu != nil {
 		m.menu, m.menuLen, m.menuRep = cands, length, replace
 		m.clampMenuSel()
+		m.setGhostAt(cands, m.menuSel, replace)
 		return
 	}
-	// ghost: the best (fuzzy-ranked) candidate at end of line
-	if m.ed.atEnd() && !m.ed.empty() {
-		if replace {
-			start, _ := wordAt(m.ed.buf, m.ed.idx)
-			typed := m.ed.buf[start:m.ed.idx]
-			if c := cands[0].Text; len(c) > len(typed) {
-				m.ghost = []rune(c[len(typed):])
-			}
-		} else {
-			m.ghost = []rune(cands[0].Text)
+	// pop the menu open when there is room below the cursor and something
+	// worth listing: candidates that carry no text (the word already
+	// completed) are not a list
+	listed := make([]Cand, 0, len(cands))
+	for _, c := range cands {
+		if c.Text != "" {
+			listed = append(listed, c)
 		}
 	}
+	if m.menuMax >= 1 && len(listed) > 0 {
+		m.menu, m.menuLen, m.menuRep = cands, length, replace
+		m.menuExplicit = false
+		m.menuSel, m.menuTop = 0, 0
+	}
+	// fish-style: the best match is dimmed after the cursor regardless
+	m.setGhostAt(cands, 0, replace)
 }
 
-// openMenu requests candidates and opens the vertical menu.
+// setGhostAt renders the i-th candidate as fish-style dim text after the
+// cursor — the cursor stays where it is; right arrow accepts. With a menu
+// open the ghost follows the selected row, so the grey text always matches
+// what Tab would insert. Replace-style candidates carry the full word, so
+// the typed prefix is stripped; plain candidates are already suffixes.
+func (m *lineModel) setGhostAt(cands []Cand, i int, replace bool) {
+	if !m.ed.atEnd() || m.ed.empty() || len(cands) == 0 || i < 0 || i >= len(cands) {
+		m.ghost = nil
+		return
+	}
+	if replace {
+		start, _ := wordAt(m.ed.buf, m.ed.idx)
+		typed := m.ed.buf[start:m.ed.idx]
+		c := cands[i].Text
+		// the ghost must read as a continuation of what is on screen: only
+		// candidates that extend the typed word show one — last-segment
+		// matches ("film" vs typed "fi" under "public.") would render a
+		// misleading mid-word ghost, so they stay menu-only
+		if strings.HasPrefix(strings.ToLower(c), strings.ToLower(string(typed))) && len(c) > len(typed) {
+			m.ghost = []rune(c[len(typed):])
+		} else {
+			m.ghost = nil
+		}
+		return
+	}
+	m.ghost = []rune(cands[i].Text)
+}
+
+// scheduleMenuRefresh arms the trailing tick that refilters the menu after
+// the delete cooldown. It shares compPend with the completion debounce —
+// only one tick can be outstanding at a time.
+func (m *lineModel) scheduleMenuRefresh() tea.Cmd {
+	if !m.menuPend || m.compPend {
+		return nil
+	}
+	m.compPend = true
+	d := time.Until(m.menuCoolAt)
+	if d < 0 {
+		d = 0
+	}
+	return tea.Tick(d, func(time.Time) tea.Msg { return compMsg{} })
+}
+
+// openMenu requests candidates and opens the vertical menu. When the space
+// below the cursor cannot hold a menu row (menuMax == 0), the menu declines:
+// opening it would scroll the terminal, and the ghost suggestion still shows
+// the best match.
 func (m *lineModel) openMenu() {
+	if m.menuMax < 1 {
+		m.closeMenu()
+		return
+	}
 	cands, length, replace, ok := m.requestCandidates()
 	if !ok || len(cands) == 0 {
 		m.closeMenu()
 		return
 	}
 	m.menu, m.menuLen, m.menuRep = cands, length, replace
+	m.menuExplicit = true
 	// the first candidate starts selected, so Enter/Tab accept it directly
 	m.menuSel, m.menuTop = 0, 0
+	// fish-style: the selected match is dimmed after the cursor while the
+	// menu lists the rest
+	m.setGhostAt(cands, 0, replace)
 }
 
 // closeMenu closes the candidate menu.
 func (m *lineModel) closeMenu() {
 	m.menu, m.menuSel, m.menuTop = nil, -1, 0
-	m.menuLen, m.menuRep = 0, false
+	m.menuLen, m.menuRep, m.menuExplicit = 0, false, false
 }
 
 // selectCandidate moves the menu selection by delta, wrapping.
 func (m *lineModel) selectCandidate(delta int) {
+	if len(m.menu) == 0 {
+		return
+	}
 	if m.menuSel < 0 {
 		m.menuSel = 0
 	} else {
 		m.menuSel = (m.menuSel + delta + len(m.menu)) % len(m.menu)
 	}
 	m.scrollMenu()
+	m.setGhostAt(m.menu, m.menuSel, m.menuRep)
 }
 
 // clampMenuSel keeps the selection inside the list after a refilter.
@@ -685,6 +814,9 @@ func (m *lineModel) clampMenuSel() {
 		m.menuSel = 0
 	}
 	m.scrollMenu()
+	if m.menu != nil {
+		m.setGhostAt(m.menu, m.menuSel, m.menuRep)
+	}
 }
 
 // scrollMenu keeps the selection inside the visible window.
@@ -692,6 +824,9 @@ func (m *lineModel) scrollMenu() {
 	h := m.menuMax
 	if h > menuHeight {
 		h = menuHeight
+	}
+	if h < 1 {
+		h = 1
 	}
 	switch {
 	case m.menuSel < m.menuTop:
@@ -724,38 +859,40 @@ func (m *lineModel) acceptCandidate(i int) {
 	m.afterEdit(false, false)
 }
 
-// minBelowRows is the smallest candidate list that is worth opening below
-// the input line; with less room the menu pops above it instead.
+// minBelowRows is the smallest terminal headroom for a usable menu.
 const minBelowRows = 5
 
-// resize recomputes the candidate menu placement for a terminal height: the
-// menu opens below the input line while several rows remain on screen,
-// otherwise above it (IME-style) — the terminal scroll provides the room.
-// Without a known cursor row the legacy top-anchored shrink applies.
+// resize recomputes the candidate menu placement for a terminal height. The
+// bubbletea frame grows downward from the row the read started on, so the
+// menu can only use the rows below the cursor without scrolling the
+// terminal history — one row is reserved for the footer. Without a known
+// cursor row the conservative small cap applies.
 func (m *lineModel) resize(h int) {
 	switch {
-	case m.topRow < 0 || h < minBelowRows+2:
-		// unknown cursor row: assume the read starts near the top
-		m.menuAbove = false
+	case m.topRow < 0:
+		// unknown cursor row (DSR probe failed): keep the menu small — if
+		// the cursor actually sits at the screen bottom, a full-height menu
+		// opening below would scroll that much history at once
+		if m.menuMax > unknownRowMenuMax {
+			m.menuMax = unknownRowMenuMax
+		}
+	case h < minBelowRows+2:
+		// tiny terminal: shrink below
 		if hh := h - 2; hh < m.menuMax {
 			if hh < 1 {
 				hh = 1
 			}
 			m.menuMax = hh
 		}
-	case h-m.topRow-1 >= minBelowRows:
-		// enough room below: open the menu under the input line
-		m.menuAbove = false
-		m.menuMax = menuHeight
-		if below := h - m.topRow - 1; below < m.menuMax {
-			m.menuMax = below
-		}
 	default:
-		// near the bottom: pop the menu above the input line
-		m.menuAbove = true
-		m.menuMax = menuHeight
-		if hh := h - 1; hh < m.menuMax {
-			m.menuMax = hh
+		// the bubbletea frame grows downward from the row the read started
+		// on, so the menu can only use the rows below the cursor without
+		// scrolling the terminal history — one row reserved for the footer
+		if mm := h - m.topRow - 2; mm < m.menuMax {
+			if mm < 0 {
+				mm = 0
+			}
+			m.menuMax = mm
 		}
 	}
 	if m.menu != nil {
@@ -767,10 +904,6 @@ func (m *lineModel) resize(h int) {
 func (m *lineModel) View() string {
 	var b strings.Builder
 	switch {
-	case m.menu != nil && m.menuAbove && !m.searching:
-		// IME-style: the popup takes the rows above the input line
-		b.WriteString(m.menuView())
-		b.WriteString(m.lineView())
 	case m.searching:
 		b.WriteString(m.searchView())
 	default:
@@ -835,14 +968,19 @@ func (m *lineModel) searchView() string {
 // menuView renders the vertical candidate menu below the input line: the
 // visible window of candidates, each with its display kind right-aligned as
 // a dim badge, and a footer counting the candidates below the window.
+//
+// The frame height is constant — min(menuMax, menuHeight) candidate rows
+// plus one footer row — regardless of how many candidates match: padding
+// with blank rows keeps the rendered frame from shrinking and growing on
+// every refilter, which would scroll the terminal history.
 func (m *lineModel) menuView() string {
 	t := uitheme.Current()
 	h := m.menuMax
 	if h > menuHeight {
 		h = menuHeight
 	}
-	if h > len(m.menu) {
-		h = len(m.menu)
+	if h < 1 {
+		h = 1
 	}
 	end := m.menuTop + h
 	if end > len(m.menu) {
@@ -879,25 +1017,32 @@ func (m *lineModel) menuView() string {
 	}
 	badge := maxw <= badgeMaxWidth
 	var b strings.Builder
-	for k, i := 0, m.menuTop; i < end; k, i = k+1, i+1 {
-		row := texts[k] + strings.Repeat(" ", maxw-widths[k])
-		kind := m.menu[i].Kind
-		if i == m.menuSel {
-			b.WriteString(t.Selected.Render(mark + row))
-			if badge && kind != "" {
-				b.WriteString(t.Selected.Render("  " + kind))
-			}
-		} else {
-			b.WriteString("  " + row)
-			if badge && kind != "" {
-				b.WriteString(t.Dim.Render("  " + kind))
+	for k, i := 0, m.menuTop; k < h; k, i = k+1, i+1 {
+		// every row — the first included — starts on a fresh line: the
+		// menu renders below the input line, which does not end in a
+		// newline of its own
+		b.WriteString("\n")
+		if i < end {
+			row := texts[k] + strings.Repeat(" ", maxw-widths[k])
+			kind := m.menu[i].Kind
+			if i == m.menuSel {
+				b.WriteString(t.Selected.Render(mark + row))
+				if badge && kind != "" {
+					b.WriteString(t.Selected.Render("  " + kind))
+				}
+			} else {
+				b.WriteString("  " + row)
+				if badge && kind != "" {
+					b.WriteString(t.Dim.Render("  " + kind))
+				}
 			}
 		}
-		b.WriteString("\n")
 	}
+	// the footer row is always rendered, so the frame ends at a fixed height
 	if more := len(m.menu) - end; more > 0 {
-		b.WriteString(t.Dim.Render("  " + dots + strconv.Itoa(more) + " more"))
 		b.WriteString("\n")
+		b.WriteString(t.Dim.Render("  " + dots + strconv.Itoa(more) + " more"))
 	}
+	b.WriteString("\n")
 	return b.String()
 }

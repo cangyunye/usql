@@ -12,21 +12,24 @@ func TestSelectEngine(t *testing.T) {
 		term                string
 		want                bool
 	}{
-		{name: "default stays readline", interactive: true, want: false},
+		{name: "default is tui", interactive: true, want: true},
 		{name: "tui opts in", interactive: true, input: "tui", want: true},
 		{name: "tui aliases opt in", interactive: true, input: "BUBBLETEA", want: true},
 		{name: "tui numeric opt in", interactive: true, input: "1", want: true},
-		{name: "non-interactive never tui", interactive: false, input: "tui", want: false},
-		{name: "forced non-interactive never tui", interactive: true, forceNonInteractive: true, input: "tui", want: false},
-		{name: "explicit readline", interactive: true, input: "readline", want: false},
-		{name: "unknown value stays readline", interactive: true, input: "ed", want: false},
+		{name: "non-interactive never tui", interactive: false, want: false},
+		{name: "forced non-interactive never tui", interactive: true, forceNonInteractive: true, want: false},
+		{name: "explicit readline opts out", interactive: true, input: "readline", want: false},
+		{name: "plain opts out", interactive: true, input: "plain", want: false},
+		{name: "off opts out", interactive: true, input: "off", want: false},
+		// unknown values keep the TUI default
+		{name: "unknown value stays tui", interactive: true, input: "ed", want: true},
 		// the safety net: terminals that cannot serve the TUI engine fall
-		// back to readline even when explicitly requested
-		{name: "cygwin falls back", interactive: true, cygwin: true, input: "tui", want: false},
-		{name: "dumb terminal falls back", interactive: true, input: "tui", term: "dumb", want: false},
-		{name: "dumb terminal is case-insensitive", interactive: true, input: "tui", term: "DUMB", want: false},
-		{name: "unset TERM is fine (windows)", interactive: true, input: "tui", term: "", want: true},
-		{name: "normal TERM is fine", interactive: true, input: "tui", term: "xterm-256color", want: true},
+		// back to readline
+		{name: "cygwin falls back", interactive: true, cygwin: true, want: false},
+		{name: "dumb terminal falls back", interactive: true, term: "dumb", want: false},
+		{name: "dumb terminal is case-insensitive", interactive: true, term: "DUMB", want: false},
+		{name: "unset TERM is fine (windows)", interactive: true, term: "", want: true},
+		{name: "normal TERM is fine", interactive: true, term: "xterm-256color", want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

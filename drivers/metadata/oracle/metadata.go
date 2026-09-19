@@ -465,12 +465,14 @@ func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]strin
 		baseParam++
 	}
 
-	// OnlyVisible pins owner to the session's current schema, which may
-	// itself be a system schema (e.g. the SYS login user on OceanBase
-	// Oracle tenants) — the system-schema exclusion would then cancel the
-	// whole query, so it only applies when visibility isn't already pinned.
-	if !filter.WithSystem && formats.notSchemas != "" && !filter.OnlyVisible {
-		conds = append(conds, fmt.Sprintf(formats.notSchemas, r.systemSchemas))
+	// The system-schema exclusion must not hide the session's own current
+	// schema: on OceanBase Oracle tenants the login user is SYS — a member
+	// of the exclusion list — and without the carve-out its tables would
+	// vanish from completion snapshots and listings.
+	if !filter.WithSystem && formats.notSchemas != "" {
+		expr := strings.TrimSpace(strings.SplitN(formats.notSchemas, " NOT IN ", 2)[0])
+		conds = append(conds, fmt.Sprintf("(%s NOT IN (%s) OR %s = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))",
+			expr, r.systemSchemas, expr))
 	}
 	if filter.OnlyVisible && formats.schema != "" {
 		// follow the session's current schema (defaults to the login user,

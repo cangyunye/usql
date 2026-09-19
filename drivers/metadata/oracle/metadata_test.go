@@ -65,3 +65,30 @@ func TestCatalogsEmptyWhenAllAuxiliaryViewsMissing(t *testing.T) {
 		t.Fatalf("unexpected catalog %q", set.Get().Catalog)
 	}
 }
+
+// TestConditionsCurrentSchemaCarveOut: the system-schema exclusion must not
+// hide the session's own current schema — on OceanBase Oracle tenants the
+// login user is SYS, a member of the exclusion list, and its objects would
+// otherwise vanish from completion snapshots and listings.
+func TestConditionsCurrentSchemaCarveOut(t *testing.T) {
+	r := NewReaderQ()(openTestDB(t, false)).(*metaReader)
+	conds, vals := r.conditions(metadata.Filter{WithSystem: false}, formats{
+		notSchemas: "UPPER(o.owner) NOT IN (%s)",
+	})
+	want := "(UPPER(o.owner) NOT IN ('CTXSYS', 'FLOWS_FILES', 'MDSYS', 'OUTLN', 'SYS', 'SYSTEM', 'XDB', 'XS$NULL', 'OCEANBASE')" +
+		" OR UPPER(o.owner) = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))"
+	if len(conds) != 1 || conds[0] != want {
+		t.Errorf("conds = %q, want [%s]", conds, want)
+	}
+	if len(vals) != 0 {
+		t.Errorf("vals = %v, want none", vals)
+	}
+
+	// WithSystem queries skip the exclusion entirely
+	conds, _ = r.conditions(metadata.Filter{WithSystem: true}, formats{
+		notSchemas: "UPPER(o.owner) NOT IN (%s)",
+	})
+	if len(conds) != 0 {
+		t.Errorf("WithSystem conds = %q, want none", conds)
+	}
+}

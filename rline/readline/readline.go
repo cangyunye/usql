@@ -18,6 +18,7 @@
 package readline
 
 import "io"
+import "time"
 
 type Instance struct {
 	Config    *Config
@@ -45,6 +46,9 @@ type Config struct {
 	// inserting anything — an input-method-style candidate list. The menu
 	// opens on its own as the user types; TAB still completes. (usql fork)
 	LiveComplete bool
+	// LiveDebounce is how long the typing-time completion waits for the user
+	// to stop typing; zero uses the built-in default. (usql fork)
+	LiveDebounce time.Duration
 
 	// Output will transform the input buffer for display i.e (highlighting)
 	Output func(string) string

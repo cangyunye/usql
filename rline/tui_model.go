@@ -12,8 +12,9 @@ import (
 	"github.com/xo/usql/uitheme"
 )
 
-// menuHeight is the maximum number of candidates shown at once.
-const menuHeight = 10
+// menuHeight is the maximum number of candidates shown at once;
+// USQL_COMPLETION_ROWS overrides it.
+var menuHeight = completionRows()
 
 // Completion debounce policy: the typing-time completion fires after a
 // compIdle pause, but never waits longer than compMax since the word's first
@@ -21,10 +22,12 @@ const menuHeight = 10
 // that shortened the word holds it off for compBack — a shortened word means
 // the candidate set may need re-searching, which should not flash mid-mash.
 // When the statement-context memo can serve the request, the result is
-// instant anyway and only the idle delay applies.
-const (
-	compIdle = 150 * time.Millisecond
-	compMax  = 1500 * time.Millisecond
+// instant anyway and only the idle delay applies. compIdle defaults to
+// 150ms and is overridden by USQL_COMPLETION_DELAY (milliseconds); compMax
+// scales with it.
+var (
+	compIdle = completionDelay()
+	compMax  = 10 * compIdle
 	compBack = 1 * time.Second
 )
 

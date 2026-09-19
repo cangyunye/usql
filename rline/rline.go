@@ -238,6 +238,10 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 			Stderr:                 stderr,
 			// typing-time candidate menu (display-only); TAB still completes
 			LiveComplete: interactive || cygwin,
+			// cap the rendered candidate rows and set the typing-time
+			// debounce (USQL_COMPLETION_ROWS / USQL_COMPLETION_DELAY)
+			MaxCompleteLines: completionRows(),
+			LiveDebounce:     completionDelay(),
 			FuncIsTerminal: func() bool {
 				return interactive || cygwin
 			},

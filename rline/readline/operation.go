@@ -10,10 +10,8 @@ var (
 	ErrInterrupt = errors.New("Interrupt")
 )
 
-// liveDebounce is how long the typing-time completion waits for the user to
-// stop typing: keystrokes in quick succession — typing, but especially
-// paste — keep re-arming it, so the candidate menu/ghost fires once per
-// typing pause instead of once per rune. (usql fork)
+// liveDebounce is the default typing-time completion debounce, used when the
+// config does not override it (usql fork).
 const liveDebounce = 150 * time.Millisecond
 
 type InterruptError struct {
@@ -68,7 +66,11 @@ func (o *Operation) LiveDebounce() {
 	if o.liveTimer != nil {
 		o.liveTimer.Stop()
 	}
-	o.liveTimer = time.AfterFunc(liveDebounce, o.LiveComplete)
+	d := liveDebounce
+	if o.cfg != nil && o.cfg.LiveDebounce > 0 {
+		d = o.cfg.LiveDebounce
+	}
+	o.liveTimer = time.AfterFunc(d, o.LiveComplete)
 }
 
 // cancelLive stops a pending debounced completion, so it cannot fire into a

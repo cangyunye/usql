@@ -326,6 +326,7 @@ func (o *opCompleter) completeRefreshLocked() {
 
 	lines := 1 // do not count first line
 	realLines := 0
+	shown := 0 // candidates actually rendered (after paging and the cap)
 	buf.WriteString("\033[J")
 	for idx, c := range o.candidate {
 		colIdx := idx % colNum // currentLine Index
@@ -340,6 +341,7 @@ func (o *opCompleter) completeRefreshLocked() {
 		if realLines <= lineSkip { // Ignore content for the first lines
 			continue
 		}
+		shown++
 		inSelect := idx == o.candidateChoise && o.IsInCompleteSelectMode()
 		if inSelect {
 			buf.WriteString("\033[30;47m")
@@ -353,8 +355,19 @@ func (o *opCompleter) completeRefreshLocked() {
 		}
 	}
 
+	// dim "more below" hint when the cap (or a select-mode page) hides
+	// candidates, so long lists announce themselves instead of silently
+	// truncating. The break above leaves the dangling newline of the first
+	// unrendered row behind, which is exactly the footer's row.
+	footer := 0
+	if total := len(o.candidate); shown < total {
+		first := lineSkip*colNum + 1
+		fmt.Fprintf(buf, "\033[2m… %d-%d of %d — PgDn/PgUp browse, type to narrow\033[0m", first, first+shown-1, total)
+		footer = 1
+	}
+
 	// move back
-	fmt.Fprintf(buf, "\033[%dA\r", lineCnt-1+lines)
+	fmt.Fprintf(buf, "\033[%dA\r", lineCnt-1+lines+footer)
 	fmt.Fprintf(buf, "\033[%dC", o.op.buf.idx+o.op.buf.PromptLen())
 	buf.Flush()
 }

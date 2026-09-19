@@ -1,6 +1,7 @@
 //go:build ignore
 
-// livetest.go is a manual, untracked harness (see .git/info/exclude) that
+// livetest.go is a manual harness (excluded from builds via //go:build
+// ignore) that
 // exercises the context-aware SQL completion against real databases through
 // the public completer API: completer.NewDefaultCompleter + the
 // WithContextCompletion option from candidates.go. No credentials are
@@ -27,9 +28,9 @@ import (
 	"strings"
 	"time"
 
+	_ "gitcode.com/opengauss/openGauss-connector-go-pq"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/helingjun/obconnector-go"
-	_ "gitcode.com/opengauss/openGauss-connector-go-pq"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/xo/usql/drivers"
@@ -142,8 +143,14 @@ func main() {
 		start := time.Now()
 		got, length := c.Do([]rune(tc.line), tc.start)
 		cands := make([]string, len(got))
-		for i, r := range got {
-			cands[i] = string(r)
+		for i, cand := range got {
+			// surface the candidate's kind badge, so the live check also
+			// verifies type tagging
+			if cand.Kind != "" {
+				cands[i] = cand.Text + " (" + cand.Kind + ")"
+			} else {
+				cands[i] = cand.Text
+			}
 		}
 		shown := strings.Join(cands, " ")
 		if len(shown) > 110 {

@@ -1,6 +1,7 @@
 //go:build ignore
 
-// complbench.go is a manual, untracked harness (see .git/info/exclude) that
+// complbench.go is a manual harness (excluded from builds via //go:build
+// ignore) that
 // measures SQL tab-completion performance against live databases at scale,
 // through the same public API the interactive completer uses
 // (completer.NewDefaultCompleter + WithContextCompletion, mirroring
@@ -27,7 +28,7 @@
 //
 // BENCH_TIMEOUT_MS overrides the metadata reader timeout (default 3000;
 // OceanBase wants ~15000). BENCH_LIMIT overrides the row limit (default
-// 1000, mirroring the app default).
+// 50000, mirroring the app's completer reader).
 package main
 
 import (
@@ -43,9 +44,9 @@ import (
 	"strings"
 	"time"
 
+	_ "gitcode.com/opengauss/openGauss-connector-go-pq"
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/helingjun/obconnector-go"
-	_ "gitcode.com/opengauss/openGauss-connector-go-pq"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/xo/usql/drivers"
@@ -54,6 +55,7 @@ import (
 	mymeta "github.com/xo/usql/drivers/metadata/mysql"
 	orameta "github.com/xo/usql/drivers/metadata/oracle"
 	pgmeta "github.com/xo/usql/drivers/metadata/postgres"
+	"github.com/xo/usql/rline"
 )
 
 type benchCase struct {
@@ -165,6 +167,24 @@ func main() {
 	c := completer.NewDefaultCompleter(opts...)
 	fmt.Printf("== completer built (snapshot loading in background) in %v\n", time.Since(tc).Round(time.Microsecond))
 
+	// settle: while the connect-time snapshot is still loading, whole-catalog
+	// completion queries are answered empty (snapshotReader's deferred mode)
+	// while typed-prefix probes can still fall back to legacy patterned
+	// queries — so wait on the empty-word enumeration, which only the landed
+	// snapshot can serve
+	settled := time.Now()
+	for {
+		if cands, _ := doComplete(c, "SELECT * FROM "); len(cands) > 0 {
+			fmt.Printf("== snapshot settled (empty-word enumeration served) after %v\n", time.Since(settled).Round(time.Millisecond))
+			break
+		}
+		if time.Since(settled) > 15*time.Second {
+			fmt.Println("== WARNING: snapshot did not settle within 15s; measuring anyway")
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	if *timeline {
 		runTimeline(c)
 	}
@@ -246,17 +266,17 @@ type dialect struct {
 func dialects(flavor string) (create dialect, drop dialect) {
 	if flavor == "oboracle" {
 		return dialect{
-			tbl:        "CREATE TABLE bench_t%04d (id NUMBER(10), c1 VARCHAR2(64), c2 NUMBER(10), c3 VARCHAR2(128), c4 DATE, c5 NUMBER(10,2))",
-			view:       "CREATE VIEW bench_v%02d AS SELECT id, c001, c002 FROM bench_wide",
-			idCol:      "id NUMBER(10)",
-			strCol:     "VARCHAR2(64)",
-			widePrefix: "c",
-			wideCols:   200,
-			ifNE:       "",
-		}, dialect{
-			tbl:  "DROP TABLE bench_t%04d",
-			view: "DROP VIEW bench_v%02d",
-		}
+				tbl:        "CREATE TABLE bench_t%04d (id NUMBER(10), c1 VARCHAR2(64), c2 NUMBER(10), c3 VARCHAR2(128), c4 DATE, c5 NUMBER(10,2))",
+				view:       "CREATE VIEW bench_v%02d AS SELECT id, c001, c002 FROM bench_wide",
+				idCol:      "id NUMBER(10)",
+				strCol:     "VARCHAR2(64)",
+				widePrefix: "c",
+				wideCols:   200,
+				ifNE:       "",
+			}, dialect{
+				tbl:  "DROP TABLE bench_t%04d",
+				view: "DROP VIEW bench_v%02d",
+			}
 	}
 	str := "VARCHAR(64)"
 	wide := 200
@@ -267,23 +287,23 @@ func dialects(flavor string) (create dialect, drop dialect) {
 		wide = 150
 	}
 	return dialect{
-		tbl:        "CREATE TABLE IF NOT EXISTS bench_t%04d (id INT, c1 VARCHAR(64), c2 INT, c3 VARCHAR(128), c4 TIMESTAMP, c5 DECIMAL(10,2))",
-		view:       "CREATE OR REPLACE VIEW bench_v%02d AS SELECT id, c001, c002 FROM bench_wide",
-		idCol:      "id INT",
-		strCol:     str,
-		widePrefix: "c",
-		wideCols:   wide,
-		ifNE:       "IF NOT EXISTS",
-	}, dialect{
-		tbl:  "DROP TABLE IF EXISTS bench_t%04d",
-		view: "DROP VIEW IF EXISTS bench_v%02d",
-	}
+			tbl:        "CREATE TABLE IF NOT EXISTS bench_t%04d (id INT, c1 VARCHAR(64), c2 INT, c3 VARCHAR(128), c4 TIMESTAMP, c5 DECIMAL(10,2))",
+			view:       "CREATE OR REPLACE VIEW bench_v%02d AS SELECT id, c001, c002 FROM bench_wide",
+			idCol:      "id INT",
+			strCol:     str,
+			widePrefix: "c",
+			wideCols:   wide,
+			ifNE:       "IF NOT EXISTS",
+		}, dialect{
+			tbl:  "DROP TABLE IF EXISTS bench_t%04d",
+			view: "DROP VIEW IF EXISTS bench_v%02d",
+		}
 }
 
 // runTimeline probes completion latency right after completer construction:
 // the first calls may block on fallback DB queries while the snapshot is
 // still loading.
-func runTimeline(c rlineCompleter) {
+func runTimeline(c rline.Completer) {
 	fmt.Println("== warm-up timeline (SELECT * FROM bench_w | bench_t0):")
 	delays := []int{0, 100, 300, 700, 1500, 3000, 6000}
 	start := time.Now()
@@ -299,7 +319,7 @@ func runTimeline(c rlineCompleter) {
 }
 
 // runCases benchmarks each completion context at the current scale.
-func runCases(c rlineCompleter, n int, nsExample string, reps int, only string) {
+func runCases(c rline.Completer, n int, nsExample string, reps int, only string) {
 	mid := n * 9 / 10
 	prefMid := fmt.Sprintf("SELECT * FROM bench_t%02d", mid/100)
 	lastName := fmt.Sprintf("bench_t%04d", n)
@@ -355,23 +375,18 @@ func runCases(c rlineCompleter, n int, nsExample string, reps int, only string) 
 }
 
 // doComplete runs the TAB path once (context-aware first, heuristics second,
-// exactly like completer.Do) and returns the candidates and the elapsed time.
-func doComplete(c rlineCompleter, line string) ([]string, time.Duration) {
+// exactly like completer.Do) and returns the candidate texts and the elapsed
+// time.
+func doComplete(c rline.Completer, line string) ([]string, time.Duration) {
 	lineR := []rune(line)
 	t0 := time.Now()
 	cands, _ := c.Do(lineR, len(lineR))
 	el := time.Since(t0)
 	res := make([]string, len(cands))
-	for i, r := range cands {
-		res[i] = string(r)
+	for i, cand := range cands {
+		res[i] = cand.Text
 	}
 	return res, el
-}
-
-// rlineCompleter is the slice of rline.Completer the bench needs, kept local
-// so the //go:build ignore harness does not import rline.
-type rlineCompleter interface {
-	Do(line []rune, pos int) ([][]rune, int)
 }
 
 func benchTimeout() time.Duration {

@@ -22,6 +22,7 @@ import (
 	"github.com/xo/usql/charset"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
+	"github.com/xo/usql/internal/dsnparse"
 	"github.com/xo/usql/rline"
 	"github.com/xo/usql/text"
 	"github.com/xo/usql/uitheme"
@@ -804,7 +805,7 @@ func Copy(p *Params) error {
 	if err != nil {
 		return err
 	}
-	src, err := dburl.Parse(srcstr)
+	src, err := dsnparse.Parse(srcstr)
 	if err != nil {
 		return err
 	}
@@ -812,7 +813,7 @@ func Copy(p *Params) error {
 	if err != nil {
 		return err
 	}
-	dest, err := dburl.Parse(deststr)
+	dest, err := dsnparse.Parse(deststr)
 	if err != nil {
 		return err
 	}

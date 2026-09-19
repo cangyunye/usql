@@ -39,6 +39,7 @@ import (
 	"github.com/xo/usql/drivers/metadata"
 	"github.com/xo/usql/drivers/rowlimit"
 	"github.com/xo/usql/env"
+	"github.com/xo/usql/internal/dsnparse"
 	"github.com/xo/usql/metacmd"
 	"github.com/xo/usql/metacmd/charts"
 	"github.com/xo/usql/rline"
@@ -858,7 +859,7 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	if len(params) < 2 {
 		dsn := params[0]
 		// parse dsn
-		u, err := dburl.Parse(dsn)
+		u, err := dsnparse.Parse(dsn)
 		if err != nil {
 			// not a URL: when already connected, treat a bare word as a
 			// database name on the current server (psql-style `\c DBNAME`)
@@ -989,8 +990,9 @@ func (h *Handler) forceParams(u *dburl.URL) {
 		u.User = user
 	}
 	// copy back to u
-	z, _ := dburl.Parse(u.String())
-	*u = *z
+	if z, err := dburl.Parse(u.String()); err == nil && z != nil {
+		*u = *z
+	}
 }
 
 // Password collects a password from input, and returns a modified DSN
@@ -1004,7 +1006,7 @@ func (h *Handler) Password(dsn string) (string, error) {
 	case ok:
 		dsn = conn[0]
 	}
-	u, err := dburl.Parse(dsn)
+	u, err := dsnparse.Parse(dsn)
 	if err != nil {
 		return "", err
 	}

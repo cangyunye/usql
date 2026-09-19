@@ -489,13 +489,18 @@ func getPreviousWords(point int, buf []rune) []string {
 		 * Otherwise we now look for the start.  The start is either the last
 		 * character before any word-break character going backwards from the
 		 * end, or it's simply character 0.  We also handle open quotes and
-		 * parentheses.
+		 * parentheses. Single-quoted string literals are folded into one
+		 * opaque word, so their contents never count as SQL keywords (the
+		 * context path's tokenizer does the same).
 		 */
+		var inSingle bool
 		for start = end; start > 0; start-- {
 			if buf[start] == '"' {
 				inquotes = !inquotes
+			} else if buf[start] == '\'' {
+				inSingle = !inSingle
 			}
-			if inquotes {
+			if inquotes || inSingle {
 				continue
 			}
 			if buf[start] == ')' {

@@ -317,12 +317,21 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 // closing transform.Writer would close the underlying terminal).
 func newEncodedWriter(w io.Writer, enc encoding.Encoding) io.WriteCloser {
 	tw := transform.NewWriter(w, charset.ConsoleEncoder(enc))
-	return &encodedWriter{w: tw}
+	e := &encodedWriter{w: tw}
+	if f, ok := w.(*os.File); ok {
+		e.file = f
+	}
+	return e
 }
 
-// encodedWriter transcodes UTF-8 writes to a console encoding.
+// encodedWriter transcodes UTF-8 writes to a console encoding. When the
+// wrapped writer is the console, it also exposes the console's Fd: terminal
+// libraries probe Fd() to detect a tty — bubbletea sizes its renderer from
+// it, and without Fd it renders with width 0, so every keystroke repaint
+// appends at the cursor instead of overwriting the prompt line.
 type encodedWriter struct {
-	w *transform.Writer
+	w    *transform.Writer
+	file *os.File // the underlying console, nil when wrapping a non-file
 }
 
 // Write satisfies io.Writer.
@@ -333,4 +342,21 @@ func (e *encodedWriter) Write(p []byte) (int, error) {
 // Close satisfies io.WriteCloser without closing the underlying writer.
 func (e *encodedWriter) Close() error {
 	return nil
+}
+
+// Fd returns the underlying console file descriptor (0 for a non-file).
+func (e *encodedWriter) Fd() uintptr {
+	if e.file != nil {
+		return e.file.Fd()
+	}
+	return 0
+}
+
+// Read reads from the underlying console, completing the io.ReadWriteCloser
+// shape terminal probes expect; usql never reads from an output writer.
+func (e *encodedWriter) Read(p []byte) (int, error) {
+	if e.file != nil {
+		return e.file.Read(p)
+	}
+	return 0, os.ErrInvalid
 }

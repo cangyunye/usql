@@ -199,7 +199,7 @@ func TestDriverHookCompletion(t *testing.T) {
 		WithReader(mockReader{}),
 		WithBeforeComplete(func(previousWords []string, text []rune) []rline.Cand {
 			if len(previousWords) > 0 && strings.EqualFold(previousWords[len(previousWords)-1], "USE") {
-				return CompleteFromListKind("database", IGNORE_CASE, text, "mysql", "other")
+				return completeFromListKind("database", IGNORE_CASE, text, "mysql", "other")
 			}
 			return nil
 		}),

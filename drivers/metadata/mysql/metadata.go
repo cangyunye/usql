@@ -47,30 +47,10 @@ var (
 			completer.WithDB(db),
 			// MySQL calls its namespaces databases; the menu badge says so
 			completer.WithSchemaKind("database"),
+			// USE registers as a statement command: the core completer serves
+			// "USE <name>" from the L1 schema cache (non-blocking)
 			completer.WithSQLStartCommands(append(completer.CommonSqlStartCommands, "USE")),
-			completer.WithBeforeComplete(complete(reader)),
 		}, opts...)
 		return completer.NewDefaultCompleter(opts...)
 	}
 )
-
-func complete(reader metadata.Reader) completer.CompleteFunc {
-	return func(previousWords []string, text []rune) []rline.Cand {
-		if completer.TailMatches(completer.IGNORE_CASE, previousWords, `USE`) {
-			return completeWithSchemas(reader, text)
-		}
-		return nil
-	}
-}
-
-func completeWithSchemas(reader metadata.Reader, text []rune) []rline.Cand {
-	schemaNames := []string{}
-	schemas, err := reader.(metadata.SchemaReader).Schemas(metadata.Filter{WithSystem: true})
-	if err != nil {
-		return nil
-	}
-	for schemas.Next() {
-		schemaNames = append(schemaNames, schemas.Get().Schema)
-	}
-	return completer.CompleteFromListKind("database", completer.IGNORE_CASE, text, schemaNames...)
-}

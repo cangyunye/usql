@@ -16,8 +16,9 @@ import (
 	"golang.org/x/term"
 )
 
-// tuiRline implements the IO interface on top of bubbletea, selected with
-// USQL_INPUT=tui. Each Next() runs a one-shot inline program, so the
+// tuiRline implements the IO interface on top of bubbletea — the default
+// engine for interactive sessions (USQL_INPUT=readline opts back out). Each
+// Next() runs a one-shot inline program, so the
 // terminal is fully released between reads and usql's normal output
 // machinery (tblfmt, pagers, \o, graphics protocols) needs no coordination.
 type tuiRline struct {
@@ -233,7 +234,7 @@ func (t *tuiRline) Save(s string) error { return t.hist.Save(s) }
 // Password prompts for a password with echo disabled.
 func (t *tuiRline) Password(prompt string) (string, error) {
 	if !t.int {
-		return "", ErrPasswordNotAvailable
+		return "", errPasswordNotAvailable
 	}
 	return readPassword(prompt, t.in, t.raw)
 }
@@ -265,8 +266,8 @@ func readPassword(prompt string, in io.Reader, out io.Writer) (string, error) {
 	return strings.TrimSuffix(line, "\n"), nil
 }
 
-// inputMode selects the TUI engine: USQL_INPUT=tui opts in for interactive
-// sessions, except on terminals that cannot serve it (see selectEngine).
+// inputMode selects the TUI engine (the default for interactive sessions);
+// see selectEngine for the fallbacks.
 func inputMode(interactive, forceNonInteractive, cygwin bool) bool {
 	return selectEngine(interactive, forceNonInteractive, cygwin,
 		os.Getenv("USQL_INPUT"), os.Getenv("TERM"))

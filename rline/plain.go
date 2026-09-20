@@ -86,7 +86,7 @@ func (p *plainReader) Save(string) error { return nil }
 // piped input it reads a plain line (echo cannot be restored on a pipe).
 func (p *plainReader) Password(prompt string) (string, error) {
 	if p.noInput {
-		return "", ErrPasswordNotAvailable
+		return "", errPasswordNotAvailable
 	}
 	return readPassword(prompt, p.stdin, p.out)
 }

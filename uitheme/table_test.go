@@ -75,8 +75,8 @@ func TestCellWidth(t *testing.T) {
 		{"\x1b[31mabc\x1b[0m", 3}, // SGR sequences are not displayable
 	}
 	for _, c := range cases {
-		if got := CellWidth(c.s); got != c.want {
-			t.Errorf("CellWidth(%q) = %d, want %d", c.s, got, c.want)
+		if got := cellWidth(c.s); got != c.want {
+			t.Errorf("cellWidth(%q) = %d, want %d", c.s, got, c.want)
 		}
 	}
 }
@@ -87,8 +87,8 @@ func TestCellWidthHonorsEastAsianWidth(t *testing.T) {
 	setEAW(true)
 	defer setEAWLocale()
 	// GBK-family locales measure ambiguous-width characters as two columns
-	if got := CellWidth("±①α"); got != 6 {
-		t.Errorf("CellWidth(±①α) with EastAsianWidth = %d, want 6", got)
+	if got := cellWidth("±①α"); got != 6 {
+		t.Errorf("cellWidth(±①α) with EastAsianWidth = %d, want 6", got)
 	}
 }
 
@@ -96,12 +96,12 @@ func TestCellWidthGBKConsole(t *testing.T) {
 	SetConsoleEncoding(simplifiedchinese.GBK)
 	defer SetConsoleEncoding(nil)
 	// the emoji is unrepresentable in GBK: the console renders '?' (width 1)
-	if got := CellWidth("😀x"); got != 2 {
-		t.Errorf("CellWidth(😀x) GBK console = %d, want 2", got)
+	if got := cellWidth("😀x"); got != 2 {
+		t.Errorf("cellWidth(😀x) GBK console = %d, want 2", got)
 	}
 	// hanzi survive transcoding at two columns each
-	if got := CellWidth("你好"); got != 4 {
-		t.Errorf("CellWidth(你好) GBK console = %d, want 4", got)
+	if got := cellWidth("你好"); got != 4 {
+		t.Errorf("cellWidth(你好) GBK console = %d, want 4", got)
 	}
 }
 
@@ -110,7 +110,7 @@ func TestCellWidthGBKConsole(t *testing.T) {
 //
 //  1. every header/data row has the same display width — this must hold on
 //     every console and under both ambiguous-width conventions, because
-//     CellWidth is what the padding math uses;
+//     cellWidth is what the padding math uses;
 //  2. every horizontal border has exactly one ─ glyph per measured column
 //     unit (+2 padding) — a glyph-count check, independent of locale;
 //  3. when box-drawing glyphs and content measure in the same unit
@@ -123,20 +123,20 @@ func assertTableAligned(t *testing.T, label string) {
 	if len(lines) != len(alignFixture)+4 {
 		t.Fatalf("[%s] line count = %d, want %d", label, len(lines), len(alignFixture)+4)
 	}
-	want := CellWidth(lines[1])
+	want := cellWidth(lines[1])
 	for i, line := range lines {
 		if !strings.ContainsRune(line, '│') {
 			continue
 		}
-		if got := CellWidth(line); got != want {
+		if got := cellWidth(line); got != want {
 			t.Errorf("[%s] row %d width = %d, want %d (line %q)", label, i, got, want, line)
 		}
 	}
 	assertBorders(t, label, lines)
 	if !runewidth.DefaultCondition.EastAsianWidth {
-		want := CellWidth(lines[0])
+		want := cellWidth(lines[0])
 		for i, line := range lines {
-			if got := CellWidth(line); got != want {
+			if got := cellWidth(line); got != want {
 				t.Errorf("[%s] full line %d width = %d, want %d (line %q)", label, i, got, want, line)
 			}
 		}
@@ -153,7 +153,7 @@ func assertBorders(t *testing.T, label string, lines []string) {
 	for _, line := range lines {
 		if strings.ContainsRune(line, '│') {
 			for _, seg := range strings.Split(strings.Trim(stripANSI(line), "│"), "│") {
-				widths = append(widths, CellWidth(seg))
+				widths = append(widths, cellWidth(seg))
 			}
 			break
 		}
@@ -277,7 +277,7 @@ func TestPaintTablePreservesContentAndAligns(t *testing.T) {
 		t.Fatalf("tblfmt did not render a unicode table:\n%s", plain)
 	}
 	th := Current()
-	painted := th.PaintTable(plain, TablePaint{})
+	painted := th.paintTable(plain, TablePaint{})
 	// painting must not add, remove, or rewrap any character
 	if got := stripANSI(painted); got != plain {
 		t.Errorf("painted content changed:\nwant %q\ngot  %q", plain, got)
@@ -291,7 +291,7 @@ func TestPaintTablePreservesContentAndAligns(t *testing.T) {
 		t.Fatalf("line count changed: plain %d, painted %d", len(plainLines), len(paintedLines))
 	}
 	for i := range plainLines {
-		if w1, w2 := CellWidth(plainLines[i]), CellWidth(paintedLines[i]); w1 != w2 {
+		if w1, w2 := cellWidth(plainLines[i]), cellWidth(paintedLines[i]); w1 != w2 {
 			t.Errorf("line %d width changed by painting: %d -> %d", i, w1, w2)
 		}
 	}
@@ -318,11 +318,11 @@ func TestPaintTableGBKConsoleAligns(t *testing.T) {
 			{"3", "ＡＢＣ±①"},
 		},
 	})
-	painted := Current().PaintTable(plain, TablePaint{})
+	painted := Current().paintTable(plain, TablePaint{})
 	plainLines := strings.Split(strings.TrimSuffix(plain, "\n"), "\n")
 	paintedLines := strings.Split(strings.TrimSuffix(painted, "\n"), "\n")
 	for i := range plainLines {
-		if w1, w2 := CellWidth(plainLines[i]), CellWidth(paintedLines[i]); w1 != w2 {
+		if w1, w2 := cellWidth(plainLines[i]), cellWidth(paintedLines[i]); w1 != w2 {
 			t.Errorf("GBK console: line %d width changed by painting: %d -> %d", i, w1, w2)
 		}
 	}
@@ -330,7 +330,7 @@ func TestPaintTableGBKConsoleAligns(t *testing.T) {
 	// '?' the GBK console will render
 	for _, line := range paintedLines {
 		if strings.Contains(line, "😀") {
-			if w, want := CellWidth(line), CellWidth(strings.ReplaceAll(line, "😀", "?")); w != want {
+			if w, want := cellWidth(line), cellWidth(strings.ReplaceAll(line, "😀", "?")); w != want {
 				t.Errorf("GBK console: emoji row width = %d, want %d (as rendered with '?')", w, want)
 			}
 		}
@@ -344,13 +344,13 @@ func TestPaintTablePassthrough(t *testing.T) {
 	th := Current()
 	// non-table text passes through untouched
 	for _, s := range []string{"(4 rows)\n", "Time: 1.234 ms\n", "plain text", ""} {
-		if got := th.PaintTable(s, TablePaint{}); got != s {
-			t.Errorf("PaintTable(%q) = %q, want unchanged", s, got)
+		if got := th.paintTable(s, TablePaint{}); got != s {
+			t.Errorf("paintTable(%q) = %q, want unchanged", s, got)
 		}
 	}
 	// ascii linestyle tables are not painted (the '│' keying would be wrong)
 	ascii := "| a | b |\n|---|---|\n"
-	if got := th.PaintTable(ascii, TablePaint{}); got != ascii {
+	if got := th.paintTable(ascii, TablePaint{}); got != ascii {
 		t.Errorf("ascii table painted: %q", got)
 	}
 }
@@ -370,7 +370,7 @@ func TestLineWriterMatchesPaintTable(t *testing.T) {
 		},
 	})
 	kinds := TablePaint{Kinds: func() []Kind { return []Kind{KindInt, KindString} }}
-	want := Current().PaintTable(plain, kinds)
+	want := Current().paintTable(plain, kinds)
 	// stream the same output through LineWriter in awkward chunk splits
 	// (including mid-rune and mid-line boundaries)
 	for _, chunk := range []int{1, 3, 7, 13} {
@@ -389,7 +389,7 @@ func TestLineWriterMatchesPaintTable(t *testing.T) {
 			t.Fatalf("close: %v", err)
 		}
 		if got := buf.String(); got != want {
-			t.Errorf("chunk %d: streaming output != PaintTable:\nwant %q\ngot  %q", chunk, want, got)
+			t.Errorf("chunk %d: streaming output != paintTable:\nwant %q\ngot  %q", chunk, want, got)
 		}
 	}
 }
@@ -431,7 +431,7 @@ func TestPaintTableValueKinds(t *testing.T) {
 		return []Kind{KindInt, KindFloat, KindString, KindTime, KindBool, KindBinary, KindString}
 	}}
 	plain := tblfmtString(t, rs)
-	painted := Current().PaintTable(plain, kinds)
+	painted := Current().paintTable(plain, kinds)
 	if got := stripANSI(painted); got != plain {
 		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
 	}
@@ -463,7 +463,7 @@ func TestPaintTableBinaryAndUnknownStayPlain(t *testing.T) {
 	// on a data line must be the two border renders
 	rs := &fakeResultSet{cols: []string{"bin"}, vals: [][]any{{"\x01\x02"}}}
 	plain := tblfmtStringParams(t, rs, map[string]string{"border": "2"})
-	painted := Current().PaintTable(plain, TablePaint{Kinds: func() []Kind { return []Kind{KindBinary} }})
+	painted := Current().paintTable(plain, TablePaint{Kinds: func() []Kind { return []Kind{KindBinary} }})
 	if got := stripANSI(painted); got != plain {
 		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
 	}
@@ -476,7 +476,7 @@ func TestPaintTableBinaryAndUnknownStayPlain(t *testing.T) {
 		}
 	}
 	// the same must hold for kinds the painter never saw (nil provider)
-	painted = Current().PaintTable(plain, TablePaint{})
+	painted = Current().paintTable(plain, TablePaint{})
 	for _, line := range strings.Split(strings.TrimSuffix(painted, "\n"), "\n") {
 		if strings.Contains(line, "\x01\x02") && strings.Count(line, "\x1b[38;5;") != 2 {
 			t.Errorf("nil-kinds binary data line has foreground codes:\n%q", line)
@@ -499,7 +499,7 @@ func TestPaintTableNullMarkerIsFaint(t *testing.T) {
 		Null:  "NULL",
 	}
 	plain := tblfmtStringParams(t, rs, map[string]string{"null": "NULL"})
-	painted := Current().PaintTable(plain, paint)
+	painted := Current().paintTable(plain, paint)
 	if got := stripANSI(painted); got != plain {
 		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
 	}
@@ -523,7 +523,7 @@ func TestPaintTableValueKindsBorder2(t *testing.T) {
 	}
 	kinds := TablePaint{Kinds: func() []Kind { return []Kind{KindInt, KindString} }}
 	plain := tblfmtStringParams(t, rs, map[string]string{"border": "2"})
-	painted := Current().PaintTable(plain, kinds)
+	painted := Current().paintTable(plain, kinds)
 	if got := stripANSI(painted); got != plain {
 		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
 	}
@@ -558,7 +558,7 @@ func TestPaintTableKindsPerResultSet(t *testing.T) {
 		return []Kind{KindString, KindString}
 	}}
 	plain := tblfmtString(t, rs)
-	painted := Current().PaintTable(plain, kinds)
+	painted := Current().paintTable(plain, kinds)
 	if got := stripANSI(painted); got != plain {
 		t.Fatalf("painted content changed:\nwant %q\ngot  %q", plain, got)
 	}

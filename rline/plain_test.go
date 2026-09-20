@@ -57,8 +57,8 @@ func TestPlainReaderNoInput(t *testing.T) {
 	if _, err := p.Next(); !errors.Is(err, io.EOF) {
 		t.Fatalf("Next = %v, want io.EOF", err)
 	}
-	if _, err := p.Password("pw:"); !errors.Is(err, ErrPasswordNotAvailable) {
-		t.Fatalf("Password = %v, want ErrPasswordNotAvailable", err)
+	if _, err := p.Password("pw:"); !errors.Is(err, errPasswordNotAvailable) {
+		t.Fatalf("Password = %v, want errPasswordNotAvailable", err)
 	}
 }
 

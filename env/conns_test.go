@@ -76,7 +76,7 @@ func TestSaveLoadDeleteConn(t *testing.T) {
 	if err := LoadConns(); err != nil {
 		t.Fatal(err)
 	}
-	if pw, ok, err := ReadConnPassword("dev"); err != nil || !ok || pw != "s3cr3t" {
+	if pw, ok, err := readConnPassword("dev"); err != nil || !ok || pw != "s3cr3t" {
 		t.Fatalf("reloaded secret = %q, %v, %v", pw, ok, err)
 	}
 	// components round trip
@@ -138,13 +138,14 @@ func TestConnPasswordLifecycle(t *testing.T) {
 	if err := SaveConn("svc", map[string]any{"protocol": "mysql", "hostname": "db", "database": "svc"}, ""); err != nil {
 		t.Fatal(err)
 	}
-	if pw, ok, err := ReadConnPassword("svc"); err != nil || ok {
+	if pw, ok, err := readConnPassword("svc"); err != nil || ok {
 		t.Fatalf("unexpected secret %q, %v, %v", pw, ok, err)
 	}
-	if err := UpdateConnPassword("svc", "hunter2"); err != nil {
+	if err := writeSecret("svc", "hunter2"); err != nil {
 		t.Fatal(err)
 	}
-	if pw, ok, err := ReadConnPassword("svc"); err != nil || !ok || pw != "hunter2" {
+	Vars().SetSecret("svc", "hunter2")
+	if pw, ok, err := readConnPassword("svc"); err != nil || !ok || pw != "hunter2" {
 		t.Fatalf("secret = %q, %v, %v", pw, ok, err)
 	}
 	// secrets file and key file must be 0600
@@ -163,10 +164,11 @@ func TestConnPasswordLifecycle(t *testing.T) {
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("key file mode = %o, want 600", perm)
 	}
-	if err := UpdateConnPassword("svc", ""); err != nil {
+	if err := removeSecret("svc"); err != nil {
 		t.Fatal(err)
 	}
-	if pw, ok, err := ReadConnPassword("svc"); err != nil || ok {
+	Vars().DelSecret("svc")
+	if pw, ok, err := readConnPassword("svc"); err != nil || ok {
 		t.Fatalf("secret not cleared: %q, %v, %v", pw, ok, err)
 	}
 }
@@ -201,7 +203,7 @@ func TestSecretsEncryptedAtRest(t *testing.T) {
 		t.Fatal(err)
 	}
 	secCache, vars = nil, NewDefaultVars()
-	if _, _, err := ReadConnPassword("dev"); err == nil {
+	if _, _, err := readConnPassword("dev"); err == nil {
 		t.Fatal("expected tampered secrets file to fail")
 	}
 }
@@ -228,19 +230,19 @@ func TestSecretsPassphraseMode(t *testing.T) {
 	}
 	// correct passphrase round trips across a fresh "process"
 	secCache, vars = nil, NewDefaultVars()
-	if pw, ok, err := ReadConnPassword("dev"); err != nil || !ok || pw != "pw1" {
+	if pw, ok, err := readConnPassword("dev"); err != nil || !ok || pw != "pw1" {
 		t.Fatalf("secret = %q, %v, %v", pw, ok, err)
 	}
 	// wrong passphrase fails
 	t.Setenv(EnvSecretsPassphrase, "wrong pw")
 	secCache, vars = nil, NewDefaultVars()
-	if _, _, err := ReadConnPassword("dev"); err == nil {
+	if _, _, err := readConnPassword("dev"); err == nil {
 		t.Fatal("expected wrong passphrase to fail")
 	}
 	// missing passphrase fails with a hint
 	t.Setenv(EnvSecretsPassphrase, "")
 	secCache, vars = nil, NewDefaultVars()
-	_, _, err = ReadConnPassword("dev")
+	_, _, err = readConnPassword("dev")
 	if err == nil || !strings.Contains(err.Error(), EnvSecretsPassphrase) {
 		t.Fatalf("expected %s hint, got %v", EnvSecretsPassphrase, err)
 	}
@@ -258,7 +260,7 @@ func TestLegacySecretsImport(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, secretLegacyFile), []byte(`{"conn:old":"legacy pw"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if pw, ok, err := ReadConnPassword("old"); err != nil || !ok || pw != "legacy pw" {
+	if pw, ok, err := readConnPassword("old"); err != nil || !ok || pw != "legacy pw" {
 		t.Fatalf("secret = %q, %v, %v", pw, ok, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, secretEncFile)); err != nil {

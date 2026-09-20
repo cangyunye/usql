@@ -1,6 +1,6 @@
 // Package uitheme provides usql's lipgloss-based color theme for
 // interactive output, and the single source of truth for console
-// display-width measurement (CellWidth).
+// display-width measurement (cellWidth).
 //
 // The theme is disabled automatically when color cannot be shown (NO_COLOR,
 // a color level below basic, or a non-terminal stderr); disabled styles
@@ -73,14 +73,6 @@ func Enabled() bool {
 	mu.RLock()
 	defer mu.RUnlock()
 	return !colorDisabled
-}
-
-// Name returns the active theme's name.
-func Name() string {
-	Current()
-	mu.RLock()
-	defer mu.RUnlock()
-	return themeNm
 }
 
 // Use switches the active theme by name. An unknown name is an error.

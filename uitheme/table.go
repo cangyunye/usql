@@ -20,7 +20,7 @@ var (
 	consoleEncoding encoding.Encoding
 )
 
-// CellWidth returns the display width of s on this console.
+// cellWidth returns the display width of s on this console.
 //
 // It is the single width-measurement entry point for interactive output:
 // ANSI escape sequences are ignored, characters the console encoding cannot
@@ -29,7 +29,7 @@ var (
 // same library tblfmt aligns with, including the EastAsianWidth locale fix
 // charset applies for GB18030 (and runewidth's own gbk/gb2312 handling), so
 // ambiguous-width characters measure identically in both.
-func CellWidth(s string) int {
+func cellWidth(s string) int {
 	return runewidth.StringWidth(charset.ConsolePreview(stripANSI(s), ConsoleEncoding()))
 }
 
@@ -55,7 +55,7 @@ func stripANSI(s string) string {
 
 // Table renders headers and rows as a bordered table with theme styling:
 // theme-colored borders, bold headers, and zebra-shaded even rows. Column
-// widths are computed with CellWidth, so mixed CJK/ASCII content stays
+// widths are computed with cellWidth, so mixed CJK/ASCII content stays
 // aligned on UTF-8 and GBK-family consoles alike. Rounded corners are
 // degraded to square ones when the console encoding cannot display them.
 func (t *Theme) Table(headers []string, rows [][]string) string {
@@ -65,11 +65,11 @@ func (t *Theme) Table(headers []string, rows [][]string) string {
 	}
 	widths := make([]int, n)
 	for i, h := range headers {
-		widths[i] = CellWidth(h)
+		widths[i] = cellWidth(h)
 	}
 	for _, row := range rows {
 		for i := 0; i < n && i < len(row); i++ {
-			if w := CellWidth(row[i]); w > widths[i] {
+			if w := cellWidth(row[i]); w > widths[i] {
 				widths[i] = w
 			}
 		}
@@ -136,7 +136,7 @@ func writeRow(b *strings.Builder, t *Theme, rs struct{ top, mid, bot [4]rune }, 
 		if i < len(row) {
 			cell = row[i]
 		}
-		pad := w - CellWidth(cell)
+		pad := w - cellWidth(cell)
 		if pad < 0 {
 			pad = 0
 		}
@@ -166,7 +166,7 @@ type TablePaint struct {
 	Null  string
 }
 
-// PaintTable injects theme SGR sequences into a plain tblfmt "aligned"
+// paintTable injects theme SGR sequences into a plain tblfmt "aligned"
 // table rendered with unicode linestyle: the header row is bolded, border
 // glyphs colored, data rows alternately zebra-shaded, and data cells
 // foreground-colored by their column's Kind (see TablePaint).
@@ -176,7 +176,7 @@ type TablePaint struct {
 // preserved exactly. Lines that are not table rows (footers, timings,
 // blank lines between result sets) pass through untouched, as do lines
 // without unicode column separators (expanded output, errors, notices).
-func (t *Theme) PaintTable(out string, paint TablePaint) string {
+func (t *Theme) paintTable(out string, paint TablePaint) string {
 	if colorDisabled || !strings.ContainsAny(out, "│┌└├") {
 		return out
 	}
@@ -190,7 +190,7 @@ func (t *Theme) PaintTable(out string, paint TablePaint) string {
 }
 
 // LineWriter returns an io.Writer that paints tblfmt table lines as they
-// stream through (see PaintTable), or w unchanged when color is disabled.
+// stream through (see paintTable), or w unchanged when color is disabled.
 // The returned WriteCloser's Close flushes any buffered partial line.
 func (t *Theme) LineWriter(w io.Writer, paint TablePaint) io.WriteCloser {
 	if colorDisabled {

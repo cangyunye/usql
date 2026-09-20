@@ -34,7 +34,6 @@ type Operation struct {
 	*opSearch
 	*opCompleter
 	*opPassword
-	*opVim
 
 	liveTimer *time.Timer // pending debounced typing-time completion
 }
@@ -120,7 +119,6 @@ func NewOperation(t *Terminal, cfg *Config) *Operation {
 	}
 	op.w = op.buf.w
 	op.SetConfig(cfg)
-	op.opVim = newVimMode(op)
 	op.opCompleter = newOpCompleter(op.buf.w, op, width)
 	op.opPassword = newOpPassword(op)
 	op.cfg.FuncOnWidthChanged(func() {
@@ -186,13 +184,6 @@ func (o *Operation) ioloop() {
 				o.t.KickRead()
 				fallthrough
 			case CharBell:
-				continue
-			}
-		}
-
-		if o.IsEnableVimMode() {
-			r = o.HandleVim(r, o.t.ReadRune)
-			if r == 0 {
 				continue
 			}
 		}

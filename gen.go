@@ -730,7 +730,6 @@ var sections = []string{
 	"Informational",
 	"Variables",
 	"Input/Output",
-	"Control/Conditional",
 	"Transaction",
 	"Operating System/Environment",
 }

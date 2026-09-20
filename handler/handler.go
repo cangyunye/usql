@@ -201,12 +201,6 @@ func (h *Handler) Run() error {
 	stdout, stderr, iactive := h.l.Stdout(), h.l.Stderr(), h.l.Interactive()
 	// display welcome info
 	if iactive && env.Get("QUIET") == "off" {
-		// logo
-		if typ := env.TermGraphics(); typ.Available() {
-			if err := typ.Encode(stdout, text.Logo); err != nil {
-				return err
-			}
-		}
 		// welcome text
 		fmt.Fprintln(stdout, uitheme.Current().Dim.Render(text.WelcomeDesc))
 		fmt.Fprintln(stdout)
@@ -1164,8 +1158,6 @@ func (h *Handler) Print(s string, v ...interface{}) {
 // doExecWatch repeatedly executes a query against the database.
 func (h *Handler) doExecWatch(ctx context.Context, w io.Writer, opt metacmd.Option, prefix, sqlstr string, qtyp bool, bind []interface{}) error {
 	for {
-		// the actual output that psql has: "Mon Jan 2006 3:04:05 PM MST" -- which is _slightly_ different than RFC1123
-		// fmt.Fprintf(w, "%s (every %fs)\n\n", time.Now().Format("Mon Jan 2006 3:04:05 PM MST"), float64(opt.Watch)/float64(time.Second))
 		fmt.Fprintf(w, "%s (every %v)\n", time.Now().Format(time.RFC1123), opt.Watch)
 		fmt.Fprintln(w)
 		if err := h.doExecSingle(ctx, w, opt, prefix, sqlstr, qtyp, bind); err != nil {
@@ -1187,10 +1179,6 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 	stdout, _, _ := h.l.Stdout(), h.l.Stderr(), h.l.Interactive()
 	if !chartEnabled {
 		return text.ErrChartNotBuilt
-	}
-	typ := env.TermGraphics()
-	if !typ.Available() {
-		return text.ErrGraphicsNotSupported
 	}
 	if _, ok := opt.Params["help"]; ok {
 		fmt.Fprintln(stdout, text.ChartUsage)
@@ -1242,13 +1230,11 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 	if err != nil {
 		return err
 	}
-	if cfg.File != "" {
-		fmt.Println("writing to", cfg.File)
-		return os.WriteFile(cfg.File, []byte(res), 0o644)
+	if cfg.File == "" {
+		return fmt.Errorf("terminal chart image output was removed; use \\chart ... file= to write the SVG to a file")
 	}
-	if err := renderChartImage(stdout, typ, res, cfg.Background); err != nil {
-		return err
-	}
+	fmt.Println("writing to", cfg.File)
+	return os.WriteFile(cfg.File, []byte(res), 0o644)
 	if h.timing {
 		d := time.Since(start)
 		s := text.TimingDesc
@@ -1651,25 +1637,6 @@ func (h *Handler) Rollback() error {
 }
 
 // If starts an if block.
-func (h *Handler) If(ok bool) error {
-	return nil
-}
-
-// ElseIf starts an else if block.
-func (h *Handler) ElseIf(ok bool) error {
-	return nil
-}
-
-// Else starts an else block.
-func (h *Handler) Else(bool) error {
-	return nil
-}
-
-// EndIf closes an if block.
-func (h *Handler) EndIf(bool) error {
-	return nil
-}
-
 // IncludeReader includes the content of rdr.
 func (h *Handler) IncludeReader(rdr io.Reader, path string) error {
 	r := bufio.NewReader(rdr)
@@ -1721,7 +1688,6 @@ func (h *Handler) Include(path string, relative bool) error {
 	if relative && !filepath.IsAbs(path) {
 		path = filepath.Join(h.wd, path)
 	}
-	// fmt.Fprintf(os.Stderr, "include: %s relative: %t\n", path, relative)
 	// open
 	path, f, err := env.OpenFile(h.user, path)
 	if err != nil {

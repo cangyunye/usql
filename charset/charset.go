@@ -26,9 +26,9 @@ import (
 	"golang.org/x/text/transform"
 )
 
-// EncodingNames are the encoding names accepted by ParseEncoding, in the
+// encodingNames are the encoding names accepted by ParseEncoding, in the
 // order they should be shown in error and help messages.
-var EncodingNames = []string{"utf-8", "gbk", "gb2312", "gb18030"}
+var encodingNames = []string{"utf-8", "gbk", "gb2312", "gb18030"}
 
 // ParseEncoding resolves an encoding name to a decoder, returning nil (UTF-8
 // passthrough) for the empty and UTF-8 names. GB2312 (native EUC-CN) is a
@@ -44,7 +44,7 @@ func ParseEncoding(name string) (encoding.Encoding, error) {
 	case "gb18030":
 		return simplifiedchinese.GB18030, nil
 	}
-	return nil, fmt.Errorf("unknown encoding %q (valid: %s)", name, strings.Join(EncodingNames, ", "))
+	return nil, fmt.Errorf("unknown encoding %q (valid: %s)", name, strings.Join(encodingNames, ", "))
 }
 
 // ToUTF8 decodes s with enc, returning s unchanged when enc is nil.

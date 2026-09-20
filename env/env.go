@@ -17,7 +17,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/kenshaw/rasterm"
 	"github.com/xo/dburl/passfile"
 	"github.com/xo/usql/text"
 )
@@ -167,12 +166,12 @@ func RCFile(u *user.User) string {
 	return passfile.Expand(u.HomeDir, path)
 }
 
-// Getshell returns the user's defined SHELL, or system default (if found on
+// getshell returns the user's defined SHELL, or system default (if found on
 // path) and the appropriate command-line argument for the returned shell.
 //
 // Looks at the SHELL environment variable first, and then COMSPEC/ComSpec on
 // Windows. Defaults to sh on non-Windows systems, and to cmd.exe on Windows.
-func Getshell() (string, string) {
+func getshell() (string, string) {
 	shell, ok := Getenv("SHELL")
 	param := "-c"
 	if !ok && runtime.GOOS == "windows" {
@@ -197,9 +196,9 @@ func Getshell() (string, string) {
 }
 
 // Shell runs s as a shell. When s is empty the user's SHELL or COMSPEC is
-// used. See Getshell.
+// used. See getshell.
 func Shell(s string) error {
-	shell, param := Getshell()
+	shell, param := getshell()
 	if shell == "" {
 		return text.ErrNoShellAvailable
 	}
@@ -217,7 +216,7 @@ func Shell(s string) error {
 
 // Pipe starts a command and returns its input for writing.
 func Pipe(stdout, stderr io.Writer, c string) (io.WriteCloser, *exec.Cmd, error) {
-	shell, param := Getshell()
+	shell, param := getshell()
 	if shell == "" {
 		return nil, nil, text.ErrNoShellAvailable
 	}
@@ -231,7 +230,7 @@ func Pipe(stdout, stderr io.Writer, c string) (io.WriteCloser, *exec.Cmd, error)
 }
 
 // Exec executes s using the user's SHELL / COMSPEC with -c (or /c) and
-// returning the captured output. See Getshell.
+// returning the captured output. See getshell.
 //
 // When SHELL or COMSPEC is not defined, then "sh" / "cmd.exe" will be used
 // instead, assuming it is found on the system's PATH.
@@ -240,7 +239,7 @@ func Exec(s string) (string, error) {
 	if s == "" {
 		return "", nil
 	}
-	shell, param := Getshell()
+	shell, param := getshell()
 	if shell == "" {
 		return "", text.ErrNoShellAvailable
 	}
@@ -295,7 +294,6 @@ func Unquote(s string) (string, error) {
 // user's shell (see Exec).
 func Untick(u *user.User, v *Variables, exec bool) func(string, bool) (string, bool, error) {
 	return func(s string, isvar bool) (string, bool, error) {
-		// fmt.Fprintf(os.Stderr, "untick: %q\n", s)
 		switch {
 		case isvar:
 			value, ok := v.Get(s)
@@ -327,15 +325,6 @@ func Untick(u *user.User, v *Variables, exec bool) func(string, bool) (string, b
 func Quote(s string) string {
 	s = strconv.QuoteToGraphic(s)
 	return "'" + s[1:len(s)-1] + "'"
-}
-
-// TermGraphics returns the [rasterm.TermType] based on TERM_GRAPHICS
-// environment variable.
-func TermGraphics() rasterm.TermType {
-	var typ rasterm.TermType
-	s, _ := vars.Get("TERM_GRAPHICS")
-	_ = typ.UnmarshalText([]byte(s))
-	return typ
 }
 
 // ValidIdentifier returns an error when n is not a valid identifier.

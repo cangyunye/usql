@@ -218,19 +218,19 @@ $ go install -tags 'most no_avatica no_couchbase no_postgres' github.com/xo/usql
 本 fork 还提供了配合 [Task](https://github.com/go-task/task) 运行器使用的
 [`Taskfile.yaml`](Taskfile.yaml)，封装了常用构建：`task build`（无 CGO 的测试
 驱动集）、`task build:chart`（无 CGO 并包含 `\chart` 的 ECharts 引擎）、
-`task build:cgo`（启用 CGO，支持终端图表输出）。
+`task build:cgo`（启用 CGO，使用 mattn SQLite3 驱动）。
 
 <a id="building-without-cgo"></a>
 
 #### 无 CGO 构建（Building Without CGO）
 
 无 CGO（`CGO_ENABLED=0`）构建会去掉所有对 C 库的绑定：默认的 SQLite3 驱动
-（mattn/go-sqlite3）、DuckDB、ODBC、Oracle 的 `godror` 驱动，以及 resvg 终端
-图表渲染器都会被移除。默认 SQLite3 驱动会由纯 Go 的 ModernC 转译版本
+（mattn/go-sqlite3）、DuckDB、ODBC、Oracle 的 `godror` 驱动。默认 SQLite3
+驱动会由纯 Go 的 ModernC 转译版本
 （`moderncsqlite`）替代；`sqlite3` 协议及其别名会自动路由到它：
 
 ```sh
-# base 驱动的无 CGO 构建（SQLite3 使用 ModernC，无 resvg）
+# base 驱动的无 CGO 构建（SQLite3 使用 ModernC）
 $ CGO_ENABLED=0 go build -tags 'moderncsqlite no_sqlite3' .
 
 # most 驱动的无 CGO 构建（包含 OceanBase MySQL/oboracle、openGauss）
@@ -241,10 +241,8 @@ $ CGO_ENABLED=0 go build -tags 'most no_duckdb no_odbc no_godror no_sqlite3 mode
 
 - 命名连接的密码始终保存在 AES-256-GCM 加密的 `secrets.enc` 文件中，与
   CGO 无关 —— 不涉及任何 OS 密钥环（见 [`\conns` 一节](#managing-named-connections-conns)）；
-  只有从 OS 密钥环一次性迁移密码的 `\conns migrate` 需要 CGO 构建。
 - `\chart` 需要 `chart` 构建标签（它会内嵌 goja JS 引擎和 echarts.min.js）。
-  带 `-tags chart` 的无 CGO 构建支持 `\chart ... file=` SVG 导出；终端图片
-  输出还需要 cgo 的 resvg 绑定。
+  带 `-tags chart` 时通过 `\chart ... file=` 导出 SVG；不支持终端图片输出。
 
 <a id="database-support"></a>
 
@@ -537,7 +535,7 @@ DSN）遵循与 URL 相同的解析规则，可以通过命令行传给 `usql`�
 都经过常规行编辑器，管理界面不定义任何全局快捷键，因此不会与 readline
 绑定冲突。
 
-在 [bubbletea 输入引擎][input-engine]（`USQL_INPUT=tui`）下，管理界面以
+在 [bubbletea 输入引擎][input-engine]（交互终端下的默认引擎）下，管理界面以
 **全屏模态**方式运行（独占视图，退出后还原）：`<Up>`/`<Down>` 或
 `<j>`/`<k>` 高亮行，`<Enter>`/`<行号>` 编辑，`<a>` 添加，`<c>` 连接高亮行，
 `<d>` 在 `y`/`<n>` 确认后删除，`<q>`/`<Esc>` 退出。表单用 `<Tab>`/`<Up>`/
@@ -559,8 +557,7 @@ AES-256-GCM 加密的 `secrets.enc` 文件中，以原子方式写入，权限�
 若设置了 `USQL_SECRETS_PASSPHRASE`，则改用由该口令派生的密钥
 （PBKDF2-SHA256，每文件独立盐值）—— 模式在文件首次创建时确定。
 `USQL_SECRETS_KEYFILE` 可将密钥指向其他位置（如可移动介质）。usql 不再
-使用 OS 密钥环，因此不会出现钥匙串授权弹窗；`\conns migrate` 可把早期
-版本写入 OS 密钥环的密码迁移出来（并删除密钥环条目），旧的明文兜底文件
+使用 OS 密钥环，因此不会出现钥匙串授权弹窗。旧的明文兜底文件
 `secrets.json` 会被自动导入并改名为 `secrets.json.imported`。存储的密码
 只在连接该命名连接时注入，且 `\cset` / `\conns` 的输出会掩码 URL 中内嵌
 的密码。定义在 `config.yaml` 中的连接继续可用，并以来源 `config` 只读
@@ -712,7 +709,7 @@ connections:
 的编码，其中无法表示的字符渲染为 `?`，文件或管道始终接收 UTF-8。
 
 控制台**输入**与输出一同切换为 UTF-8（代码页 65001），因此在经典 readline
-引擎和 [bubbletea 输入引擎][input-engine]（`USQL_INPUT=tui`）下都可以直接
+引擎和 [bubbletea 输入引擎][input-engine]（交互终端下的默认引擎）下都可以直接
 在查询、提示符和 [`\conns` 表单][commands]中输入中文，并以 UTF-8 保存到
 历史记录。
 
@@ -1541,21 +1538,21 @@ pg:postgres@=> select * from pu
 
 #### 输入引擎（Bubbletea TUI）
 
-`usql` 内置两种交互输入引擎。默认是经典 readline 引擎；可选的
-[bubbletea][bubbletea] 引擎提供输入法风格的纵向候选菜单和 fish/pgcli 风格
-的幽灵文本（ghost text）建议：
+`usql` 内置两种交互输入引擎。默认是 [bubbletea][bubbletea] TUI 引擎，提供
+输入法风格的纵向候选菜单和 fish/pgcli 风格的幽灵文本（ghost text）建议；
+经典 readline 引擎保留为回退：
 
 ```sh
-# 按次启用
-$ USQL_INPUT=tui usql pg://
+# 按次回退到经典引擎
+$ USQL_INPUT=readline usql pg://
 
 # 或在 shell 配置中导出
-$ export USQL_INPUT=tui
+$ export USQL_INPUT=readline
 ```
 
 TUI 引擎依赖 raw 模式和 VT 渲染。在无法提供它们的终端上——cygwin pty
-（管道 stdin）或 `TERM=dumb`——即使设置了 `USQL_INPUT=tui`，usql 也会自动
-回退到 readline 引擎。
+（管道 stdin）或 `TERM=dumb`——usql 会自动回退到 readline 引擎。非交互
+运行（管道 stdin）始终使用 plain 引擎。
 
 TUI 模式下，输入行以 **chroma 语法高亮**回显（与输出使用相同的 `SYNTAX_HL`
 样式，包括多行语句上下文），并随输入实时重新高亮。补全候选显示为提示符
@@ -1599,9 +1596,10 @@ pg:postgres@=> select * from us█ers where ...
 
 #### 彩色表格（Colored Tables）
 
-在支持颜色的交互式终端上，以 `\pset linestyle unicode` 渲染的对齐表格会
-着色：主题色边框、加粗表头、斑马纹行。着色只插入转义序列，绝不改变表格的
-字符布局，因此中日韩文字与 ASCII 混排仍能对齐。着色由以下变量控制：
+交互式会话默认 `\pset linestyle unicode`；在支持颜色的终端上，以 unicode
+制表线渲染的对齐表格会着色：主题色边框、加粗表头、斑马纹行。着色只插入
+转义序列，绝不改变表格的字符布局，因此中日韩文字与 ASCII 混排仍能对齐。
+着色由以下变量控制：
 
 ```sh
 pg:postgres@=> \pset table_color auto   # on、off 或 auto（默认）
@@ -1609,6 +1607,20 @@ pg:postgres@=> \pset table_color auto   # on、off 或 auto（默认）
 
 `auto` 时，终端支持即着色；重定向输出（`\o`、`\g file`、`\g |pipe`）永不
 着色。
+
+非交互运行（`-c`、`-f`、管道输入、`-o`）保持 `ascii` 线型，脚本化输出不受
+影响。终端或下游解析需要纯 ASCII 表格时，可显式切回：
+
+```sh
+# 仅本次调用
+$ usql -P linestyle=ascii pg://
+
+# 每次会话生效：写入 rc 文件（~/.usqlrc，或 $USQLRC 指向的文件）
+\pset linestyle ascii
+
+# 或仅在当前会话
+pg:postgres@=> \pset linestyle ascii
+```
 
 <a id="time-formatting"></a>
 
@@ -1734,75 +1746,9 @@ pg:=> \set ROWLIMIT 500      # 提高到 500
 
 #### 终端图形（Terminal Graphics）
 
-`usql` 借助 [`github.com/kenshaw/rasterm` 包][rasterm]，支持
-[Kitty][kitty-graphics]、[iTerm][iterm-graphics] 和 [Sixel][sixel-graphics]
-协议的终端图形。终端图形仅在交互式 shell 中可用。
-
-<a id="detection-and-support"></a>
-
-##### 检测与支持（Detection and Support）
-
-`usql` 会利用 `USQL_TERM_GRAPHICS`、`TERM_GRAPHICS` 以及各终端特有的环境
-变量来检测终端图形支持是否可用。
-
-支持可用时，交互会话开始时会显示 logo：
-
-<div style="padding-left: 20px;">
-  <img src="https://raw.githubusercontent.com/xo/usql-logo/main/usql-interactive.png" height="120">
-</div>
-
-<a id="charts-and-graphs"></a>
-
-##### 图表（Charts and Graphs）
-
-[`\chart` 命令][chart-command]可以在终端中直接显示图表：
-
-<div style="padding-left: 20px;">
-  <img src="https://raw.githubusercontent.com/xo/usql-logo/main/chart-example.png" height="120">
-</div>
-
-详情见 [`\chart` 元命令一节][chart-command]。
-
-<a id="enablingdisabling-terminal-graphics"></a>
-
-##### 启用/禁用终端图形（Enabling/Disabling Terminal Graphics）
-
-终端图形可以通过设置 `USQL_TERM_GRAPHICS` 或 `TERM_GRAPHICS` 环境变量来
-强制启用或禁用：
-
-```sh
-# 禁用
-$ USQL_TERM_GRAPHICS=none usql
-
-# 强制 iterm 图形
-$ TERM_GRAPHICS=iterm usql
-```
-
-| 变量            | 默认值  | 取值                                  | 说明               |
-| --------------- | ------- | ------------------------------------- | ------------------ |
-| `TERM_GRAPHICS` | ``      | ``, `kitty`, `iterm`, `sixel`, `none` | 启用/禁用终端图形  |
-
-<a id="terminals-with-graphics-support"></a>
-
-##### 支持图形的终端（Terminals with Graphics Support）
-
-以下终端已使用 `usql` 测试：
-
-- [WezTerm][wezterm] 是一款跨平台终端（Windows、macOS、Linux 等），支持
-  [iTerm][iterm-graphics] 图形
-
-- [iTerm2][iterm2] 是 macOS 终端，支持 [iTerm][iterm-graphics] 图形
-
-- [kitty][kitty] 是 Linux、macOS 及多种 BSD 上的终端，支持
-  [Kitty][kitty-graphics] 图形
-
-- [foot][foot] 是 Linux（及其他 Wayland 宿主）上的 Wayland 终端，支持
-  [Sixel][sixel-graphics] 图形
-
-更多支持 [Sixel][sixel-graphics] 图形的终端参见
-[Are We Sixel Yet?][arewesixelyet] 网站的汇总。
-
-<a id="the-chart-command"></a>
+终端图片输出（启动 logo 与终端内图表渲染，基于 Kitty/iTerm/Sixel 图形
+协议）已被移除。`\chart` 改为通过 `\chart ... file=` 将渲染的 SVG 写入
+文件。
 
 #### `\chart` 命令（The `\chart` Command）
 

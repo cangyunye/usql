@@ -57,8 +57,6 @@ var (
 	ErrInvalidFormatBorderLineStyle = errors.New(`\pset: allowed Unicode border line styles are single, double`)
 	// ErrInvalidTimezoneLocation is the invalid timezone location error.
 	ErrInvalidTimezoneLocation = errors.New(`\pset: invalid timezone location`)
-	// ErrGraphicsNotSupported is the graphics not supported error.
-	ErrGraphicsNotSupported = errors.New(`\chart: graphics not supported in terminal`)
 	// ErrChartNotBuilt is the error returned by \chart when the binary was built without the chart build tag.
 	ErrChartNotBuilt = errors.New(`\chart requires a build with the "chart" build tag (eg: go build -tags chart)`)
 	// ErrNoNumericColumns is the no numeric columns error.

@@ -79,11 +79,7 @@ func Refresh(p *Params) error {
 //
 //	copyright	show usage and distribution terms for {{CommandName}}
 func Copyright(p *Params) error {
-	stdout := p.Handler.IO().Stdout()
-	if typ := env.TermGraphics(); typ.Available() {
-		typ.Encode(stdout, text.Logo)
-	}
-	fmt.Fprintln(stdout, text.Copyright)
+	fmt.Fprintln(p.Handler.IO().Stdout(), text.Copyright)
 	return nil
 }
 
@@ -412,26 +408,15 @@ func Connect(p *Params) error {
 // ConnList is a Connection meta command (\conns). Lists the stored named
 // connections, and manages them interactively when on a terminal. When
 // passed a name or a row number, connects directly to that stored
-// connection. \conns migrate moves passwords written by earlier builds from
-// the OS keyring into the encrypted secrets file (the OS may ask to approve
-// each keyring read, once); a connection literally named "migrate" must be
-// connected via `\c migrate`.
+// connection.
 //
 // Descs:
 //
 //	conns	show named connections, or manage (add/edit/delete/connect) interactively
 //	conns NAME|N	connect directly to a named connection
-//	conns migrate	import OS keyring passwords into the encrypted secret store (one-time)
 func ConnList(p *Params) error {
-	// \conns migrate — one-time OS keyring import
 	vals, err := p.All(true)
 	if err == nil && len(vals) > 0 {
-		if vals[0] == "migrate" {
-			if len(vals) > 1 {
-				return fmt.Errorf("usage: \\conns migrate")
-			}
-			return connsMigrate(p.Handler)
-		}
 		if len(vals) > 1 {
 			return fmt.Errorf("usage: \\conns [NAME|N]")
 		}
@@ -886,7 +871,7 @@ func Copy(p *Params) error {
 	return nil
 }
 
-// Include is a Control/Conditional meta command (\i, \include and variants).
+// Include is a Input/Output meta command (\i, \include and variants).
 // Includes (runs) the specified file in the current execution environment.
 //
 // Descs:
@@ -1235,26 +1220,6 @@ func Stats(p *Params) error {
 		}
 	}
 	return m.ShowStats(p.Handler.URL(), name, pattern, verbose, k)
-}
-
-// Conditional is a Control/Conditional meta command (\if, \elif, \else,
-// \endif). Starts, closes, and ends a conditional block within the
-// application.
-//
-// Descs:
-//
-//	if	EXPR	begin conditional block
-//	elif	EXPR	alternative within current conditional block
-//	else	final alternative within current conditional block
-//	endif	end conditional block
-func Conditional(p *Params) error {
-	switch p.Name {
-	case "if":
-	case "elif":
-	case "else":
-	case "endif":
-	}
-	return nil
 }
 
 // Shell is a Operating System/Environment meta command (\!). Executes a

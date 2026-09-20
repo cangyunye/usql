@@ -451,7 +451,7 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		if ctx.CallName == "" && ctx.Object != "" {
 			options = append(options, c.functionCands()...)
 		}
-		options = append(options, CompleteFromList(nil, clauseKeywords[ctx.Clause]...)...)
+		options = append(options, completeFromList(nil, clauseKeywords[ctx.Clause]...)...)
 		return options, true, false
 	case ctx.Clause == "" && verbFollows[ctx.First] != "":
 		// a statement verb that must be followed by one keyword

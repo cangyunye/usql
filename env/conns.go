@@ -202,7 +202,7 @@ func LoadConns() error {
 			return err
 		}
 		Vars().SetConnSource(name, "store")
-		if pw, ok, err := ReadConnPassword(name); err != nil {
+		if pw, ok, err := readConnPassword(name); err != nil {
 			return err
 		} else if ok {
 			Vars().SetSecret(name, pw)
@@ -287,23 +287,6 @@ func SaveConn(name string, components map[string]any, password string) error {
 	if password != "" {
 		Vars().SetSecret(name, password)
 	}
-	return nil
-}
-
-// UpdateConnPassword stores a new password for an existing named connection,
-// or removes the stored password when password is empty.
-func UpdateConnPassword(name string, password string) error {
-	if password == "" {
-		if err := removeSecret(name); err != nil {
-			return err
-		}
-		Vars().DelSecret(name)
-		return nil
-	}
-	if err := writeSecret(name, password); err != nil {
-		return err
-	}
-	Vars().SetSecret(name, password)
 	return nil
 }
 
@@ -429,9 +412,9 @@ func removeSecret(name string) error {
 	return writeSecrets(m)
 }
 
-// ReadConnPassword returns the stored password for a named connection, from
+// readConnPassword returns the stored password for a named connection, from
 // the session cache first, then from the secret store.
-func ReadConnPassword(name string) (string, bool, error) {
+func readConnPassword(name string) (string, bool, error) {
 	if pw, ok := Vars().GetSecret(name); ok {
 		return pw, true, nil
 	}

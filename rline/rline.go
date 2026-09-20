@@ -16,8 +16,8 @@ import (
 var (
 	// ErrInterrupt is the interrupt error.
 	ErrInterrupt = readline.ErrInterrupt
-	// ErrPasswordNotAvailable is the password not available error.
-	ErrPasswordNotAvailable = errors.New("password not available")
+	// errPasswordNotAvailable is the password not available error.
+	errPasswordNotAvailable = errors.New("password not available")
 )
 
 // IO is the common input/output interface.
@@ -143,7 +143,7 @@ func (l *Rline) Password(prompt string) (string, error) {
 	if l.Pw != nil {
 		return l.Pw(prompt)
 	}
-	return "", ErrPasswordNotAvailable
+	return "", errPasswordNotAvailable
 }
 
 // SetOutput sets the output format func.

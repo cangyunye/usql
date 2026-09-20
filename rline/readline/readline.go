@@ -57,9 +57,6 @@ type Config struct {
 	// NOTE: Listener will be triggered by (nil, 0, 0) immediately
 	Listener Listener
 
-	// If VimMode is true, readline will in vim.insert mode by default
-	VimMode bool
-
 	InterruptPrompt string
 	EOFPrompt       string
 
@@ -208,15 +205,6 @@ func (i *Instance) Stdout() io.Writer {
 // readline will refresh automatic when write through Stdout()
 func (i *Instance) Stderr() io.Writer {
 	return i.Operation.Stderr()
-}
-
-// switch VimMode in runtime
-func (i *Instance) SetVimMode(on bool) {
-	i.Operation.SetVimMode(on)
-}
-
-func (i *Instance) IsVimMode() bool {
-	return i.Operation.IsEnableVimMode()
 }
 
 func (i *Instance) GenPasswordConfig() *Config {

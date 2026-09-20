@@ -184,7 +184,6 @@ func (b *Stmt) Next(unquote func(string, bool) (string, bool, error)) (string, s
 	var ok bool
 parse:
 	for ; i < b.rlen; i++ {
-		// fmt.Fprintf(os.Stderr, "> %d: `%s`\n", i, string(b.r[i:]))
 		// grab c, next
 		c, next := b.r[i], grab(b.r, i+1, b.rlen)
 		switch {
@@ -398,7 +397,6 @@ func (v *Var) Substitute(r []rune, s string, ok bool) ([]rune, int) {
 	case '\'', '"':
 		s = string(v.Quote) + s + string(v.Quote)
 	}
-	// fmt.Fprintf(os.Stderr, "orig: %q repl: %q\n", string(r), s)
 	sr, rcap := []rune(s), cap(r)
 	v.Len = len(sr)
 	// grow ...

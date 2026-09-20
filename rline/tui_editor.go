@@ -3,8 +3,6 @@ package rline
 import (
 	"strings"
 	"unicode"
-
-	"github.com/xo/usql/uitheme"
 )
 
 // editor is the TUI engine's line buffer: runes plus a cursor, with an
@@ -302,19 +300,9 @@ func (e *editor) replaceBefore(n int, rs []rune) {
 	e.insertRunes(rs)
 }
 
-// wordBefore returns the word immediately before the cursor.
-func (e *editor) wordBefore() []rune {
-	return e.buf[e.wordStart(e.idx):e.idx]
-}
-
 // String renders the buffer with a marker at the cursor; for tests.
 func (e *editor) String() string {
 	return string(e.buf[:e.idx]) + "|" + string(e.buf[e.idx:])
-}
-
-// displayWidth returns the display width of the buffer contents.
-func (e *editor) displayWidth() int {
-	return uitheme.CellWidth(string(e.buf))
 }
 
 // wordBreaks are the characters that delimit completion words, matching the

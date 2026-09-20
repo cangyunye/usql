@@ -17,7 +17,6 @@ var sections = []string{
 	"Informational",
 	"Variables",
 	"Input/Output",
-	"Control/Conditional",
 	"Transaction",
 	"Operating System/Environment",
 }
@@ -52,7 +51,6 @@ func init() {
 			{Connect, `connect`, ``, `alias for \c`, true, false},
 			{ConnList, `conns`, ``, `show named connections, or manage (add/edit/delete/connect) interactively`, false, false},
 			{ConnList, `conns NAME|N`, ``, `connect directly to a named connection`, false, false},
-			{ConnList, `conns migrate`, ``, `import OS keyring passwords into the encrypted secret store (one-time)`, false, false},
 			{Disconnect, `Z`, ``, `close (disconnect) database connection`, false, false},
 			{Disconnect, `disconnect`, ``, `alias for \Z`, true, false},
 			{Password, `password`, `[USER]`, `change password for user`, false, false},
@@ -135,17 +133,10 @@ func init() {
 			{Out, `out`, ``, `alias for \o`, true, false},
 			{Copy, `copy`, `SRC DST QUERY TABLE`, `copy results of query from source database into table on destination database`, false, false},
 			{Copy, `copy`, `SRC DST QUERY TABLE(A,...)`, `copy results of query from source database into table's columns on destination database`, false, false},
-		},
-		// Control/Conditional
-		{
 			{Include, `i`, `FILE`, `execute commands from file`, false, false},
 			{Include, `include`, ``, `alias for \i`, true, false},
 			{Include, `ir`, `FILE`, `as \i, but relative to location of current script`, false, false},
 			{Include, `include_relative`, ``, `alias for \ir`, true, false},
-			{Conditional, `if`, `EXPR`, `begin conditional block`, false, false},
-			{Conditional, `elif`, `EXPR`, `alternative within current conditional block`, false, false},
-			{Conditional, `else`, ``, `final alternative within current conditional block`, false, false},
-			{Conditional, `endif`, ``, `end conditional block`, false, false},
 		},
 		// Transaction
 		{

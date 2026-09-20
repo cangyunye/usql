@@ -212,15 +212,15 @@ $ go install -tags 'most no_avatica no_couchbase no_postgres' github.com/xo/usql
 
 This fork also ships a [`Taskfile.yaml`](Taskfile.yaml) for the
 [Task](https://github.com/go-task/task) runner, wrapping the common builds:
-`task build` (CGO-free test driver set), `task build:chart` (CGO-free plus the
-`\chart` ECharts engine), and `task build:cgo` (CGO with terminal chart
-output).
+`task build` (CGO-free test driver set), `task build:chart` (CGO-free plus
+the `\chart` ECharts engine), and `task build:cgo` (CGO with the mattn
+SQLite3 driver).
 
 #### Building Without CGO
 
 A CGO-free (`CGO_ENABLED=0`) build drops every binding to a C library: the
 default SQLite3 driver (mattn/go-sqlite3), DuckDB, ODBC, and the Oracle
-`godror` driver, plus the resvg terminal-chart renderer. The default SQLite3
+`godror` driver. The default SQLite3
 driver is replaced by the pure-Go ModernC transpilation (`moderncsqlite`); the
 `sqlite3` scheme and its aliases then route to it automatically:
 
@@ -236,12 +236,10 @@ Notes for CGO-free builds:
 
 - Named-connection passwords are kept in the AES-256-GCM encrypted
   `secrets.enc` file regardless of CGO — no OS keyring is involved (see the
-  [`\conns` section](#managing-named-connections-conns)); only the one-time
-  `\conns migrate` from an OS keyring needs a CGO build.
+  [`\conns` section](#managing-named-connections-conns)).
 - `\chart` requires the `chart` build tag (it embeds the goja JS engine and
-  echarts.min.js). CGO-free builds with `-tags chart` support `\chart ...
-  file=` SVG export; terminal image output additionally needs the cgo resvg
-  binding.
+  echarts.min.js). With `-tags chart` the command exports SVG via
+  `\chart ... file=`; terminal image output is not supported.
 
 ## Database Support
 
@@ -536,8 +534,8 @@ stored password. In non-interactive or piped runs `\conns` only prints the
 table. All input goes through the normal line editor, so the manager defines
 no global shortcuts and nothing conflicts with readline bindings.
 
-Under the [bubbletea input engine][input-engine] (`USQL_INPUT=tui`) the
-manager runs as a **full-screen modal** (its own view, restored on exit):
+Under the [bubbletea input engine][input-engine] (the default on
+interactive terminals) the manager runs as a **full-screen modal** (its own view, restored on exit):
 `<Up>`/`<Down>` or `<j>`/`<k>` highlight a row, `<Enter>`/`<row number>`
 edit it, `<a>` adds, `<c>` connects to the highlighted row, `<d>` deletes
 after a `y`/`<n>` confirmation, and `<q>`/`<Esc>` leaves. The form navigates
@@ -721,8 +719,8 @@ rendered as `?`, and files or pipes always receive UTF-8.
 Console **input** is switched to UTF-8 (code page 65001) alongside output,
 so Chinese text can be typed directly into queries, prompts, and the
 [`\conns` form][commands] on both the classic readline engine and the
-[bubbletea input engine][input-engine] (`USQL_INPUT=tui`), and is saved to
-history as UTF-8.
+[bubbletea input engine][input-engine] (the default on interactive
+terminals), and is saved to history as UTF-8.
 
 On Linux and macOS, the bubbletea input engine additionally decodes typed
 bytes using the encoding implied by `LC_ALL`, `LC_CTYPE`, or `LANG` (in that
@@ -1565,22 +1563,23 @@ are queried off the input loop in the background, so typing never blocks.
 
 #### Input Engine (Bubbletea TUI)
 
-`usql` ships two interactive input engines. The default is the classic
-readline engine; an opt-in [bubbletea][bubbletea]-based engine adds an
-input-method-style vertical completion menu and fish/pgcli-style ghost text
-suggestions:
+`usql` ships two interactive input engines. The default is the
+[bubbletea][bubbletea]-based TUI engine, which adds an input-method-style
+vertical completion menu and fish/pgcli-style ghost text suggestions; the
+classic readline engine remains available as a fallback:
 
 ```sh
-# opt in per invocation
-$ USQL_INPUT=tui usql pg://
+# opt back out per invocation
+$ USQL_INPUT=readline usql pg://
 
 # or export it in your shell profile
-$ export USQL_INPUT=tui
+$ export USQL_INPUT=readline
 ```
 
 The TUI engine requires raw mode and VT rendering. On terminals that cannot
 provide them — cygwin ptys (pipe stdin) or `TERM=dumb` — usql automatically
-falls back to the readline engine even when `USQL_INPUT=tui` is set.
+falls back to the readline engine. Non-interactive runs (piped stdin) always
+use the plain engine.
 
 In TUI mode the input line is echoed with **chroma syntax highlighting**
 (the same `SYNTAX_HL` styling used for output, including multi-line
@@ -1626,11 +1625,12 @@ line-at-a-time input regardless of `USQL_INPUT`.
 
 #### Colored Tables
 
-On interactive color-capable terminals, aligned tables rendered with
-`\pset linestyle unicode` are colorized: theme-colored borders, bold headers,
-and zebra-striped rows. Coloring only inserts escape sequences and never
-changes the table's character layout, so mixed CJK/ASCII content stays
-aligned. Coloring is controlled by:
+Interactive sessions default to `\pset linestyle unicode`, and on
+color-capable terminals aligned tables rendered with unicode rules are
+colorized: theme-colored borders, bold headers, and zebra-striped rows.
+Coloring only inserts escape sequences and never changes the table's
+character layout, so mixed CJK/ASCII content stays aligned. Coloring is
+controlled by:
 
 ```sh
 pg:postgres@=> \pset table_color auto   # on, off, or auto (the default)
@@ -1638,6 +1638,21 @@ pg:postgres@=> \pset table_color auto   # on, off, or auto (the default)
 
 With `auto`, tables are colored when the terminal supports it; redirected
 output (`\o`, `\g file`, `\g |pipe`) is never colored.
+
+Non-interactive runs (`-c`, `-f`, piped input, `-o`) keep the `ascii` line
+style, so scripted output is unchanged. Terminals or consumers that need
+ASCII-only tables can switch the style back explicitly:
+
+```sh
+# for one invocation
+$ usql -P linestyle=ascii pg://
+
+# for every session: add to the rc file (~/.usqlrc, or $USQLRC)
+\pset linestyle ascii
+
+# or in the current session
+pg:postgres@=> \pset linestyle ascii
+```
 
 #### Time Formatting
 
@@ -1758,69 +1773,9 @@ pg:=> \set ROWLIMIT 500      # raise to 500
 
 #### Terminal Graphics
 
-`usql` supports terminal graphics for [Kitty][kitty-graphics], [iTerm][iterm-graphics],
-and [Sixel][sixel-graphics] enabled terminals using the [`github.com/kenshaw/rasterm` package][rasterm].
-Terminal graphics are only available when using the interactive shell.
-
-##### Detection and Support
-
-`usql` will attempt to detect when terminal graphics support is available using
-the `USQL_TERM_GRAPHICS`, `TERM_GRAPHICS` and other environment variables
-unique to various terminals.
-
-When support is available, the logo will be displayed at the start of an
-interactive session:
-
-<div style="padding-left: 20px;">
-  <img src="https://raw.githubusercontent.com/xo/usql-logo/main/usql-interactive.png" height="120">
-</div>
-
-##### Charts and Graphs
-
-The [`\chart` command][chart-command] can be used to display a chart
-directly in the terminal:
-
-<div style="padding-left: 20px;">
-  <img src="https://raw.githubusercontent.com/xo/usql-logo/main/chart-example.png" height="120">
-</div>
-
-See [the section on the `\chart` meta command][chart-command] for details.
-
-##### Enabling/Disabling Terminal Graphics
-
-Terminal graphics can be forced enabled or disabled by setting the
-`USQL_TERM_GRAPHICS` or the `TERM_GRAPHICS` environment variable:
-
-```sh
-# disable
-$ USQL_TERM_GRAPHICS=none usql
-
-# force iterm graphics
-$ TERM_GRAPHICS=iterm usql
-```
-
-| Variable        | Default | Values                                | Description                    |
-| --------------- | ------- | ------------------------------------- | ------------------------------ |
-| `TERM_GRAPHICS` | ``      | ``, `kitty`, `iterm`, `sixel`, `none` | enables/disables term graphics |
-
-##### Terminals with Graphics Support
-
-The following terminals have been tested with `usql`:
-
-- [WezTerm][wezterm] is a cross-platform terminal for Windows, macOS, Linux, and
-  many other platforms that supports [iTerm][iterm-graphics] graphics
-
-- [iTerm2][iterm2] is a macOS terminal that supports [iTerm][iterm-graphics]
-  graphics
-
-- [kitty][kitty] is a terminal for Linux, macOS, and various BSDs that supports
-  [Kitty][kitty-graphics] graphics
-
-- [foot][foot] is a Wayland terminal for Linux (and other Wayland hosts) that
-  supports [Sixel][sixel-graphics] graphics
-
-Additional terminals that support [Sixel][sixel-graphics] graphics are
-catalogued on the [Are We Sixel Yet?][arewesixelyet] website.
+Terminal image output (the startup logo and in-terminal chart rendering via
+Kitty/iTerm/Sixel graphics) was removed. `\chart` writes its rendered SVG
+to a file with `\chart ... file=` instead.
 
 #### The `\chart` Command
 
@@ -1854,19 +1809,16 @@ JS bundle and JS engine (adding roughly 7MB to the binary). Release builds are
 built without it, so `\chart` in those binaries reports how to enable it:
 
 ```sh
-# build with chart support (terminal image output, requires CGO for resvg)
+# build with chart support
 $ go build -tags 'most chart' .
 
-# CGO-free build with SVG file export only
+# CGO-free build with chart support
 $ CGO_ENABLED=0 go build -tags 'most chart no_duckdb no_odbc no_godror no_sqlite3 moderncsqlite' .
 ```
 
-- **CGO builds** rasterize the rendered SVG and display it directly in the
-  terminal using [Kitty][kitty-graphics], [iTerm][iterm-graphics], or
-  [Sixel][sixel-graphics] graphics (via the `resvg` binding).
-- **CGO-free builds** with the `chart` tag cannot rasterize images; use
-  `\chart ... file=chart.svg` to write the SVG to a file.
-- **Without the `chart` tag**, `\chart` fails with an error explaining the
+- With the `chart` tag, `\chart ... file=chart.svg` writes the rendered SVG
+  to a file; terminal image output is not supported.
+- Without the `chart` tag, `\chart` fails with an error explaining the
   build tag requirement.
 
 #### Passwords

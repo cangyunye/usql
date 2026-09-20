@@ -122,7 +122,6 @@ func NewDefaultVars() *Variables {
 			"SYNTAX_HL_STYLE":       "monokai",
 			"SYNTAX_HL_OVERRIDE_BG": "true",
 			"SSLMODE":               sslmode,
-			"TERM_GRAPHICS":         "none",
 			// row limit for interactive, unfiltered SELECT queries
 			"ROWLIMIT": rowLimit,
 		},
@@ -235,14 +234,6 @@ func (v *Variables) Dump(w io.Writer) error {
 		_, _ = fmt.Fprintln(w, k, "=", Quote(v.vars[k]))
 	}
 	return nil
-}
-
-// GetPrint returns a print variable.
-func (v *Variables) GetPrint(name string) (string, error) {
-	if val, ok := v.prnt[name]; ok {
-		return val, nil
-	}
-	return "", fmt.Errorf(text.UnknownFormatFieldName, name)
 }
 
 // SetPrint sets a print variable.

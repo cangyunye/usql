@@ -483,7 +483,6 @@ func (r *RuneBuffer) output() []byte {
 		}
 
 	} else {
-		//XXX: output display here
 		tbuf := bytes.NewBuffer(nil)
 		for idx := range r.buf {
 			if r.buf[idx] == '\t' {

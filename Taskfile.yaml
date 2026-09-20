@@ -3,7 +3,7 @@
 # Cross-platform task runner (github.com/go-task/task). Tested with task v3.
 #   task build       -> build the test driver set (CGO-free, pure Go, stripped)
 #   task build:chart -> CGO-free + ECharts JS engine (\chart ... file= SVG export)
-#   task build:cgo   -> build with CGO enabled (mattn sqlite3, resvg, charts)
+#   task build:cgo   -> build with CGO enabled (mattn sqlite3 instead of no_sqlite3)
 #   task drivers     -> show the drivers compiled into the built binary
 #   task clean       -> remove built artifacts
 #
@@ -15,8 +15,8 @@
 #
 # \chart is gated behind the "chart" build tag: it embeds the goja JS engine
 # plus echarts.min.js (~7MB). The default build omits it; build:chart keeps a
-# CGO-free binary with SVG file export; build:cgo adds terminal image output
-# via the resvg cgo binding.
+# CGO-free binary with SVG file export. Terminal image output was removed —
+# SVG export is the only chart output.
 
 version: "3"
 
@@ -26,10 +26,16 @@ env:
 vars:
   BIN: usql
   # CGO-free, no-C-driver set, stripped. no_* excludes base drivers not wanted.
-  # oceanbase is a mysql-scheme alias, so the mysql tag covers it.
+  # oceanbase is a mysql-scheme alias, so the mysql tag covers it. Classic
+  # oracle (go-ora, ~15MB) is included; drop it for a leaner binary via
+  # DRIVERS="postgres mysql opengauss oboracle no_oracle no_sqlite3 ...".
   DRIVERS: >-
     postgres mysql oracle opengauss oboracle
     no_sqlite3 no_sqlserver no_clickhouse no_csvq
+  # same set, but with the CGO mattn sqlite3 driver swapped in for build:cgo
+  DRIVERS_CGO: >-
+    postgres mysql oracle opengauss oboracle
+    sqlite3 no_sqlserver no_clickhouse no_csvq
   # build metadata stamped into --version (see main.go)
   VERSION:
     sh: git describe --tags --always --dirty 2>/dev/null || echo dev
@@ -61,11 +67,11 @@ tasks:
       - go build -tags "{{.DRIVERS}} chart" -ldflags "{{.LDFLAGS}}" -o {{.BIN}} .
 
   build:cgo:
-    desc: Build with CGO enabled (mattn sqlite3, resvg, terminal charts)
+    desc: Build with CGO enabled (mattn sqlite3 replaces no_sqlite3)
     env:
       CGO_ENABLED: "1"
     cmds:
-      - go build -tags "{{.DRIVERS | replace \"no_sqlite3\" \"sqlite3\"}} chart" -ldflags "{{.LDFLAGS}}" -o {{.BIN}} .
+      - go build -tags "{{.DRIVERS_CGO}}" -ldflags "{{.LDFLAGS}}" -o {{.BIN}} .
 
   drivers:
     desc: List the drivers compiled into the built binary

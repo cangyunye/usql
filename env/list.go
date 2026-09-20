@@ -261,10 +261,7 @@ var envVarNames = []varName{
 		`SYNTAX_HL_OVERRIDE_BG`,
 		`enables overriding the background color of the chroma styles`,
 	},
-	{
-		`TERM_GRAPHICS`,
-		`use the specified terminal graphics`,
-	},
+	{},
 	{
 		`SHELL`,
 		`shell used by the \! command`,

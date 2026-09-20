@@ -81,11 +81,11 @@ func (a *AliasStore) Path() string {
 	return a.path
 }
 
-// AliasFile returns the path to the aliases file.
+// aliasFile returns the path to the aliases file.
 //
 // Defaults to <configdir>/aliases.yaml, overridden by environment variable
 // <COMMAND NAME>_ALIASES (ie, USQL_ALIASES).
-func AliasFile() (string, error) {
+func aliasFile() (string, error) {
 	if s, ok := Getenv(text.CommandUpper() + "_ALIASES"); ok {
 		return s, nil
 	}
@@ -108,7 +108,7 @@ type aliasDoc struct {
 // missing file yields an empty store; the previous store is kept when loading
 // fails. Entries with an invalid name or no SQL are skipped with a warning.
 func LoadAliases() error {
-	path, err := AliasFile()
+	path, err := aliasFile()
 	if err != nil {
 		return err
 	}

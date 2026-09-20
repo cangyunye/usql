@@ -372,23 +372,6 @@ func (o *opCompleter) completeRefreshLocked() {
 	buf.Flush()
 }
 
-func (o *opCompleter) aggCandidate(candidate [][]rune) int {
-	offset := 0
-	for i := 0; i < len(candidate[0]); i++ {
-		for j := 0; j < len(candidate)-1; j++ {
-			if i > len(candidate[j]) {
-				goto aggregate
-			}
-			if candidate[j][i] != candidate[j+1][i] {
-				goto aggregate
-			}
-		}
-		offset = i
-	}
-aggregate:
-	return offset
-}
-
 func (o *opCompleter) EnterCompleteSelectMode() {
 	o.mu.Lock()
 	defer o.mu.Unlock()

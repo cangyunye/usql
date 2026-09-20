@@ -26,9 +26,9 @@ func Cands(texts ...string) []Cand {
 	return out
 }
 
-// Texts strips the candidates back to their text, for consumers that do not
+// texts strips the candidates back to their text, for consumers that do not
 // display kinds (the plain readline engine, tests).
-func Texts(cands []Cand) [][]rune {
+func texts(cands []Cand) [][]rune {
 	if cands == nil {
 		return nil
 	}
@@ -97,7 +97,7 @@ type completerAdapter struct {
 // Do satisfies readline.AutoCompleter.
 func (a completerAdapter) Do(line []rune, pos int) ([][]rune, int) {
 	newLine, length := a.c.Do(line, pos)
-	return Texts(newLine), length
+	return texts(newLine), length
 }
 
 // DoLive satisfies readline.LiveAutoCompleter. When the wrapped Completer
@@ -108,10 +108,10 @@ func (a completerAdapter) Do(line []rune, pos int) ([][]rune, int) {
 func (a completerAdapter) DoLive(line []rune, pos int) ([][]rune, int, bool) {
 	if lc, ok := a.c.(LiveCompleter); ok {
 		newLine, length, replace := lc.DoLive(line, pos)
-		return Texts(newLine), length, replace
+		return texts(newLine), length, replace
 	}
 	newLine, length := a.c.Do(line, pos)
-	return Texts(newLine), length, false
+	return texts(newLine), length, false
 }
 
 // SetLiveKick satisfies readline.LiveAutoCompleter.
@@ -125,7 +125,7 @@ func (a completerAdapter) SetLiveKick(kick func()) {
 func (a completerAdapter) DoRepl(line []rune, pos int) ([][]rune, int, bool) {
 	if rp, ok := a.c.(Replacer); ok {
 		newLine, length, ok := rp.DoRepl(line, pos)
-		return Texts(newLine), length, ok
+		return texts(newLine), length, ok
 	}
 	return nil, 0, false
 }

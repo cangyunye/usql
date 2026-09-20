@@ -68,7 +68,7 @@ func isBoundaryByte(b byte) bool {
 // the word at the cursor entirely (e.g. schema.table). Prefix matches rank
 // first, then fuzzy score, then length. When pattern starts with a
 // lower-case letter the whole candidate is lower-cased, mirroring
-// CompleteFromList's case behavior for keywords.
+// completeFromList's case behavior for keywords.
 func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 	lowerPattern := strings.ToLower(pattern)
 	type match struct {

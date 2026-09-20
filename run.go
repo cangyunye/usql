@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-billy/v5"
@@ -129,7 +130,6 @@ func New(cliargs []string) ContextExecutor {
 			if args.Charts, err = chartsFS(v); err != nil {
 				return err
 			}
-			// fmt.Fprintf(os.Stderr, "\n\n%v\n\n", args.Charts)
 			args.Connections = v.GetStringMap("connections")
 			args.Init = v.GetString("init")
 			args.ConfigFileUsed = v.ConfigFileUsed()
@@ -236,20 +236,6 @@ func Run(ctx context.Context, args *Args) error {
 	cygwin := isatty.IsCygwinTerminal(os.Stdout.Fd()) && isatty.IsCygwinTerminal(os.Stdin.Fd())
 	forceNonInteractive := len(args.CommandOrFiles) != 0
 
-	// enable term graphics
-	if !forceNonInteractive && interactive && !cygwin {
-		// NOTE: this is done here and not in the env.init() package, because
-		// NOTE: we need to determine if it is interactive first, otherwise it
-		// NOTE: could mess up the non-interactive output with control characters
-		var typ string
-		if s, _ := env.Getenv(text.CommandUpper()+"_TERM_GRAPHICS", "TERM_GRAPHICS"); s != "" {
-			typ = s
-		}
-		if err := env.Vars().Set("TERM_GRAPHICS", typ); err != nil {
-			return err
-		}
-	}
-
 	// configured named connections
 	for name, v := range args.Connections {
 		if err := setConn(name, v); err != nil && !forceNonInteractive && interactive {
@@ -266,8 +252,6 @@ func Run(ctx context.Context, args *Args) error {
 	if err := env.LoadAliases(); err != nil && !forceNonInteractive && interactive {
 		fmt.Fprintln(os.Stderr, err)
 	}
-
-	// fmt.Fprintf(os.Stdout, "VARS: %v\nCVARS: %v\nPVARS: %v\n", args.Vars, args.Cvars, args.Pvars)
 
 	// set vars
 	for _, v := range args.Vars {
@@ -311,6 +295,18 @@ func Run(ctx context.Context, args *Args) error {
 			if _, err = env.Vars().TogglePrint(v, ""); err != nil {
 				return err
 			}
+		}
+	}
+	// colored tables: interactive sessions default the table rule style to
+	// unicode, which the value-coloring painter requires (see the
+	// uitheme.LineWriter wiring in the handler). An explicit -P linestyle
+	// wins over this default, and the rc file (processed by the handler
+	// below) overrides it again.
+	if interactive && !forceNonInteractive && !slices.ContainsFunc(args.Pvars, func(v string) bool {
+		return strings.HasPrefix(v, "linestyle")
+	}) {
+		if _, err := env.Vars().SetPrint("linestyle", "unicode"); err != nil {
+			return err
 		}
 	}
 	// create input/output

@@ -2,8 +2,8 @@
 
 > 上下文：bubbletea+lipgloss 终端层改造 Phase 1-3 及第二轮收尾均已完成（uitheme 主题/
 > 表格着色、rline.Completer 解耦、`USQL_INPUT=tui` 输入引擎、GBK 双向、对齐测试矩阵；
-> 第二轮补齐了 P1 全部功能项与 P2/P3 大部分项）。默认引擎仍为 readline，默认输出无色
-> ——行为零破坏。以下为剩余项，按优先级排列。
+> 第二轮补齐了 P1 全部功能项与 P2/P3 大部分项）。默认引擎已翻转为 TUI
+> （`USQL_INPUT=readline` 可显式回退）。以下为剩余项，按优先级排列。
 
 ## 已完成（第二轮，待提交）
 
@@ -67,7 +67,8 @@
 - [x] **TUI 引擎安全网（非 VT 环境自动回退）** — `rline/tui.go selectEngine`：
   `inputMode()` 的决策核心提为纯函数（env 注入，可测）；cygwin（管道 stdin 无法
   raw mode）与 `TERM=dumb` 下即使显式 `USQL_INPUT=tui` 也强制回退 readline；
-  `USQL_INPUT=readline` 显式回退已识别（为默认翻转铺路）。
+  `USQL_INPUT=readline` 显式回退已识别；默认引擎已翻转为 TUI，README 中英文
+  「Input Engine」章节已同步。
 - [x] **cursorRow 生产化** — DSR 应答解析提为纯函数 `parseCursorRow`（引擎测试覆盖），
   清理探测路径上的 4 处 `PROBE:` 调试残留 stderr 输出。
 - [x] **TUI 键位对齐 readline** — 逐键位审计 `operation.go` 键表：补上缺失的
@@ -84,9 +85,6 @@
 
 ## 剩余项
 
-- [ ] **默认引擎翻转**：`rline/tui.go` 的 `inputMode()` 目前仅在 `USQL_INPUT=tui` 时启用
-  TUI。泡够一个版本后翻转为默认 `tui`（`selectEngine` 已识别 `USQL_INPUT=readline`
-  显式回退），并同步 README「Input Engine」章节。
 - [ ] **Windows conhost VT 模式冒烟**：cp936 检测/转码已实现并交叉编译通过，但 TUI
   引擎在 conhost 的 VT 模式下的实机冒烟需要 Windows 环境（可参照 ptysmoke 场景）。
 - [ ] **Cygwin 路径评估**：cygwin 下已由 `selectEngine` 强制回退 readline（管道 stdin

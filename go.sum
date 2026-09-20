@@ -862,8 +862,6 @@ github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 h1:iQTw/8FWTuc7uia
 github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0/go.mod h1:1NbS8ALrpOvjt0rHPNLyCIeMtbizbir8U//inJ+zuB8=
 github.com/kenshaw/colors v0.2.4 h1:PB89i8kIX5+vpnJYq8G51IKJNDvdiEVBZKsO3/ETGDc=
 github.com/kenshaw/colors v0.2.4/go.mod h1:Aok7+9KpR+qEwgCxDEoLBS6IGFhY1iRJIzbcv5ijewI=
-github.com/kenshaw/rasterm v0.1.16 h1:IUmAe/C7YTY/em1irbNvd7cMR8HT6BSoN0931BzjmhQ=
-github.com/kenshaw/rasterm v0.1.16/go.mod h1:VuAzsiWase7gJtuoKc4xPxdxq+ljBXrh/QNz6yy7uV0=
 github.com/keybase/go-keychain v0.0.1 h1:way+bWYa6lDppZoZcgMbYsvC7GxljxrskdNInRtuthU=
 github.com/keybase/go-keychain v0.0.1/go.mod h1:PdEILRW3i9D8JcdM+FmY6RwkHGnhHxXwkPPMeUgOK1k=
 github.com/kisielk/errcheck v1.5.0/go.mod h1:pFxgyoBC7bSaBwPgfKdkLd5X25qrDl4LWUI2bnpBCr8=
@@ -906,8 +904,6 @@ github.com/mattn/go-runewidth v0.0.4/go.mod h1:LwmH8dsx7+W8Uxz3IHJYH5QSwggIsqBzp
 github.com/mattn/go-runewidth v0.0.13/go.mod h1:Jdepj2loyihRzMpdS35Xk/zdY8IAYHsh153qUoGf23w=
 github.com/mattn/go-runewidth v0.0.21 h1:jJKAZiQH+2mIinzCJIaIG9Be1+0NR+5sz/lYEEjdM8w=
 github.com/mattn/go-runewidth v0.0.21/go.mod h1:XBkDxAl56ILZc9knddidhrOlY5R/pDhgLpndooCuJAs=
-github.com/mattn/go-sixel v0.0.8 h1:H0bBGQVOJoSvzvtTgCInxvg1IZiNlTcIIIx8A6uvjpQ=
-github.com/mattn/go-sixel v0.0.8/go.mod h1:wbDSbrwpykVI1qEHyjZYsDgaJTwpVg9wSwmmh2slnBw=
 github.com/mattn/go-sqlite3 v1.14.37 h1:3DOZp4cXis1cUIpCfXLtmlGolNLp2VEqhiB/PARNBIg=
 github.com/mattn/go-sqlite3 v1.14.37/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
 github.com/microsoft/go-mssqldb v1.9.8 h1:d4IFMvF/o+HdpXUqbBfzHvn/NlFA75YGcfHUUvDFJEM=
@@ -1057,8 +1053,6 @@ github.com/smartystreets/assertions v0.0.0-20180927180507-b2de0cb4f26d/go.mod h1
 github.com/smartystreets/goconvey v1.6.4/go.mod h1:syvi0/a8iFYH4r/RixwvyeAJjdLS9QV7WQ/tjFTllLA=
 github.com/snowflakedb/gosnowflake/v2 v2.0.0 h1:oxTCOjOsJIPMG1a3cSc4s53nExst+wkgvqinBSwpeFo=
 github.com/snowflakedb/gosnowflake/v2 v2.0.0/go.mod h1:B+dGQsCHnpwet3hgbdh2t/vqKBG7HpEO2o3jWt3KHeo=
-github.com/soniakeys/quant v1.0.0 h1:N1um9ktjbkZVcywBVAAYpZYSHxEfJGzshHCxx/DaI0Y=
-github.com/soniakeys/quant v1.0.0/go.mod h1:HI1k023QuVbD4H8i9YdfZP2munIHU4QpjsImz6Y6zds=
 github.com/spaolacci/murmur3 v0.0.0-20180118202830-f09979ecbc72/go.mod h1:JwIasOWyU6f++ZhiEuf87xNszmSA2myDM2Kzu9HwQUA=
 github.com/spaolacci/murmur3 v1.1.0 h1:7c1g84S4BPRrfL5Xrdp6fOJ206sU9y293DDHaoy0bLI=
 github.com/spaolacci/murmur3 v1.1.0/go.mod h1:JwIasOWyU6f++ZhiEuf87xNszmSA2myDM2Kzu9HwQUA=
@@ -1126,8 +1120,6 @@ github.com/xo/dburl v0.24.2 h1:aK6ASamrFjKl76h/UCBecc0BPBi97+IVmw4YWxx0rno=
 github.com/xo/dburl v0.24.2/go.mod h1:uazlaAQxj4gkshhfuuYyvwCBouOmNnG2aDxTCFZpmL4=
 github.com/xo/echartsgoja v0.1.1 h1:9ZH7rhjovE/caGzWTFw1X5GItCsPw5eFV2Qwfgmjt7M=
 github.com/xo/echartsgoja v0.1.1/go.mod h1:u2iiKyIA1H3URjh9+8Nltj8cP33R19JHasXhSz/tWHI=
-github.com/xo/resvg v0.6.0 h1:GsovErv9JuOnGttOA8RhQcBI7DEEVpEiIEKBuJVRS4g=
-github.com/xo/resvg v0.6.0/go.mod h1:xsIgOmL6UD2xRHIm2Laepjm/b4auoPMxAAqOHkvbSes=
 github.com/xo/tblfmt v0.0.0-20190609041254-28c54ec42ce8/go.mod h1:3U5kKQdIhwACye7ml3acccHmjGExY9WmUGU7rnDWgv0=
 github.com/xo/tblfmt v0.16.0 h1:Bh1+mEtA/tggn0YL0oIHgrtsRTskWTLKurG7JWYuk6k=
 github.com/xo/tblfmt v0.16.0/go.mod h1:uA07YKaGqDkK0sRhtFleWAtzwF2i1pqFcM9zHI2S1g0=

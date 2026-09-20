@@ -11,7 +11,6 @@ import (
 	"github.com/xo/usql/drivers/metadata"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/rline"
-	"github.com/xo/usql/text"
 )
 
 const (
@@ -120,12 +119,24 @@ func NewDefaultCompleter(opts ...Option) rline.Completer {
 		sqlCommands: CommonSqlCommands,
 		schemaKind:  "schema",
 	}
+	c.useDatabases = statementStartsUse(c.sqlStartCommands)
 	for _, o := range opts {
 		o(&c)
 	}
 	// return a pointer so Invalidate (pointer receiver) is reachable
 	// through the AutoCompleter interface
 	return &c
+}
+
+// statementStartsUse reports whether the dialect registers USE (MySQL-family
+// "USE <database>") as a statement-starting command.
+func statementStartsUse(commands []string) bool {
+	for _, w := range commands {
+		if strings.EqualFold(w, "USE") {
+			return true
+		}
+	}
+	return false
 }
 
 // Option to configure the reader
@@ -156,13 +167,7 @@ func WithLogger(l logger) Option {
 func WithSQLStartCommands(commands []string) Option {
 	return func(c *completer) {
 		c.sqlStartCommands = commands
-	}
-}
-
-// WithSQLCommands that can be any part of a query
-func WithSQLCommands(commands []string) Option {
-	return func(c *completer) {
-		c.sqlCommands = commands
+		c.useDatabases = statementStartsUse(commands)
 	}
 }
 
@@ -219,6 +224,9 @@ type completer struct {
 	// caps remembers which catalog kinds the database does not serve
 	// (MySQL has no sequences), so failed loads are never re-issued.
 	caps *catalogCaps
+	// useDatabases enables the MySQL-family "USE <name>" completion from the
+	// L1 schema cache (set from sqlStartCommands).
+	useDatabases bool
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context
@@ -261,6 +269,16 @@ func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
 	if res := c.completeMeta(previousWords, text); res != nil {
 		return res, len(text)
 	}
+	// MySQL-family "USE <name>" position: namespaces from the L1 schema
+	// cache. The old driver hook (WithBeforeComplete) queried the reader
+	// synchronously on the UI path — up to the reader timeout per Tab.
+	if c.useDatabases && len(previousWords) > 0 && strings.EqualFold(previousWords[len(previousWords)-1], "USE") {
+		if objs, ok := c.schemas(); ok {
+			return completeFromListCands(text, candsObjs(objs)), len(text)
+		}
+		// still loading: decline, the kick re-renders when it lands
+		return nil, len(text)
+	}
 	if c.beforeComplete != nil {
 		if res := c.beforeComplete(previousWords, text); res != nil {
 			return res, len(text)
@@ -268,10 +286,10 @@ func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
 	}
 	if len(previousWords) == 0 {
 		// at a statement start, offer the statement keywords
-		return CompleteFromList(text, c.sqlStartCommands...), len(text)
+		return completeFromList(text, c.sqlStartCommands...), len(text)
 	}
 	// mid-statement: the common clause keywords, never a query
-	return CompleteFromList(text, c.sqlCommands...), len(text)
+	return completeFromList(text, c.sqlCommands...), len(text)
 }
 
 // completeMeta completes the meta layer: a backslash command itself, a
@@ -281,7 +299,7 @@ func (c completer) completeMeta(previousWords []string, text []rune) []rline.Can
 	if len(text) > 0 {
 		if len(previousWords) == 0 && text[0] == '\\' {
 			// a backslash command: offer the command set
-			return CompleteFromListKind("command", MATCH_CASE, text, backslashCommands...)
+			return completeFromListKind("command", MATCH_CASE, text, backslashCommands...)
 		}
 		if text[0] == ':' {
 			if len(text) == 1 || text[1] == ':' {
@@ -448,18 +466,18 @@ func wordMatches(ct caseType, pattern, word string) bool {
 	return false
 }
 
-// CompleteFromList where items starts with text, ignoring case
-func CompleteFromList(text []rune, options ...string) []rline.Cand {
-	return CompleteFromListKind("", IGNORE_CASE, text, options...)
+// completeFromList where items starts with text, ignoring case
+func completeFromList(text []rune, options ...string) []rline.Cand {
+	return completeFromListKind("", IGNORE_CASE, text, options...)
 }
 
-// CompleteFromListKind is CompleteFromListCase with the case type explicit.
-func CompleteFromListKind(kind string, ct caseType, text []rune, options ...string) []rline.Cand {
-	return CompleteFromListCase(kind, ct, text, options...)
+// completeFromListKind is completeFromListCase with the case type explicit.
+func completeFromListKind(kind string, ct caseType, text []rune, options ...string) []rline.Cand {
+	return completeFromListCase(kind, ct, text, options...)
 }
 
-// CompleteFromListCase where items starts with text
-func CompleteFromListCase(kind string, ct caseType, text []rune, options ...string) []rline.Cand {
+// completeFromListCase where items starts with text
+func completeFromListCase(kind string, ct caseType, text []rune, options ...string) []rline.Cand {
 	if len(options) == 0 {
 		return nil
 	}
@@ -495,7 +513,7 @@ func completeFromVariables(text []rune, prefix, suffix string, needValue bool) [
 		}
 		names = append(names, prefix+name+suffix)
 	}
-	return CompleteFromListKind("variable", MATCH_CASE, text, names...)
+	return completeFromListKind("variable", MATCH_CASE, text, names...)
 }
 
 // typeKind maps a metadata table type to its display kind.
@@ -513,36 +531,6 @@ func typeKind(t string) string {
 		return "sequence"
 	}
 	return ""
-}
-
-func (c completer) getNamespaces(f metadata.Filter) []rline.Cand {
-	names := make([]rline.Cand, 0, 10)
-	// Catalogs (database names) are not offered as namespaces: in FROM/JOIN/
-	// UPDATE/INSERT INTO positions one picks schema-qualified objects, and
-	// for PostgreSQL-style databases the catalog list is the database list,
-	// which psql does not offer either. \l completes catalogs via
-	// completeWithCatalogs.
-	if f.Catalog != "" {
-		// filter is already fully qualified, so don't return any namespaces
-		return names
-	}
-	if r, ok := c.reader.(metadata.SchemaReader); ok {
-		schemas := c.getCands(
-			func() (iterator, error) {
-				if f.Schema != "" {
-					// name should already have a wildcard appended
-					return r.Schemas(metadata.Filter{Catalog: f.Schema, Name: f.Name, WithSystem: true})
-				}
-				return r.Schemas(f)
-			},
-			func(res interface{}) (string, string) {
-				s := res.(*metadata.SchemaSet).Get()
-				return qualifiedIdentifier(f, "", s.Catalog, s.Schema), c.schemaKind
-			},
-		)
-		names = append(names, schemas...)
-	}
-	return names
 }
 
 // parseIdentifier into catalog, schema and name
@@ -596,12 +584,12 @@ func qualifiedIdentifier(filter metadata.Filter, catalog, schema, name string) s
 	return name
 }
 
-// CompleteFromListCands filters already-built candidates by the typed text
+// completeFromListCands filters already-built candidates by the typed text
 // (case-insensitive prefix), returning the append-style suffix after the
 // typed text, keeping kinds. nil options decline (callers fall through);
 // non-nil options with no matches yield an empty result — nothing to
 // suggest, but the path was authoritative.
-func CompleteFromListCands(text []rune, options []rline.Cand) []rline.Cand {
+func completeFromListCands(text []rune, options []rline.Cand) []rline.Cand {
 	if options == nil {
 		return nil
 	}
@@ -621,35 +609,7 @@ func CompleteFromListCands(text []rune, options []rline.Cand) []rline.Cand {
 	return result
 }
 
-// getCands is getNames with a display kind per row, deduplicated by text.
-func (c completer) getCands(query func() (iterator, error), mapper func(interface{}) (string, string)) []rline.Cand {
-	res, err := query()
-	if err != nil {
-		if err != text.ErrNotSupported {
-			c.logger.Println("Error getting selectables", err)
-		}
-		return nil
-	}
-	defer res.Close()
-
-	seen := make(map[string]struct{}, 10)
-	var result []rline.Cand
-	for res.Next() {
-		name, kind := mapper(res)
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		result = append(result, rline.Cand{Text: name, Kind: kind})
-	}
-	return result
-}
-
-type iterator interface {
-	Next() bool
-	Close() error
-}
-
+// completeFromFiles suggests file-system paths for arguments like \i.
 func completeFromFiles(text []rune) []rline.Cand {
 	// TODO handle quotes properly
 	dir := filepath.Dir(string(text))

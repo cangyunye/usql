@@ -147,9 +147,10 @@ type lineModel struct {
 	compWordStart int
 
 	// result plumbing
-	done        bool
-	interrupted bool // ^C
-	waiting     bool // an async completion is pending (kick armed)
+	done         bool
+	eofRequested bool // finalized by ctrl+d on an empty line, not enter
+	interrupted  bool // ^C
+	waiting      bool // an async completion is pending (kick armed)
 }
 
 // newLineModel builds the model for one read. topRow is the terminal row
@@ -242,6 +243,9 @@ func (m *lineModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+d":
 		if m.ed.empty() {
 			m.done = true
+			// only ctrl+d means EOF: enter finalizes with done too, but an
+			// empty submission must just reopen the prompt
+			m.eofRequested = true
 			return m, tea.Quit
 		}
 		m.ed.delete()

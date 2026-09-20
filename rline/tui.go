@@ -121,8 +121,9 @@ func (t *tuiRline) Next() ([]rune, error) {
 	if res.interrupted {
 		return res.ed.buf, ErrInterrupt
 	}
-	// Ctrl-D on an empty line is EOF: exit the session
-	if res.done && res.ed.empty() {
+	// Ctrl-D on an empty line is EOF: exit the session. A bare enter
+	// finalizes with done as well, but submits the empty line instead.
+	if res.done && res.eofRequested {
 		return nil, io.EOF
 	}
 	return res.ed.buf, nil

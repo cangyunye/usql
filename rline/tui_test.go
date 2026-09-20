@@ -147,7 +147,8 @@ func keyTyped(s string) tea.KeyMsg {
 func keyName(name string) tea.KeyMsg {
 	names := map[string]tea.KeyType{
 		"enter": tea.KeyEnter, "ctrl+c": tea.KeyCtrlC, "ctrl+d": tea.KeyCtrlD,
-		"tab": tea.KeyTab, "esc": tea.KeyEscape, "up": tea.KeyUp,
+		"ctrl+j": tea.KeyCtrlJ,
+		"tab":    tea.KeyTab, "esc": tea.KeyEscape, "up": tea.KeyUp,
 		"down": tea.KeyDown, "right": tea.KeyRight, "ctrl+r": tea.KeyCtrlR,
 		"backspace": tea.KeyBackspace,
 	}
@@ -233,8 +234,23 @@ func TestLineModelInterruptAndEOF(t *testing.T) {
 	m2 := newLineModel(tr, "> ", -1)
 	mod, _ = m2.Update(keyName("ctrl+d"))
 	m2 = mod.(*lineModel)
-	if !m2.done || m2.interrupted {
+	if !m2.done || !m2.eofRequested {
 		t.Fatal("ctrl+d on empty line must finalize as EOF")
+	}
+	// a bare enter on an empty line submits the line: it finalizes too, but
+	// must never read as EOF (the session must survive it)
+	m3 := newLineModel(tr, "> ", -1)
+	mod, _ = m3.Update(keyName("enter"))
+	m3 = mod.(*lineModel)
+	if !m3.done || m3.eofRequested {
+		t.Fatalf("enter on empty line: done=%v eofRequested=%v, want done without EOF", m3.done, m3.eofRequested)
+	}
+	// same for ctrl+j (LF-encoded enter)
+	m4 := newLineModel(tr, "> ", -1)
+	mod, _ = m4.Update(keyName("ctrl+j"))
+	m4 = mod.(*lineModel)
+	if !m4.done || m4.eofRequested {
+		t.Fatalf("ctrl+j on empty line: done=%v eofRequested=%v, want done without EOF", m4.done, m4.eofRequested)
 	}
 }
 

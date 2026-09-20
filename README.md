@@ -724,6 +724,29 @@ so Chinese text can be typed directly into queries, prompts, and the
 [bubbletea input engine][input-engine] (`USQL_INPUT=tui`), and is saved to
 history as UTF-8.
 
+On Linux and macOS, the bubbletea input engine additionally decodes typed
+bytes using the encoding implied by `LC_ALL`, `LC_CTYPE`, or `LANG` (in that
+order of precedence), so a GBK-family console's keystrokes arrive as UTF-8.
+The locale must match what the terminal actually sends: a UTF-8 terminal
+under a `zh_CN.GBK` locale garbles typed Chinese and swallows following
+keystrokes (a truncated multibyte sequence pairs its tail with the next
+key). Set `USQL_INPUT_ENCODING` to override the detection without touching
+the locale — for example, keep a GBK locale for the console output
+transcoding while the terminal sends UTF-8:
+
+```sh
+# terminal sends UTF-8 regardless of the locale
+$ USQL_INPUT_ENCODING=utf-8 usql 'og://user@host/db' --encoding gbk
+
+# or force GBK decoding for a genuinely GBK-encoded terminal
+$ USQL_INPUT_ENCODING=gbk usql 'og://user@host/db'
+```
+
+Valid values are the same as for `--encoding`: `utf-8`, `gbk`, `gb2312`, and
+`gb18030`. An invalid value prints a warning and falls back to the detected
+encoding. The classic readline engine always passes keystrokes through
+unchanged.
+
 ### Connection Examples
 
 The following are example connection strings and additional ways to connect to
@@ -1054,6 +1077,7 @@ An overview of `usql`'s features, functionality, and compatibility with `psql`:
 - [Host Connection Information](#host-connection-information)
 - [Passwords][usqlpass]
 - [Runtime Configuration (RC) File][usqlrc]
+- [Environment Variables][usqlenv]
 
 The `usql` project's goal is to support as much of `psql`'s core features and
 functionality, and aims to be as compatible as possible - [contributions are
@@ -1914,6 +1938,33 @@ $ usql --no-init pg://
 While the `.usqlrc` functionality will not be removed, it is recommended to set
 an `init` script in [the `config.yaml` file][config].
 
+#### Environment Variables
+
+Beyond the standard usql variables (which are also readable from the
+environment with a `USQL_` prefix — see [Variables][variables]), the
+following `USQL_`-prefixed environment variables configure usql directly:
+
+| Variable                  | Purpose                                                                                                   |
+| ------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `USQL_INPUT`              | interactive input engine: `tui` (bubbletea, default) or `readline` (aliases: `plain`, `classic`, `off`) — see [Input Engine][input-engine] |
+| `USQL_INPUT_ENCODING`     | encoding used to decode console input (`utf-8`, `gbk`, `gb2312`, `gb18030`); overrides the `LC_ALL`/`LC_CTYPE`/`LANG` detection — see [Character Encoding](#character-encoding) |
+| `USQL_COMPLETION_ROWS`    | maximum completion candidate rows shown at once (default `10`, clamped to `3`–`100`)                      |
+| `USQL_COMPLETION_DELAY`   | typing-time completion debounce in milliseconds (default `150`, clamped to `30`–`2000`)                   |
+| `USQL_ROWLIMIT`           | initial [`ROWLIMIT`][variables] for interactive SELECTs (default `100`; `0` disables)                     |
+| `USQL_CACHE_MB`           | completion metadata cache budget in megabytes (default `10`, clamped to `1`–`4096`)                       |
+| `USQL_ALIASES`            | path of the SQL aliases file (default `<configdir>/aliases.yaml`) — see [SQL Aliases][sql-aliases]        |
+| `USQL_HISTORY`            | command history file (default `$HOME/.usql_history`)                                                      |
+| `USQL_SECRETS_PASSPHRASE` | passphrase encrypting the [`\conns` secret store][connecting] (key-file mode when unset)                  |
+| `USQL_SECRETS_KEYFILE`    | alternative key-file location for the secret store (eg removable media)                                   |
+| `USQL_SHOW_HOST_INFORMATION` | set `false` to hide the "Connected with driver ..." banner — see [Host Connection Information](#host-connection-information) |
+| `USQL_TERM_GRAPHICS`      | terminal graphics protocol for `\chart` logos (`sixel`, `iterm`, `kitty`, `none`; also `TERM_GRAPHICS`) — see [Terminal Graphics][termgraphics] |
+| `USQL_INPUT_DEBUG`        | <i>(diagnostics)</i> append every raw input byte chunk (timestamped hex) to the named file               |
+| `USQL_BENCH_DSN`          | <i>(tests)</i> live DSN enabling completer benchmark tests                                                |
+| `USQL_LIVE_PG`<br>`USQL_LIVE_MYSQL`<br>`USQL_LIVE_ORACLE` | <i>(tests)</i> live DSNs enabling completer contract tests against real servers |
+
+Numeric values out of range are clamped, and invalid values fall back to the
+default (the input-encoding override additionally prints a warning).
+
 ## Additional Notes
 
 The following are additional notes and miscellania related to `usql`:
@@ -1995,6 +2046,8 @@ contributing, see CONTRIBUTING.md](CONTRIBUTING.md).
 [timefmt]: #time-formatting "Time Formatting"
 [usqlpass]: #passwords "Passwords"
 [usqlrc]: #runtime-configuration-rc-file "Runtime Configuration File"
+[usqlenv]: #environment-variables "Environment Variables"
+[sql-aliases]: #sql-aliases "SQL Aliases"
 [variables]: #variables "Variables"
 [runtime-vars]: #runtime-variables "Runtime Variables"
 [connection-vars]: #connection-variables "Connection Variables"

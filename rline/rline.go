@@ -210,7 +210,10 @@ func New(interactive, cygwin, forceNonInteractive bool, out, histfile string) (I
 	}
 	inEnc := enc
 	if out == "" {
-		if e := charset.ConsoleInputEncoding(); e != nil {
+		// ok distinguishes an explicit UTF-8 passthrough (nil, true) from
+		// "nothing detected": the former must clear the output-encoding
+		// fallback, or a UTF-8 terminal under a GBK locale stays garbled
+		if e, ok := charset.ConsoleInputEncoding(); ok {
 			inEnc = e
 		}
 	}

@@ -85,20 +85,36 @@ func OutputEncoding() encoding.Encoding {
 	return encodingForCharset(consoleCharset(consoleOutputCharset(), localeCharset()))
 }
 
+// inputEncodingEnv is the environment variable overriding the detected
+// console input encoding (see ConsoleInputEncoding).
+const inputEncodingEnv = "USQL_INPUT_ENCODING"
+
 // ConsoleInputEncoding reports the encoding used by console INPUT (the
 // Windows input code page, or the POSIX locale elsewhere), for decoding
-// typed bytes to UTF-8. A Windows console with a non-GBK-family input code
-// page returns nil (bytes pass through unchanged); with no console at all
-// the output encoding applies, whose POSIX detection covers both
-// directions.
-func ConsoleInputEncoding() encoding.Encoding {
+// typed bytes to UTF-8. USQL_INPUT_ENCODING overrides the detection
+// everywhere: set it to utf-8 when the terminal sends UTF-8 while the
+// locale declares a GBK-family encoding — decoding that stream as GBK
+// garbles typed text and swallows keystrokes (a truncated multibyte
+// sequence pairs its tail with the next key). The boolean reports whether
+// an input encoding applies at all: (nil, true) is an explicit UTF-8
+// passthrough, and must not be conflated with the detected fallback. An
+// invalid override prints a warning and falls back to the detection.
+func ConsoleInputEncoding() (enc encoding.Encoding, ok bool) {
+	if v := strings.TrimSpace(os.Getenv(inputEncodingEnv)); v != "" {
+		e, err := ParseEncoding(v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "usql: warning: %s=%q: %v; using the detected console encoding\n", inputEncodingEnv, v, err)
+		} else {
+			return e, true
+		}
+	}
 	switch cs := consoleInputCharset(); cs {
 	case "":
-		return OutputEncoding()
+		return OutputEncoding(), OutputEncoding() != nil
 	case "utf-8":
-		return nil
+		return nil, true
 	default:
-		return encodingForCharset(cs)
+		return encodingForCharset(cs), true
 	}
 }
 

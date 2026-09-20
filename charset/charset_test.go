@@ -118,6 +118,53 @@ func TestOutputEncoding(t *testing.T) {
 	}
 }
 
+// TestConsoleInputEncoding exercises the USQL_INPUT_ENCODING override and
+// the locale fallback (on non-Windows the console input charset is empty, so
+// the output locale decides). ok distinguishes an explicit UTF-8 passthrough
+// (nil, true) from "nothing detected" (nil, false).
+func TestConsoleInputEncoding(t *testing.T) {
+	tests := []struct {
+		name      string
+		override  string
+		lcAll     string
+		wantGBK   bool
+		want18030 bool
+		wantOK    bool
+	}{
+		{"locale utf-8 passthrough", "", "zh_CN.UTF-8", false, false, false},
+		{"locale gbk decodes input", "", "zh_CN.GBK", true, false, true},
+		{"override utf-8 beats gbk locale", "utf-8", "zh_CN.GBK", false, false, true},
+		{"override gbk beats utf-8 locale", "gbk", "zh_CN.UTF-8", true, false, true},
+		{"override utf8 alias", "UTF8", "zh_CN.GBK", false, false, true},
+		{"override gb18030", "gb18030", "zh_CN.GBK", false, true, true},
+		{"invalid override falls back", "latin1", "zh_CN.GBK", true, false, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("LANG", "")
+			t.Setenv("LC_CTYPE", "")
+			t.Setenv("LC_ALL", test.lcAll)
+			if test.override != "" {
+				t.Setenv("USQL_INPUT_ENCODING", test.override)
+			} else {
+				t.Setenv("USQL_INPUT_ENCODING", "")
+			}
+			enc, ok := ConsoleInputEncoding()
+			if ok != test.wantOK {
+				t.Errorf("ConsoleInputEncoding(override=%q, LC_ALL=%q): ok=%v, want %v", test.override, test.lcAll, ok, test.wantOK)
+			}
+			switch {
+			case test.wantGBK && enc != simplifiedchinese.GBK:
+				t.Errorf("ConsoleInputEncoding(override=%q, LC_ALL=%q): got %v, want GBK", test.override, test.lcAll, enc)
+			case test.want18030 && enc != simplifiedchinese.GB18030:
+				t.Errorf("ConsoleInputEncoding(override=%q, LC_ALL=%q): got %v, want GB18030", test.override, test.lcAll, enc)
+			case !test.wantGBK && !test.want18030 && enc != nil:
+				t.Errorf("ConsoleInputEncoding(override=%q, LC_ALL=%q): got %v, want nil", test.override, test.lcAll, enc)
+			}
+		})
+	}
+}
+
 // TestRunewidthEastAsianWidthGB18030 exercises the init() compensation: after
 // applyRunewidthFix under a GB18030 locale, ambiguous-width characters must
 // measure as two columns.

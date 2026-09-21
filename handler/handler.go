@@ -220,8 +220,6 @@ func (h *Handler) Run() error {
 		}
 		// read next statement/command
 		switch cmd, paramstr, err = h.buf.Next(env.Untick(h.user, env.Vars(), false)); {
-		case h.singleLineMode && err == nil:
-			execute = h.buf.Len != 0
 		case err == rline.ErrInterrupt:
 			h.buf.Reset(nil)
 			continue
@@ -230,7 +228,13 @@ func (h *Handler) Run() error {
 		case err != nil:
 			return err
 		case cmd != "":
+			// meta commands must be checked before the single line mode
+			// case below: in single line (-c) mode Next always returns a
+			// nil error for the preset command, which would otherwise
+			// shadow this case and silently drop every \command
 			opt, cont, lastErr = h.apply(stdout, stderr, strings.TrimPrefix(cmd, `\`), paramstr)
+		case h.singleLineMode && err == nil:
+			execute = h.buf.Len != 0
 		}
 		if cont {
 			continue
@@ -1188,7 +1192,6 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 	if err != nil {
 		return err
 	}
-	start := time.Now()
 	// query
 	rows, err := h.DB().QueryContext(ctx, sqlstr, bind...)
 	if err != nil {
@@ -1235,17 +1238,6 @@ func (h *Handler) doExecChart(ctx context.Context, w io.Writer, opt metacmd.Opti
 	}
 	fmt.Println("writing to", cfg.File)
 	return os.WriteFile(cfg.File, []byte(res), 0o644)
-	if h.timing {
-		d := time.Since(start)
-		s := text.TimingDesc
-		v := []interface{}{float64(d.Microseconds()) / 1000}
-		if d > 1*time.Second {
-			s += " (%v)"
-			v = append(v, d.Round(1*time.Millisecond))
-		}
-		fmt.Fprintln(h.l.Stdout(), uitheme.Current().Dim.Render(fmt.Sprintf(s, v...)))
-	}
-	return nil
 }
 
 // doExecSingle executes a single query against the database based on its query type.

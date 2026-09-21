@@ -107,8 +107,11 @@ func main() {
 			strings.HasPrefix(estr, "flag needs an argument:"):
 			fmt.Fprintln(os.Stderr, text.CommandHelpHint)
 		}
-		// the error exit bypasses the deferred restore
+		// the error exit bypasses the deferred restores; without EndConsoleQuiet
+		// the terminal keeps echo and canonical mode off, leaving the shell
+		// unusable after e.g. a failed `usql -h`
 		restoreConsole()
+		rline.EndConsoleQuiet()
 		os.Exit(1)
 	}
 }

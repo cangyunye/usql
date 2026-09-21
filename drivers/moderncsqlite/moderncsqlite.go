@@ -40,6 +40,7 @@ func init() {
 		},
 		ConvertBytes:      sqshared.ConvertBytes,
 		NewMetadataReader: sqshared.NewMetadataReader,
+		NewCompleter:      sqshared.NewCompleter,
 		Copy:              drivers.CopyWithInsert(func(int) string { return "?" }),
 	})
 }

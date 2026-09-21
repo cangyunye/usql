@@ -116,10 +116,14 @@ func NewDefaultCompleter(opts ...Option) rline.Completer {
 		logger:           log.New(os.Stderr, "ERROR: ", log.LstdFlags),
 		sqlStartCommands: CommonSqlStartCommands,
 		// TODO do we need to add built-in functions like, COALESCE, CAST, NULLIF, CONCAT etc?
-		sqlCommands: CommonSqlCommands,
-		schemaKind:  "schema",
+		sqlCommands:    CommonSqlCommands,
+		schemaKind:     "schema",
+		namesVerbs:     map[string]bool{},
+		statementWords: map[string][]string{},
 	}
-	c.useDatabases = statementStartsUse(c.sqlStartCommands)
+	if statementStartsUse(c.sqlStartCommands) {
+		c.namesVerbs["USE"] = true
+	}
 	for _, o := range opts {
 		o(&c)
 	}
@@ -167,7 +171,9 @@ func WithLogger(l logger) Option {
 func WithSQLStartCommands(commands []string) Option {
 	return func(c *completer) {
 		c.sqlStartCommands = commands
-		c.useDatabases = statementStartsUse(commands)
+		if statementStartsUse(commands) {
+			c.namesVerbs["USE"] = true
+		}
 	}
 }
 
@@ -204,6 +210,55 @@ func WithBeforeComplete(f CompleteFunc) Option {
 	}
 }
 
+// WithStatementWords registers statement verbs whose next word is
+// dialect-fixed, mapped to the words to offer: SQLite's "PRAGMA <name>"
+// positions (the pragma names) and "ATTACH <DATABASE>" are the canonical
+// uses. Candidates are served only immediately after the verb — a cursor
+// later in the statement ("PRAGMA journal_mode =") falls back to keywords.
+// Verb keys are matched case-insensitively; word lists are offered as typed.
+func WithStatementWords(words map[string][]string) Option {
+	return func(c *completer) {
+		for verb, list := range words {
+			c.statementWords[strings.ToUpper(verb)] = list
+		}
+	}
+}
+
+// WithNamesVerbs registers statement verbs whose following identifier is a
+// namespace name, so the word after the verb completes from the L1 schema
+// cache ("DETACH <attached-schema>"; USE is auto-registered from
+// sqlStartCommands for the MySQL family).
+func WithNamesVerbs(verbs ...string) Option {
+	return func(c *completer) {
+		for _, v := range verbs {
+			c.namesVerbs[strings.ToUpper(v)] = true
+		}
+	}
+}
+
+// BuiltinFunc is one static function completion: args is the signature shown
+// as dim detail; bare functions take no parentheses. See WithTableFunctions.
+type BuiltinFunc = builtinFunc
+
+// WithTableFunctions registers the dialect's set-returning functions —
+// functions valid in FROM/JOIN positions ("SELECT * FROM pragma_table_info(
+// ..."). They are offered in the table object tier alongside schemas and
+// relations, and excluded where only relations are valid (INSERT INTO,
+// UPDATE).
+func WithTableFunctions(funcs ...BuiltinFunc) Option {
+	return func(c *completer) {
+		c.tableFunctions = append(c.tableFunctions, funcs...)
+	}
+}
+
+// WithExtraSQLCommands appends dialect keywords to the mid-statement keyword
+// fallback, for words the common list lacks ("GLOB", "REGEXP" on SQLite).
+func WithExtraSQLCommands(words ...string) Option {
+	return func(c *completer) {
+		c.sqlCommands = append(c.sqlCommands, words...)
+	}
+}
+
 // completer completes SQL statements from the statement's clause context and
 // the database's catalog, and backslash commands from the declarative
 // meta-argument policy table.
@@ -224,9 +279,19 @@ type completer struct {
 	// caps remembers which catalog kinds the database does not serve
 	// (MySQL has no sequences), so failed loads are never re-issued.
 	caps *catalogCaps
-	// useDatabases enables the MySQL-family "USE <name>" completion from the
-	// L1 schema cache (set from sqlStartCommands).
-	useDatabases bool
+	// namesVerbs are the statement verbs whose following identifier is a
+	// namespace name — "USE <database>", "DETACH <schema>" — completed from
+	// the L1 schema cache. USE is seeded from sqlStartCommands; drivers add
+	// others via WithNamesVerbs.
+	namesVerbs map[string]bool
+	// statementWords are the statement verbs whose next word is
+	// dialect-fixed — PRAGMA's pragma names, ATTACH's DATABASE — served in
+	// the AfterVerb position (see WithStatementWords).
+	statementWords map[string][]string
+	// tableFunctions are the dialect's set-returning functions, offered in
+	// FROM/JOIN object positions alongside schema objects (see
+	// WithTableFunctions).
+	tableFunctions []builtinFunc
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context
@@ -269,10 +334,11 @@ func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
 	if res := c.completeMeta(previousWords, text); res != nil {
 		return res, len(text)
 	}
-	// MySQL-family "USE <name>" position: namespaces from the L1 schema
-	// cache. The old driver hook (WithBeforeComplete) queried the reader
-	// synchronously on the UI path — up to the reader timeout per Tab.
-	if c.useDatabases && len(previousWords) > 0 && strings.EqualFold(previousWords[len(previousWords)-1], "USE") {
+	// namespace-name positions ("USE <database>", "DETACH <schema>"):
+	// namespaces from the L1 schema cache. The old driver hook
+	// (WithBeforeComplete) queried the reader synchronously on the UI path —
+	// up to the reader timeout per Tab.
+	if n := len(previousWords); n > 0 && c.namesVerbs[strings.ToUpper(previousWords[n-1])] {
 		if objs, ok := c.schemas(); ok {
 			return completeFromListCands(text, candsObjs(objs)), len(text)
 		}

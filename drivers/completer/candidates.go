@@ -50,11 +50,12 @@ var verbFollows = map[string]string{
 }
 
 // builtinFunc is one built-in function completion: args is the signature
-// shown as dim detail; bare functions take no parentheses.
+// shown as dim detail; bare functions take no parentheses. The exported
+// alias BuiltinFunc (WithTableFunctions) shares the fields.
 type builtinFunc struct {
-	name string
-	args string
-	bare bool
+	Name string
+	Args string
+	Bare bool
 }
 
 // builtinFunctions is the dialect-neutral core offered in expression
@@ -63,33 +64,33 @@ type builtinFunc struct {
 // (MySQL-family information_schema.routines), and on engines without a
 // routine catalog at all — at zero query cost.
 var builtinFunctions = []builtinFunc{
-	{name: "COUNT", args: "expr"},
-	{name: "SUM", args: "expr"},
-	{name: "AVG", args: "expr"},
-	{name: "MIN", args: "expr"},
-	{name: "MAX", args: "expr"},
-	{name: "COALESCE", args: "expr, .."},
-	{name: "NULLIF", args: "a, b"},
-	{name: "CAST", args: "expr AS type"},
-	{name: "EXTRACT", args: "field FROM source"},
-	{name: "CONCAT", args: "str, .."},
-	{name: "SUBSTRING", args: "str, pos, len"},
-	{name: "UPPER", args: "str"},
-	{name: "LOWER", args: "str"},
-	{name: "LENGTH", args: "str"},
-	{name: "TRIM", args: "str"},
-	{name: "REPLACE", args: "str, from, to"},
-	{name: "ABS", args: "x"},
-	{name: "ROUND", args: "x, d"},
-	{name: "FLOOR", args: "x"},
-	{name: "CEIL", args: "x"},
-	{name: "MOD", args: "a, b"},
-	{name: "POWER", args: "a, b"},
-	{name: "CURRENT_DATE", bare: true},
-	{name: "CURRENT_TIME", bare: true},
-	{name: "CURRENT_TIMESTAMP", bare: true},
-	{name: "CURRENT_USER", bare: true},
-	{name: "SESSION_USER", bare: true},
+	{Name: "COUNT", Args: "expr"},
+	{Name: "SUM", Args: "expr"},
+	{Name: "AVG", Args: "expr"},
+	{Name: "MIN", Args: "expr"},
+	{Name: "MAX", Args: "expr"},
+	{Name: "COALESCE", Args: "expr, .."},
+	{Name: "NULLIF", Args: "a, b"},
+	{Name: "CAST", Args: "expr AS type"},
+	{Name: "EXTRACT", Args: "field FROM source"},
+	{Name: "CONCAT", Args: "str, .."},
+	{Name: "SUBSTRING", Args: "str, pos, len"},
+	{Name: "UPPER", Args: "str"},
+	{Name: "LOWER", Args: "str"},
+	{Name: "LENGTH", Args: "str"},
+	{Name: "TRIM", Args: "str"},
+	{Name: "REPLACE", Args: "str, from, to"},
+	{Name: "ABS", Args: "x"},
+	{Name: "ROUND", Args: "x, d"},
+	{Name: "FLOOR", Args: "x"},
+	{Name: "CEIL", Args: "x"},
+	{Name: "MOD", Args: "a, b"},
+	{Name: "POWER", Args: "a, b"},
+	{Name: "CURRENT_DATE", Bare: true},
+	{Name: "CURRENT_TIME", Bare: true},
+	{Name: "CURRENT_TIMESTAMP", Bare: true},
+	{Name: "CURRENT_USER", Bare: true},
+	{Name: "SESSION_USER", Bare: true},
 }
 
 // functionCand renders a function completion: the opening paren is part of
@@ -141,15 +142,15 @@ func (c completer) functionCands() []rline.Cand {
 		}
 	}
 	for _, f := range builtinFunctions {
-		if _, dup := seen[f.name]; dup {
+		if _, dup := seen[f.Name]; dup {
 			continue
 		}
-		seen[f.name] = struct{}{}
-		if f.bare {
-			out = append(out, rline.Cand{Text: f.name, Kind: "function"})
+		seen[f.Name] = struct{}{}
+		if f.Bare {
+			out = append(out, rline.Cand{Text: f.Name, Kind: "function"})
 			continue
 		}
-		out = append(out, functionCand(f.name, f.args+")"))
+		out = append(out, functionCand(f.Name, f.Args+")"))
 	}
 	return out
 }
@@ -438,6 +439,12 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 				cands = append(cands, candsObjs(selectableObjs(objs, tablesOnly))...)
 			}
 		}
+		// the dialect's set-returning functions are valid relations here
+		// regardless of catalog state — they are static, so they serve even
+		// while the schema tiers are still loading
+		if !tablesOnly {
+			cands = append(cands, tableFunctionCands(c.tableFunctions)...)
+		}
 		if len(cands) == 0 {
 			return nil, false, false // still loading: decline, kick re-renders
 		}
@@ -456,6 +463,12 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 	case ctx.Clause == "" && verbFollows[ctx.First] != "":
 		// a statement verb that must be followed by one keyword
 		return rline.Cands(verbFollows[ctx.First]), true, false
+	case ctx.Clause == "" && ctx.AfterVerb && len(c.statementWords[ctx.First]) != 0:
+		// a statement verb whose next word is dialect-fixed: SQLite's
+		// "PRAGMA <name>" positions, "ATTACH <DATABASE>". Served only
+		// immediately after the verb (ctx.AfterVerb) — later in the
+		// statement the generic keywords apply
+		return candsText(c.statementWords[ctx.First], "keyword"), true, false
 	default:
 		return nil, false, false
 	}
@@ -475,6 +488,18 @@ func candsObjs(objs []obj) []rline.Cand {
 	out := make([]rline.Cand, 0, len(objs))
 	for _, o := range objs {
 		out = append(out, rline.Cand{Text: o.name, Kind: o.kind, Detail: o.detail})
+	}
+	return out
+}
+
+// tableFunctionCands renders the dialect's set-returning functions for
+// FROM/JOIN positions: the opening paren is part of the inserted text, the
+// signature rides as dim detail — the same shape as the expression-position
+// function tier.
+func tableFunctionCands(funcs []builtinFunc) []rline.Cand {
+	out := make([]rline.Cand, 0, len(funcs))
+	for _, f := range funcs {
+		out = append(out, functionCand(f.Name, f.Args))
 	}
 	return out
 }

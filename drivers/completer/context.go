@@ -73,6 +73,12 @@ type Context struct {
 	// empty when none was recognized. It drives the verb-follows rule: the
 	// keyword that must come next.
 	First string
+	// AfterVerb reports whether the verb (First) is the last token before
+	// the cursor — "PRAGMA <cursor>", "ATTACH <cursor>" — so verbs whose
+	// next word is dialect-fixed (statement words) are served exactly
+	// there, and not later into the statement ("PRAGMA journal_mode ="
+	// must not offer pragma names again).
+	AfterVerb bool
 }
 
 // parseContext scans line[:start] and derives the completion context at the
@@ -106,6 +112,12 @@ func parseContext(line []rune, start int) Context {
 			ctx.First = strings.ToUpper(t.text)
 			break
 		}
+	}
+	// the verb is the last token before the cursor word: the position
+	// statement-words (PRAGMA names, ATTACH's DATABASE) apply in
+	if len(tokens) > 0 {
+		last := tokens[len(tokens)-1]
+		ctx.AfterVerb = last.kind == tokIdent && strings.ToUpper(last.text) == ctx.First
 	}
 	return ctx
 }

@@ -23,6 +23,7 @@ func NewMetadataReader(db drivers.DB, opts ...metadata.ReaderOption) metadata.Re
 
 var (
 	_ metadata.BasicReader          = &MetadataReader{}
+	_ metadata.CatalogReader        = &MetadataReader{}
 	_ metadata.FunctionReader       = &MetadataReader{}
 	_ metadata.FunctionColumnReader = &MetadataReader{}
 	_ metadata.IndexReader          = &MetadataReader{}
@@ -81,44 +82,101 @@ FROM pragma_table_info(?)`
 	return metadata.NewColumnSet(results), nil
 }
 
+// attachedSchemas returns the names of every attached database (main, temp,
+// and any ATTACHed files), which double as sqlite's schema names.
+func (r MetadataReader) attachedSchemas() ([]string, error) {
+	rows, closeRows, err := r.query(`SELECT name FROM pragma_database_list`, nil, "seq")
+	if err != nil {
+		return nil, err
+	}
+	defer closeRows()
+	var schemas []string
+	for rows.Next() {
+		var s string
+		if err = rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		schemas = append(schemas, s)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return schemas, nil
+}
+
+// Catalogs from pragma_database_list: main, temp, and every ATTACHed file.
+func (r MetadataReader) Catalogs(f metadata.Filter) (*metadata.CatalogSet, error) {
+	qstr := `SELECT name AS catalog_name FROM pragma_database_list`
+	conds := []string{}
+	vals := []interface{}{}
+	if f.Name != "" {
+		vals = append(vals, f.Name)
+		conds = append(conds, "catalog_name LIKE ?")
+	}
+	rows, closeRows, err := r.query(qstr, conds, "seq", vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRows()
+
+	results := []metadata.Catalog{}
+	for rows.Next() {
+		rec := metadata.Catalog{}
+		err = rows.Scan(&rec.Catalog)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, rec)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return metadata.NewCatalogSet(results), nil
+}
+
+// Tables from every attached schema (main, temp, ATTACHed files): each
+// schema's relations live in its own <schema>.sqlite_master, unioned into one
+// ordered result. Internal sqlite_% objects are reported as SYSTEM TABLE only
+// when the filter allows system objects.
 func (r MetadataReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
-	qstr := `SELECT
+	schemas, err := r.attachedSchemas()
+	if err != nil {
+		return nil, err
+	}
+	sysCond := " AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+	if f.WithSystem {
+		sysCond = ""
+	}
+	qstr, vals := "", []interface{}{}
+	for i, s := range schemas {
+		if i != 0 {
+			qstr += "\n    UNION ALL\n"
+		}
+		qstr += `    SELECT
+      '' AS table_catalog,
+      ? AS table_schem,
+      name AS table_name,
+      CASE WHEN name LIKE 'sqlite\_%' ESCAPE '\' THEN 'SYSTEM TABLE' ELSE UPPER(type) END AS table_type
+    FROM ` + quoteIdent(s) + `.sqlite_master
+    WHERE type IN ('table', 'view')` + sysCond
+		vals = append(vals, s)
+	}
+	qstr = `SELECT
   '' AS table_catalog,
-  '' AS table_schem,
+  table_schem,
   table_name,
   table_type
 FROM (
-    SELECT
-      name AS table_name,
-      UPPER(type) AS table_type
-    FROM sqlite_master
-    WHERE name NOT LIKE 'sqlite\_%' ESCAPE '\' AND UPPER(type) IN ('TABLE', 'VIEW')
-    UNION ALL
-    SELECT
-      name AS table_name,
-      'GLOBAL TEMPORARY' AS table_type
-    FROM sqlite_temp_master
-    UNION ALL
-    SELECT
-      name AS table_name,
-      'SYSTEM TABLE' AS table_type
-    FROM sqlite_master
-    WHERE name LIKE 'sqlite\_%' ESCAPE '\' AND UPPER(type) IN ('TABLE', 'VIEW')
-    UNION ALL
-    SELECT
-      name AS table_name,
-      'SYSTEM TABLE' AS table_type
-    FROM pragma_module_list
+` + qstr + `
 )`
 	conds := []string{}
-	vals := []interface{}{}
 	if f.Catalog != "" {
 		vals = append(vals, f.Catalog)
 		conds = append(conds, "table_catalog = ?")
 	}
 	if f.Schema != "" {
 		vals = append(vals, f.Schema)
-		conds = append(conds, "table_schema LIKE ?")
+		conds = append(conds, "table_schem LIKE ?")
 	}
 	if f.Name != "" {
 		vals = append(vals, f.Name)
@@ -315,6 +373,12 @@ JOIN pragma_index_xinfo(i.name) ic`
 		return nil, rows.Err()
 	}
 	return metadata.NewIndexColumnSet(results), nil
+}
+
+// quoteIdent quotes an identifier (an attached schema name), so schema names
+// with unusual characters are safe to interpolate into the FROM clause.
+func quoteIdent(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 func (r MetadataReader) query(qstr string, conds []string, order string, vals ...interface{}) (*sql.Rows, func(), error) {

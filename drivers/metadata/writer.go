@@ -265,7 +265,10 @@ func (w DefaultWriter) describeTableDetails(typ, sp, tp string, verbose, showSys
 	res.SetColumns(columns)
 	res.SetScanValues(func(r Result) []interface{} {
 		f := r.(*Column)
-		v := []interface{}{f.Name, f.DataType, f.IsNullable, f.Default}
+		// IsNullable is the metadata.Bool string type: render it as a plain
+		// string, or the table encoder falls back to JSON marshaling and
+		// prints the value wrapped in literal quotes
+		v := []interface{}{f.Name, f.DataType, string(f.IsNullable), f.Default}
 		if verbose {
 			v = append(v, f.ColumnSize, f.DecimalDigits, f.NumPrecRadix, f.CharOctetLength)
 		}

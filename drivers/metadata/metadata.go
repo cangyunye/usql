@@ -358,7 +358,9 @@ func (c Column) Values() []interface{} {
 		c.Table,
 		c.Name,
 		c.DataType,
-		c.IsNullable,
+		// plain string: the Bool type would be JSON-marshaled (and printed
+		// wrapped in quotes) by the table encoder's fallback
+		string(c.IsNullable),
 		c.Default,
 		c.ColumnSize,
 		c.DecimalDigits,

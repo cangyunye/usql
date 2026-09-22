@@ -214,6 +214,9 @@ func (h *Handler) Run() error {
 	var execute bool
 	for {
 		execute = false
+		// reset per-statement options: a plain statement must not inherit
+		// the previous statement's \g file/pipe redirection (psql parity)
+		opt = metacmd.Option{}
 		// set prompt
 		if iactive {
 			h.l.Prompt(h.Prompt(env.Get("PROMPT1")))

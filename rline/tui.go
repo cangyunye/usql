@@ -114,6 +114,7 @@ func (t *tuiRline) Next() ([]rune, error) {
 		tea.WithoutSignalHandler(),
 	)
 	fm, err := prog.Run()
+	t.respf.closeSession() // the read loop must not consume past this point
 	if err != nil {
 		// a killed program (terminal hangup) behaves like EOF
 		return nil, io.EOF
@@ -142,36 +143,6 @@ func (t *tuiRline) Close() error {
 func (t *tuiRline) ClearScreen() {
 	fmt.Fprint(t.raw, "\x1b[2J\x1b[3J\x1b[H")
 	t.respf.reset()
-	t.drainPendingInput()
-}
-
-// drainPendingInput discards every pending terminal input byte, so residue
-// queued while a query or output was running can never surface later.
-func (t *tuiRline) drainPendingInput() {
-	rd := t.cons
-	if rd == nil {
-		if f, ok := t.in.(*os.File); ok {
-			rd = f
-		}
-	}
-	if rd == nil {
-		return
-	}
-	// os.Stdin does not support read deadlines; a fresh description of the
-	// same console does
-	fresh, err := os.OpenFile("/dev/stdin", os.O_RDONLY, 0)
-	if err != nil {
-		return
-	}
-	defer fresh.Close()
-	buf := make([]byte, 128)
-	for {
-		_ = fresh.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
-		n, err := fresh.Read(buf)
-		if err != nil || n == 0 {
-			return
-		}
-	}
 }
 
 // IsTUI reports the bubbletea engine (optional IO extension used by embedded
@@ -179,8 +150,12 @@ func (t *tuiRline) drainPendingInput() {
 func (t *tuiRline) IsTUI() bool { return true }
 
 // ConsoleReader is the console input reader (optional IO extension for
-// embedded bubbletea programs).
-func (t *tuiRline) ConsoleReader() io.Reader { return t.in }
+// embedded bubbletea programs). It is the response filter, not the raw
+// console: the pump owns console reads for the whole session, so an
+// embedded program competes for buffered keystrokes with the same
+// generation handoff every read session uses — never for raw console
+// reads.
+func (t *tuiRline) ConsoleReader() io.Reader { return t.respf }
 
 // SetLine satisfies LineEditor: preset the next read's buffer and cursor.
 func (t *tuiRline) SetLine(text []rune, pos int) {
@@ -236,7 +211,7 @@ func (t *tuiRline) Password(prompt string) (string, error) {
 	if !t.int {
 		return "", errPasswordNotAvailable
 	}
-	return readPassword(prompt, t.in, t.raw)
+	return readPasswordFiltered(prompt, t.respf, t.raw, t.cons)
 }
 
 // SetOutput sets the output filter func. The TUI engine applies it to the
@@ -264,6 +239,66 @@ func readPassword(prompt string, in io.Reader, out io.Writer) (string, error) {
 		return "", err
 	}
 	return strings.TrimSuffix(line, "\n"), nil
+}
+
+// readPasswordFiltered reads one masked line through the response filter:
+// the pump keeps owning console reads, echo and ISIG are switched off on
+// the terminal when it can be controlled, and every accepted rune is
+// acknowledged with an asterisk. Without console control the same line is
+// read unmasked.
+func readPasswordFiltered(prompt string, f *responseFilter, out io.Writer, cons *os.File) (string, error) {
+	mask := false
+	if saved, ok := suppressInteractive(int(cons.Fd())); ok {
+		mask = true
+		toggleISIG(int(cons.Fd()), false) // ^C arrives as a byte instead of a signal
+		defer restoreEcho(int(cons.Fd()), saved)
+	}
+	fmt.Fprint(out, prompt)
+	return readPasswordLine(f, out, mask)
+}
+
+// readPasswordLine reads one line through the filter, honoring backspace
+// edits and ^C (a byte with ISIG off) either way; masked reads echo an
+// asterisk per accepted rune.
+func readPasswordLine(f *responseFilter, out io.Writer, mask bool) (string, error) {
+	var b []rune
+	var pend []byte
+	one := make([]byte, 1)
+	for {
+		if _, err := f.Read(one); err != nil {
+			fmt.Fprintln(out)
+			return "", err
+		}
+		c := one[0]
+		if len(pend) == 0 {
+			switch c {
+			case '\r', '\n':
+				fmt.Fprintln(out)
+				return string(b), nil
+			case 0x7f, '\b':
+				if len(b) > 0 {
+					b = b[:len(b)-1]
+					if mask {
+						fmt.Fprint(out, "\b \b")
+					}
+				}
+				continue
+			case 0x03: // ^C arrives as a byte with ISIG off
+				fmt.Fprintln(out)
+				return "", ErrInterrupt
+			}
+		}
+		pend = append(pend, c)
+		r, size := utf8.DecodeRune(pend)
+		if r == utf8.RuneError && size <= 1 && len(pend) < 4 {
+			continue // incomplete UTF-8: wait for more bytes
+		}
+		b = append(b, r)
+		pend = pend[:0]
+		if mask {
+			fmt.Fprint(out, "*")
+		}
+	}
 }
 
 // inputMode selects the TUI engine (the default for interactive sessions);
@@ -317,44 +352,26 @@ func bytesToRunes(b []byte) []rune {
 }
 
 // probeRow asks the terminal for its cursor row and returns the 0-based
-// answer, plus any stray printable bytes (typeahead) seen along the way.
-//
-// The terminal is NOT read directly: the session response filter is the
-// single input reader, so an answer split across reads is still recognized.
-// The probe pumps the filter manually — bytes the filter lets through
-// (keystrokes typed while output was still printing) come back as strays
-// and are opened on the input line; the report itself is captured inside
-// the filter.
+// answer. The answer arrives through the response filter's row channel —
+// the pump owns the console, so the probe never reads it directly; bytes
+// typed while the probe waits stay buffered and open the line as normal
+// keystrokes.
 func (t *tuiRline) probeRow() (int, []byte) {
-	if t.respf == nil || !t.respf.deadlineOK {
+	if t.respf == nil {
 		return -1, nil
 	}
 	t.respf.takeRow()
 	fmt.Fprint(t.raw, "\x1b[6n")
-	var stray []byte
-	buf := make([]byte, 64)
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := t.respf.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
-			break
-		}
-		n, err := t.respf.Read(buf)
-		for _, b := range buf[:n] {
-			if b >= 0x20 && b != 0x7f {
-				stray = append(stray, b)
-			}
-		}
-		if err != nil {
-			// quiet window: nothing more pending
-			if row, ok := t.respf.takeRow(); ok {
-				return row, stray
-			}
-		}
-		if row, ok := t.respf.takeRow(); ok {
-			return row, stray
+	// real terminals answer within milliseconds; a conservative quarter
+	// second covers slow links, and an unknown row only shrinks the
+	// completion menu cap
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for {
+		row, ok := t.respf.waitRow(time.Until(deadline))
+		if ok || !time.Now().Before(deadline) {
+			return row, nil
 		}
 	}
-	return -1, stray
 }
 
 // parseCursorRow extracts the 0-based row from a DSR 6n response (or a

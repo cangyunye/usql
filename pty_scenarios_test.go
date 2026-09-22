@@ -10,6 +10,7 @@
 //	CJKLocales       \dt and SELECT must render under CJK/UTF-8 locales
 //	Truncation       scripted runs, \g file and filtered queries are never truncated
 //	TerminalState    the line discipline is restored when the session ends
+//	MenuAtBottom     Tab at the screen bottom still opens the candidate menu
 package main
 
 import (
@@ -66,6 +67,7 @@ func newDB(t *testing.T) string {
 	}
 	if out, err := exec.Command(binPath, dsn,
 		"-c", "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)",
+		"-c", "CREATE TABLE invoices (n int)",
 		"-c", vals.String()).CombinedOutput(); err != nil {
 		t.Fatalf("setup db: %v\n%s", err, out)
 	}
@@ -273,5 +275,55 @@ func TestPTYTerminalState(t *testing.T) {
 	}
 	if !echo || !icanon || !isig {
 		t.Fatalf("line discipline after exit: echo=%v icanon=%v isig=%v, want all restored on", echo, icanon, isig)
+	}
+}
+
+// MenuAtBottom: after output pushes the prompt to the terminal's last row,
+// an explicit Tab must still open the candidate menu (the frame scrolls a
+// few history rows once). The headroom-only cap made Tab a silent no-op in
+// the most common prompt position, so completion looked "gone". Cols is
+// wide so the long temp-path prompt never soft-wraps (a rendering artifact
+// unrelated to the menu); Rows is short so the big result fills the screen.
+func TestPTYMenuAtBottom(t *testing.T) {
+	dsn := newDB(t)
+	// isolate history: a developer's real ~/.usql_history seeds word
+	// candidates and would make the menu contents nondeterministic
+	home := t.TempDir()
+	tm := ptytest.New(t, ptytest.Options{
+		Args: []string{binPath, dsn},
+		Env:  append(os.Environ(), "HOME="+home, "USQL_HISTORY="+filepath.Join(home, "hist")),
+		Rows: 24, Cols: 220,
+	})
+	defer tm.WaitExit(20 * time.Second)
+	tm.WaitFor(`Type "help"`, 30*time.Second)
+
+	// a second table (created in newDB) whose name is NOT fully typed
+	// below: completing the exact name of table t would leave zero
+	// candidate text to list
+
+	// fill the screen: the prompt ends on the bottom row
+	tm.SendLine("SELECT * FROM t;")
+	tm.WaitFor(`more available`, 30*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	// type a table prefix, then Tab: a candidate menu must appear even
+	// though there is no headroom below the cursor
+	for _, c := range "select * from inv" {
+		tm.SendKeys(string(c))
+		time.Sleep(80 * time.Millisecond)
+	}
+	tm.SendRaw("\t")
+	tm.WaitFor(`▸ main\.invoices\s+table|> main\.invoices\s+table`, 10*time.Second)
+
+	// accept the selection with Tab: the line completes and stays operable
+	// after the forced menu scrolled the history
+	tm.SendRaw("\t")
+	tm.WaitFor(`=> select \* from main\.invoices`, 10*time.Second)
+	tm.SendLine(" WHERE n IS NULL;")
+	tm.WaitFor(`\(0 rows\)`, 30*time.Second)
+
+	tm.SendLine("\\q")
+	if err := tm.WaitExit(10 * time.Second); err != nil {
+		t.Fatalf("exit: %v", err)
 	}
 }

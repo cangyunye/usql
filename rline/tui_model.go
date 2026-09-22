@@ -102,8 +102,18 @@ type lineModel struct {
 	menuExplicit bool
 	menuSel      int
 	menuTop      int // window offset
-	menuMax      int // window height (terminal height bounded)
-	topRow       int // terminal row the read started on (-1 unknown)
+	menuMax      int // window height (terminal headroom bounded)
+	// menuForce overrides menuMax for an explicit Tab when the headroom is
+	// gone (prompt at the screen bottom): the frame then scrolls a fixed
+	// number of history rows once rather than the Tab silently doing
+	// nothing. Typing-time popups never force — they must not scroll.
+	menuForce int
+	// forceOpen carries an explicit-Tab intent across an async completion:
+	// when Tab found no candidates yet (catalog loading) at the screen
+	// bottom, the menu opens forced once the background result lands,
+	// instead of degrading to a ghost. Any further edit drops the intent.
+	forceOpen bool
+	topRow    int // terminal row the read started on (-1 unknown)
 
 	// menu refresh cooldown: while set, delete-driven refreshes are held
 	// off and re-run by a trailing tick (menuPend)
@@ -359,10 +369,10 @@ func (m *lineModel) handleMenuKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	case key == "down" || key == "ctrl+n":
 		m.selectCandidate(1)
 	case key == "pgup":
-		m.menuSel -= m.menuMax
+		m.menuSel -= m.visRows()
 		m.clampMenuSel()
 	case key == "pgdown":
-		m.menuSel += m.menuMax
+		m.menuSel += m.visRows()
 		m.clampMenuSel()
 	case key == "tab":
 		m.acceptCandidate(m.menuSel)
@@ -612,6 +622,9 @@ func (m *lineModel) afterEdit(keepMenu bool, deleted bool) {
 	}
 	if !keepMenu {
 		m.ghost = nil
+		// typing supersedes a pending explicit-Tab intent: a later landing
+		// may pop the normal (non-scrolling) menu, nothing more
+		m.forceOpen = false
 	}
 	now := time.Now()
 	if deleted {
@@ -731,9 +744,17 @@ func (m *lineModel) refreshCompletion() {
 			listed = append(listed, c)
 		}
 	}
-	if m.menuMax >= 1 && len(listed) > 0 {
+	// a popup needs something visible to list; the forced landing of an
+	// explicit Tab opens regardless, matching Tab's own behavior
+	if m.forceOpen || (m.menuMax >= 1 && len(listed) > 0) {
 		m.menu, m.menuLen, m.menuRep = cands, length, replace
-		m.menuExplicit = false
+		// a landing that honors an explicit Tab keeps explicit semantics
+		// (Enter accepts) and the bottom-of-screen force
+		m.menuExplicit = m.forceOpen
+		if m.forceOpen {
+			m.menuForce = explicitMenuRows
+			m.forceOpen = false
+		}
 		m.menuSel, m.menuTop = 0, 0
 	}
 	// fish-style: the best match is dimmed after the cursor regardless
@@ -783,18 +804,49 @@ func (m *lineModel) scheduleMenuRefresh() tea.Cmd {
 	return tea.Tick(d, func(time.Time) tea.Msg { return compMsg{} })
 }
 
+// explicitMenuRows is the menu height an explicit Tab forces when the
+// cursor sits at the screen bottom (headroom < 1): a usable list that
+// scrolls that many history rows once, instead of a silent no-op.
+const explicitMenuRows = 8
+
+// visRows is the rendered menu window height: the headroom-bounded menuMax
+// raised to menuForce when an explicit Tab forced the menu open, capped by
+// the configured row budget.
+func (m *lineModel) visRows() int {
+	h := m.menuMax
+	if m.menuForce > h {
+		h = m.menuForce
+	}
+	if h > menuHeight {
+		h = menuHeight
+	}
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 // openMenu requests candidates and opens the vertical menu. When the space
-// below the cursor cannot hold a menu row (menuMax == 0), the menu declines:
-// opening it would scroll the terminal, and the ghost suggestion still shows
-// the best match.
+// below the cursor cannot hold a menu row (menuMax == 0) an explicit Tab
+// still opens one: the frame forces explicitMenuRows and the terminal
+// scrolls that much history once — silently doing nothing left the user
+// with no completion at the screen bottom, the most common prompt position
+// after a query.
 func (m *lineModel) openMenu() {
+	m.menuForce = 0
+	m.forceOpen = false
 	if m.menuMax < 1 {
-		m.closeMenu()
-		return
+		m.menuForce = explicitMenuRows
 	}
 	cands, length, replace, ok := m.requestCandidates()
 	if !ok || len(cands) == 0 {
+		m.menuForce = 0
 		m.closeMenu()
+		if ok && m.menuMax < 1 && m.t.comp != nil {
+			// the completer exists but has nothing yet (async catalog still
+			// loading): carry the explicit intent to the landing refresh
+			m.forceOpen = true
+		}
 		return
 	}
 	m.menu, m.menuLen, m.menuRep = cands, length, replace
@@ -810,6 +862,7 @@ func (m *lineModel) openMenu() {
 func (m *lineModel) closeMenu() {
 	m.menu, m.menuSel, m.menuTop = nil, -1, 0
 	m.menuLen, m.menuRep, m.menuExplicit = 0, false, false
+	m.menuForce = 0
 }
 
 // selectCandidate moves the menu selection by delta, wrapping.
@@ -842,13 +895,7 @@ func (m *lineModel) clampMenuSel() {
 
 // scrollMenu keeps the selection inside the visible window.
 func (m *lineModel) scrollMenu() {
-	h := m.menuMax
-	if h > menuHeight {
-		h = menuHeight
-	}
-	if h < 1 {
-		h = 1
-	}
+	h := m.visRows()
 	switch {
 	case m.menuSel < m.menuTop:
 		m.menuTop = m.menuSel
@@ -996,13 +1043,7 @@ func (m *lineModel) searchView() string {
 // every refilter, which would scroll the terminal history.
 func (m *lineModel) menuView() string {
 	t := uitheme.Current()
-	h := m.menuMax
-	if h > menuHeight {
-		h = menuHeight
-	}
-	if h < 1 {
-		h = 1
-	}
+	h := m.visRows()
 	end := m.menuTop + h
 	if end > len(m.menu) {
 		end = len(m.menu)
@@ -1027,7 +1068,7 @@ func (m *lineModel) menuView() string {
 	for i := m.menuTop; i < end; i++ {
 		full := append(append([]rune(nil), typed...), []rune(m.menu[i].Text)...)
 		text := string(full)
-		if i-m.menuTop < 9 && m.menuMax >= 9 {
+		if i-m.menuTop < 9 && h >= 9 {
 			text = strconv.Itoa(i+1) + " " + text
 		}
 		w := runewidth.StringWidth(text)

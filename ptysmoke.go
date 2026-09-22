@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -55,17 +56,46 @@ func openpty(rows, cols int) (*os.File, *os.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	var n uint32
-	if err := ioctl(int(master.Fd()), syscall.TIOCGPTN, unsafe.Pointer(&n)); err != nil {
-		master.Close()
-		return nil, nil, err
+	var slavePath string
+	if runtime.GOOS == "darwin" {
+		// darwin: the kernel hands back the slave path via TIOCPTYGNAME;
+		// there is no unlock step
+		var buf [128]byte
+		if _, _, e := syscall.Syscall(syscall.SYS_IOCTL, master.Fd(),
+			uintptr(syscall.TIOCPTYGNAME), uintptr(unsafe.Pointer(&buf[0]))); e != 0 {
+			master.Close()
+			return nil, nil, e
+		}
+		for i, c := range buf {
+			if c == 0 {
+				slavePath = string(buf[:i])
+				break
+			}
+		}
+		if slavePath == "" {
+			master.Close()
+			return nil, nil, fmt.Errorf("TIOCPTYGNAME returned no path")
+		}
+	} else {
+		// linux: get the slave number and unlock; raw ioctl numbers, since
+		// the syscall constants only exist on linux builds
+		const (
+			tiocgptn   = 0x80045430
+			tiocsptlck = 0x40045431
+		)
+		var n uint32
+		if err := ioctl(int(master.Fd()), tiocgptn, unsafe.Pointer(&n)); err != nil {
+			master.Close()
+			return nil, nil, err
+		}
+		var unlock int32
+		if err := ioctl(int(master.Fd()), tiocsptlck, unsafe.Pointer(&unlock)); err != nil {
+			master.Close()
+			return nil, nil, err
+		}
+		slavePath = fmt.Sprintf("/dev/pts/%d", n)
 	}
-	var unlock int32
-	if err := ioctl(int(master.Fd()), syscall.TIOCSPTLCK, unsafe.Pointer(&unlock)); err != nil {
-		master.Close()
-		return nil, nil, err
-	}
-	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|syscall.O_NOCTTY, 0)
+	slave, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err != nil {
 		master.Close()
 		return nil, nil, err

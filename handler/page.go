@@ -68,6 +68,16 @@ func (r *rowLimiter) Next() bool {
 // *sql.Rows and rowLimiter provide Next, so limitedRows states it.
 func (r *limitedRows) Next() bool { return r.rowLimiter.Next() }
 
+// terminalOutput reports whether an execution with opt displays its results
+// on the terminal — a plain statement or \g, without \g file/|pipe and
+// without \o redirection. These are the executions eligible for ROWLIMIT
+// paging (see pageState); every other execution target consumes complete
+// results and must never be truncated.
+func (h *Handler) terminalOutput(opt metacmd.Option) bool {
+	return (opt.Exec == metacmd.ExecNone || opt.Exec == metacmd.ExecOnly) &&
+		opt.Params["pipe"] == "" && h.out == nil
+}
+
 // pageShown advances the paging state after a page was displayed: the probe
 // row says whether another page exists, and a hint line tells the user how
 // to continue. The state is dropped when the pages are exhausted.

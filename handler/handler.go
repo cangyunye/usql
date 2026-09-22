@@ -501,7 +501,7 @@ func (h *Handler) Execute(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	// never rewritten. One extra row is fetched as a probe: the page shows
 	// ROWLIMIT rows, and a found probe row arms the \more continuation
 	h.page = nil
-	if qtyp && h.l.Interactive() && opt.Exec == metacmd.ExecOnly && opt.Params["pipe"] == "" {
+	if qtyp && h.l.Interactive() && h.terminalOutput(opt) {
 		if n := env.RowLimit(); n > 0 {
 			if limited, changed := rowlimit.Apply(h.u.Driver, sqlstr, n+1); changed {
 				h.page = &pageState{
@@ -1375,7 +1375,7 @@ func (h *Handler) doQuery(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	// exists; the wrapped rows satisfy everything *sql.Rows did
 	var limited *limitedRows
 	var resultSet tblfmt.ResultSet
-	if h.page != nil && opt.Exec == metacmd.ExecOnly && opt.Params["pipe"] == "" {
+	if h.page != nil && h.terminalOutput(opt) {
 		limited = &limitedRows{
 			Rows: rows,
 			rowLimiter: rowLimiter{

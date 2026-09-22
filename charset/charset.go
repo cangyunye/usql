@@ -245,6 +245,35 @@ func init() {
 	applyRunewidthFix()
 }
 
+// wideAmbiguous reports whether the console renders East-Asian ambiguous
+// width characters as two cells: the real console output charset says
+// gb18030 (Windows), or the console locale charset is gb18030 elsewhere.
+// The RUNEWIDTH_EASTASIAN environment variable overrides the heuristic when
+// set (runewidth's own contract): "1" forces wide, "0" forces narrow.
+func wideAmbiguous() bool {
+	switch os.Getenv("RUNEWIDTH_EASTASIAN") {
+	case "1":
+		return true
+	case "0":
+		return false
+	}
+	switch consoleCharset(consoleOutputCharset(), localeCharset()) {
+	case "gb18030":
+		return true
+	}
+	return false
+}
+
+// WideAmbiguous reports whether ambiguous-width characters measure as two
+// cells on this console — runewidth's own CJK-locale detection (any zh/ja/ko
+// locale, utf-8 included) or the gb18030 fix above. Interactive defaults
+// that require width-1 rule characters (the unicode table line style) are
+// suppressed when true: tblfmt rejects line styles whose runes measure as
+// anything but one column. RUNEWIDTH_EASTASIAN=0 opts back into unicode
+// borders (correct on terminals that render ambiguous characters one cell
+// wide — every modern terminal).
+func WideAmbiguous() bool { return runewidth.DefaultCondition.EastAsianWidth }
+
 // localeName returns the locale from the environment, LC_ALL first.
 func localeName() string {
 	for _, k := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
@@ -273,8 +302,7 @@ func localeCharset() string {
 }
 
 func applyRunewidthFix() {
-	switch consoleCharset(consoleOutputCharset(), localeCharset()) {
-	case "gb18030":
+	if wideAmbiguous() {
 		runewidth.DefaultCondition.EastAsianWidth = true
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"github.com/xo/dburl"
+	"github.com/xo/usql/charset"
 	"github.com/xo/usql/env"
 	"github.com/xo/usql/handler"
 	"github.com/xo/usql/rline"
@@ -302,7 +303,7 @@ func Run(ctx context.Context, args *Args) error {
 	// uitheme.LineWriter wiring in the handler). An explicit -P linestyle
 	// wins over this default, and the rc file (processed by the handler
 	// below) overrides it again.
-	if interactive && !forceNonInteractive && !slices.ContainsFunc(args.Pvars, func(v string) bool {
+	if interactive && !forceNonInteractive && !charset.WideAmbiguous() && !slices.ContainsFunc(args.Pvars, func(v string) bool {
 		return strings.HasPrefix(v, "linestyle")
 	}) {
 		if _, err := env.Vars().SetPrint("linestyle", "unicode"); err != nil {

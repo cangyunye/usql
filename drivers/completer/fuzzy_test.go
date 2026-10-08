@@ -1,6 +1,7 @@
 package completer
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/xo/usql/rline"
@@ -95,16 +96,32 @@ func TestCompletePrefixFull(t *testing.T) {
 			[]string{"public.now", "public.film", "public.actor_id_seq"},
 		},
 		{
-			"lowercase pattern lower-cases candidates",
+			"lowercase pattern lower-cases untyped candidates",
 			"fi",
 			[]string{"PUBLIC.FILM"},
 			[]string{"public.film"},
+		},
+		{
+			"lowercase pattern keeps relation candidates' stored case",
+			"fi",
+			[]string{"PUBLIC.FILM"},
+			[]string{"PUBLIC.FILM"},
 		},
 	}
 
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			got := completePrefixFull(test.pattern, rline.Cands(test.options...))
+			// relation candidates carry an object kind and keep their stored
+			// case; everything else mirrors the typed pattern's case
+			kind := ""
+			if strings.Contains(test.name, "relation") {
+				kind = "table"
+			}
+			options := make([]rline.Cand, 0, len(test.options))
+			for _, o := range test.options {
+				options = append(options, rline.Cand{Text: o, Kind: kind})
+			}
+			got := completePrefixFull(test.pattern, options)
 			if len(got) != len(test.want) {
 				t.Fatalf("completePrefixFull(%q, %v) = %q, want %q", test.pattern, test.options, got, test.want)
 			}

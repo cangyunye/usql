@@ -491,13 +491,11 @@ func NewMetadataWriter(ctx context.Context, u *dburl.URL, db DB, w io.Writer, op
 }
 
 // driverSchemaKinds labels namespace candidates for databases that do not
-// call their namespaces "schemas".
+// call their namespaces "schemas" and do not wire a custom completer
+// (drivers with a NewCompleter set the kind themselves).
 var driverSchemaKinds = map[string]string{
-	"oracle":   "user",
-	"godror":   "user",
-	"oboracle": "user",
-	"mysql":    "database",
-	"mymysql":  "database",
+	"mysql":   "database",
+	"mymysql": "database",
 }
 
 // NewCompleter creates a metadata completer for a driver and database

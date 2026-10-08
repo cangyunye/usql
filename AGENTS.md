@@ -24,6 +24,8 @@ Generation flow: `go generate` (i.e. `go run gen.go`, wired by `//go:generate go
 
 > Note: `CONTRIBUTING.md` says to run `internal/gen.sh`, but that file does **not** exist. The real generator is `go run gen.go` (equivalently `go generate`).
 
+Completion metadata connection (interactive sessions): the CLI pool is pinned to one connection for session consistency (`drivers.Open`), so the interactive completer loads its catalog on a **second, metadata-only pool** (same DSN, pinned to one connection, physical connection established lazily). The handler replays session-scope statements — `USE` / `SET search_path` / `ALTER SESSION SET CURRENT_SCHEMA` per `completer.ScopeReplayable`; transaction-local `SET LOCAL` is excluded — on the metadata pool before invalidating the completer cache (`handler.Execute`). A failed replay degrades to sharing the statement pool (contention returns, scope stays correct). Known limits and the measurement basis: `docs/topics/completion-conn-contention.md`. The `informationschema` metadata reader must stay instance-safe — `infos.New` builds a fresh reader per constructor call (two readers on different pools must not observe each other's database).
+
 ## Key Directories
 
 - `drivers/` — per-database driver packages. Each `drivers/<tag>/<tag>.go` registers itself via `init()` + `drivers.Register`. (`drivers.go` holds the `Driver` struct and registry; `qtype.go` holds query/exec-prefix maps.)
@@ -136,6 +138,7 @@ No `Makefile`/`Dockerfile` exists. `build.sh` is the release build script (cross
 ## Testing & QA
 
 - **Unit tests**: `go test ./...`. Covers `stmt/` parsing, `drivers/` helpers, `drivers/metadata/` readers, `drivers/completer/`.
+- **Completion live/bench tests** (real databases, skipped when unset): `USQL_LIVE_MYSQL` / `USQL_LIVE_PG` / `USQL_LIVE_ORACLE` gate `TestLiveCompletionContract`, `TestLiveMetaPoolReplay` and the leak/case tests; `USQL_BENCH_DSN` (comma-separated) gates `TestBenchLiveCatalog` and `TestBenchLiveContention` — all in `drivers/completer`. `TestPTYMetaPool` (root package, PG-gated) drives the real binary through the two-connection/replay wiring.
 - **Integration tests**: `go test github.com/xo/usql/drivers` (`drivers/drivers_test.go`) uses `ory/dockertest/v3` to spin up real DB containers (Postgres, MySQL, etc.) and exercise `\d*` metadata + queries. Requires Docker. Pass `-cleanup=false` during development to keep containers running. `contrib/usql-test.sh` and `contrib/podman-run.sh` provision test databases.
 - **Golden/snapshot tests**: `drivers/testdata/gen-golden.sh` regenerates golden files consumed by `drivers/*/sqshared/reader_test.go` and `drivers/metadata/*/metadata_test.go`.
 - **CLI test helper**: `testcli.go`; `main_test.go` imports `google/goexpect`.

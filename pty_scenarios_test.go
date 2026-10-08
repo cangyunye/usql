@@ -14,7 +14,9 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -321,6 +323,112 @@ func TestPTYMenuAtBottom(t *testing.T) {
 	tm.WaitFor(`=> select \* from main\.invoices`, 10*time.Second)
 	tm.SendLine(" WHERE n IS NULL;")
 	tm.WaitFor(`\(0 rows\)`, 30*time.Second)
+
+	tm.SendLine("\\q")
+	if err := tm.WaitExit(10 * time.Second); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+}
+
+// pgKeywordToURL converts a lib/pq keyword DSN into a postgres:// URL with
+// the given application_name — the CLI accepts URLs, not keyword DSNs.
+func pgKeywordToURL(dsn, appName string) string {
+	params := map[string]string{"port": "5432"}
+	for _, kv := range strings.Fields(dsn) {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			params[kv[:i]] = kv[i+1:]
+		}
+	}
+	u := url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(params["user"], params["password"]),
+		Host:   params["host"] + ":" + params["port"],
+		Path:   "/" + params["dbname"],
+	}
+	q := url.Values{}
+	if ssl, ok := params["sslmode"]; ok {
+		q.Set("sslmode", ssl)
+	}
+	q.Set("application_name", appName)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// TestPTYMetaPool verifies the metadata-pool wiring end to end against a
+// real PostgreSQL (gated by USQL_LIVE_PG, like the completer live tests):
+//
+//	connections  the interactive session holds two connections — the
+//	             statement pool and the completer's metadata pool
+//	replay       after SET search_path, completion resolves the new scope
+//	             (the replayed statement reached the metadata pool)
+func TestPTYMetaPool(t *testing.T) {
+	dsn := os.Getenv("USQL_LIVE_PG")
+	if dsn == "" {
+		t.Skip("USQL_LIVE_PG not set")
+	}
+	// application_name marks the session's two connections in
+	// pg_stat_activity; the marker schema gives the replayed scope a
+	// distinct table to complete
+	obs, err := sql.Open("postgres", dsn+" application_name=usql_pty_obs")
+	if err != nil {
+		t.Skipf("open observer: %v", err)
+	}
+	defer obs.Close()
+	// the keyword DSN may not carry application_name when the driver
+	// rejects unknown params — strip and retry via Exec params is
+	// overkill: lib/pq accepts application_name
+	for _, q := range []string{
+		`DROP SCHEMA IF EXISTS meta_replay_pty CASCADE`,
+		`CREATE SCHEMA meta_replay_pty`,
+		`CREATE TABLE meta_replay_pty.zed_marker (id int)`,
+	} {
+		if _, err := obs.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	t.Cleanup(func() { obs.Exec(`DROP SCHEMA IF EXISTS meta_replay_pty CASCADE`) })
+
+	home := t.TempDir()
+	tm := ptytest.New(t, ptytest.Options{
+		Args: []string{binPath, pgKeywordToURL(dsn, "usql_pty")},
+		Env:  append(os.Environ(), "HOME="+home, "USQL_HISTORY="+filepath.Join(home, "hist")),
+		Rows: 24, Cols: 220,
+	})
+	defer tm.WaitExit(20 * time.Second)
+	tm.WaitFor(`Type "help"`, 30*time.Second)
+
+	// replay: switch the scope on the statement pool; the metadata pool
+	// gets the same statement, so completion resolves the new schema's
+	// table. (The metadata pool connects lazily — connecting issues zero
+	// metadata queries — so its physical connection exists only after
+	// this replay or the first load.)
+	tm.SendLine("SET search_path = meta_replay_pty;")
+	tm.WaitFor(`SET`, 10*time.Second)
+	time.Sleep(500 * time.Millisecond)
+
+	// connections: the session must hold two — statement + metadata pool
+	deadline := time.Now().Add(10 * time.Second)
+	var n int
+	for {
+		if err := obs.QueryRow(
+			`SELECT count(*) FROM pg_stat_activity WHERE application_name = 'usql_pty'`,
+		).Scan(&n); err != nil {
+			t.Fatalf("count connections: %v", err)
+		}
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session holds %d connections with application_name usql_pty, want 2 (statement + metadata pool)", n)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	for _, c := range "select * from z" {
+		tm.SendKeys(string(c))
+		time.Sleep(80 * time.Millisecond)
+	}
+	tm.SendRaw("\t")
+	tm.WaitFor(`zed[_ ]marker`, 15*time.Second)
 
 	tm.SendLine("\\q")
 	if err := tm.WaitExit(10 * time.Second); err != nil {

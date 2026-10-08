@@ -4,6 +4,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/xo/usql/drivers/metadata"
@@ -64,8 +65,15 @@ func matchSchema(filterSchema, schema string) bool {
 }
 
 func (r candMockReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
+	return filterCandTables(candTables, f)
+}
+
+// filterCandTables applies the reader filter semantics the completer relies
+// on: name patterns and schema match case-insensitively, the types filter is
+// exact.
+func filterCandTables(tables []metadata.Table, f metadata.Filter) (*metadata.TableSet, error) {
 	var results []metadata.Table
-	for _, t := range candTables {
+	for _, t := range tables {
 		if !matchNamePattern(t.Name, f.Name) || !matchSchema(f.Schema, t.Schema) {
 			continue
 		}
@@ -133,6 +141,18 @@ func discardLogger() logger {
 	return log.New(io.Discard, "", 0)
 }
 
+// synMockReader extends candMockReader with a private synonym in the current
+// schema — Oracle applications routinely reach tables through synonyms
+// ("public.film_syn" → the film table).
+type synMockReader struct {
+	candMockReader
+}
+
+func (r synMockReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
+	withSyn := append([]metadata.Table{{Catalog: "", Schema: "public", Name: "film_syn", Type: "SYNONYM"}}, candTables...)
+	return filterCandTables(withSyn, f)
+}
+
 // contextTestCompleter builds a completer with the lazy cache installed.
 func contextTestCompleter(t *testing.T) *completer {
 	t.Helper()
@@ -157,7 +177,7 @@ func settleCompleter(t *testing.T, c *completer) {
 		if !ok || cur == "" {
 			return false
 		}
-		_, ok = c.schemaObjects("", cur)
+		_, ok = c.schemaObjects("", cur, true)
 		return ok
 	})
 }
@@ -660,4 +680,193 @@ func candTexts(cands []rline.Cand) []string {
 		out = append(out, c.Text)
 	}
 	return out
+}
+
+// TestSynonymsCompleteInObjectPositions: Oracle applications reach tables
+// through synonyms, so a schema's synonyms are selectable relations — they
+// must be offered in FROM positions like tables and views, and flagged with
+// their own kind in the menu.
+func TestSynonymsCompleteInObjectPositions(t *testing.T) {
+	c := &completer{reader: synMockReader{}, logger: discardLogger(), schemaKind: "schema"}
+	WithContextCompletion()(c)
+	settleCompleter(t, c)
+	got, _, ok := c.DoRepl([]rune("SELECT * FROM fi"), 16)
+	if !ok {
+		t.Fatal("DoRepl declined the FROM position")
+	}
+	var found *rline.Cand
+	for i := range got {
+		if got[i].Text == "public.film_syn" {
+			found = &got[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("DoRepl(FROM fi) = %v, want public.film_syn among candidates", candTexts(got))
+	}
+	if found.Kind != "synonym" {
+		t.Errorf("film_syn kind = %q, want \"synonym\"", found.Kind)
+	}
+}
+
+// TestDialectBuiltinFunctions: dialects register their own expression
+// functions (NVL/DECODE/TO_CHAR on Oracle), which are offered in expression
+// positions ahead of the neutral core list; a dialect entry shadows a core
+// entry of the same name instead of duplicating it.
+func TestDialectBuiltinFunctions(t *testing.T) {
+	c := &completer{reader: candMockReader{}, logger: discardLogger(), schemaKind: "schema"}
+	WithBuiltinFunctions(
+		BuiltinFunc{Name: "NVL", Args: "expr, value"},
+		BuiltinFunc{Name: "CONCAT", Args: "str, .."},
+	)(c)
+
+	got, _, ok := c.DoRepl([]rune("SELECT NV"), 9)
+	if !ok {
+		t.Fatal("DoRepl declined the SELECT position")
+	}
+	if !hasCandText(got, "NVL(") {
+		t.Errorf("DoRepl(SELECT NV) = %v, want NVL( among candidates", candTexts(got))
+	}
+
+	// the dialect entry shadows the core function of the same name
+	got2, _, _ := c.DoRepl([]rune("SELECT CON"), 10)
+	var concats int
+	for _, cand := range got2 {
+		if cand.Text == "CONCAT(" {
+			concats++
+		}
+	}
+	if concats != 1 {
+		t.Errorf("DoRepl(SELECT CON) offered CONCAT( %d times, want exactly once", concats)
+	}
+}
+
+func hasCandText(cands []rline.Cand, text string) bool {
+	for _, c := range cands {
+		if c.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+// filmCaseMockReader extends candMockReader with a mixed-case table — the
+// stored case is authoritative on case-sensitive engines (MySQL on Linux
+// with lower_case_table_names=0).
+type filmCaseMockReader struct {
+	candMockReader
+}
+
+func (r filmCaseMockReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
+	withFilm := append([]metadata.Table{{Catalog: "", Schema: "public", Name: "Film", Type: "TABLE"}}, candTables...)
+	return filterCandTables(withFilm, f)
+}
+
+// TestCatalogCandidatesKeepStoredCase: object candidates carry the catalog's
+// stored case and must keep it, however the user types — mirroring the typed
+// lowercase would insert identifiers that no longer resolve on
+// case-sensitive engines.
+func TestCatalogCandidatesKeepStoredCase(t *testing.T) {
+	c := &completer{reader: filmCaseMockReader{}, logger: discardLogger(), schemaKind: "schema"}
+	WithContextCompletion()(c)
+	settleCompleter(t, c)
+	got, _, ok := c.DoRepl([]rune("SELECT * FROM fi"), 16)
+	if !ok {
+		t.Fatal("DoRepl declined the FROM position")
+	}
+	for _, cand := range got {
+		if cand.Text == "public.Film" {
+			return
+		}
+	}
+	t.Errorf("DoRepl(FROM fi) = %v, want public.Film with its stored case", candTexts(got))
+}
+
+// TestKeywordsMirrorTypedCase: static keywords are not case-bearing — they
+// keep mirroring the user's typing habit (lowercase input, lowercase insert).
+func TestKeywordsMirrorTypedCase(t *testing.T) {
+	c := contextTestCompleter(t)
+	settleCompleter(t, c)
+	line := "SELECT * FROM film WHERE id = 1 whe"
+	got, _, ok := c.DoRepl([]rune(line), len(line))
+	if !ok {
+		t.Fatal("DoRepl declined the WHERE position")
+	}
+	for _, cand := range got {
+		if cand.Text == "when" {
+			return
+		}
+	}
+	t.Errorf("DoRepl(WHE) = %v, want a lowercase when among candidates", candTexts(got))
+}
+
+// useMockReader extends candMockReader with a mixed-case database name —
+// the stored case is authoritative on case-sensitive engines.
+type useMockReader struct {
+	candMockReader
+}
+
+func (r useMockReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
+	if f.OnlyVisible {
+		return metadata.NewSchemaSet([]metadata.Schema{{Schema: "MyDb"}}), nil
+	}
+	return metadata.NewSchemaSet([]metadata.Schema{{Schema: "MyDb"}, {Schema: "other"}}), nil
+}
+
+// TestUseCompletionReplacesWithStoredCase: "USE my<Tab>" offers the database
+// list as full words replacing the typed prefix, so the stored case survives
+// — the append-style suffix used to splice the typed lowercase onto the
+// stored name, yielding identifiers that case-sensitive engines reject.
+func TestUseCompletionReplacesWithStoredCase(t *testing.T) {
+	c := NewDefaultCompleter(
+		WithReader(useMockReader{}),
+		WithLogger(discardLogger()),
+		WithSchemaKind("database"),
+		WithSQLStartCommands(append(CommonSqlStartCommands, "USE")),
+		WithContextCompletion(),
+	).(*completer)
+	settleCompleter(t, c)
+	got, length, ok := c.DoRepl([]rune("USE my"), 6)
+	if !ok {
+		t.Fatal("DoRepl declined the USE position")
+	}
+	if length != 2 {
+		t.Errorf("length = %d, want 2 (the typed prefix is replaced)", length)
+	}
+	if len(got) != 1 || got[0].Text != "MyDb" {
+		t.Errorf("DoRepl(USE my) = %v, want [MyDb] with its stored case", candTexts(got))
+	}
+}
+
+// filterRecordingReader records the Filters the completer passes to Tables.
+type filterRecordingReader struct {
+	candMockReader
+	mu      sync.Mutex
+	filters []metadata.Filter
+}
+
+func (r *filterRecordingReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
+	r.mu.Lock()
+	r.filters = append(r.filters, f)
+	r.mu.Unlock()
+	return r.candMockReader.Tables(f)
+}
+
+// TestCurrentSchemaObjectsLoadViaVisibility: the bare-object menu merges the
+// current schema's objects from the visibility tier (OnlyVisible —
+// pg_table_is_visible on PostgreSQL, the exact current-schema match
+// elsewhere), not from a name-pattern load that look-alike schemas leak
+// into.
+func TestCurrentSchemaObjectsLoadViaVisibility(t *testing.T) {
+	r := &filterRecordingReader{candMockReader: candMockReader{}}
+	c := &completer{reader: r, logger: discardLogger(), schemaKind: "schema"}
+	WithContextCompletion()(c)
+	settleCompleter(t, c)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, f := range r.filters {
+		if f.OnlyVisible {
+			return
+		}
+	}
+	t.Errorf("current-schema object loads = %+v, want an OnlyVisible visibility load", r.filters)
 }

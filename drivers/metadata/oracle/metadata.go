@@ -23,6 +23,7 @@ type metaReader struct {
 var _ metadata.BasicReader = &metaReader{}
 var _ metadata.IndexReader = &metaReader{}
 var _ metadata.IndexColumnReader = &metaReader{}
+var _ metadata.SequenceReader = &metaReader{}
 
 // NewReader returns a metadata reader using ":N" bind placeholders, suitable
 // for Oracle native drivers (go-ora).
@@ -92,6 +93,11 @@ func (r metaReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
 FROM all_users
 `
 	conds, vals := r.conditions(f, formats{
+		// the completer resolves the session's default schema via
+		// OnlyVisible and takes the first row, so the predicate must be the
+		// exact current schema — a LIKE here would let same-length
+		// look-alike usernames through the underscore wildcard
+		schema:     "username = %s",
 		name:       "username LIKE %s",
 		notSchemas: "UPPER(username) NOT IN (%s)",
 	})
@@ -148,8 +154,10 @@ FROM all_objects o
 		}
 	}
 	if addSynonyms {
+		// UNION, not UNION ALL: all_objects already lists the schema's
+		// private synonyms, so the all_synonyms branch would double them
 		qstr += `
-UNION ALL
+UNION
 SELECT
   s.owner AS table_schem,
   s.synonym_name AS table_name,
@@ -455,6 +463,61 @@ ORDER BY o.owner, o.table_name, o.index_name, b.column_position`
 	return metadata.NewIndexColumnSet(results), nil
 }
 
+// Sequences from the visible scope (or a named schema, if given), matching
+// names and ownership. The ISEQ$$_ sequences Oracle generates behind every
+// identity column are implementation details — completion menus would flood
+// with them — so they are excluded.
+func (r metaReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, error) {
+	qstr := `SELECT
+  sequence_owner,
+  sequence_name
+FROM all_sequences
+`
+	conds, vals := r.conditions(f, formats{
+		schema:     "sequence_owner = %s",
+		notSchemas: "UPPER(sequence_owner) NOT IN (%s)",
+	})
+	conds = append(conds, "sequence_name NOT LIKE 'ISEQ$$\\_%' ESCAPE '\\'")
+	if len(conds) != 0 {
+		qstr += " WHERE " + strings.Join(conds, " AND ")
+	}
+	qstr += `
+ORDER BY sequence_owner, sequence_name`
+	rows, closeRows, err := r.Query(qstr, vals...)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return metadata.NewSequenceSet([]metadata.Sequence{}), nil
+		}
+		return nil, err
+	}
+	defer closeRows()
+
+	results := []metadata.Sequence{}
+	for rows.Next() {
+		rec := metadata.Sequence{}
+		err = rows.Scan(&rec.Schema, &rec.Name)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, rec)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return metadata.NewSequenceSet(results), nil
+}
+
+// schemaColumn extracts the owner column from a filter format, which is
+// either "<column> LIKE %s" or the already-exact "<column> = %s".
+func schemaColumn(format string) string {
+	for _, suffix := range []string{" LIKE %s", " = %s"} {
+		if col, ok := strings.CutSuffix(format, suffix); ok {
+			return col
+		}
+	}
+	return format
+}
+
 func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]string, []interface{}) {
 	baseParam := 1
 	conds := []string{}
@@ -475,9 +538,11 @@ func (r metaReader) conditions(filter metadata.Filter, formats formats) ([]strin
 			expr, r.systemSchemas, expr))
 	}
 	if filter.OnlyVisible && formats.schema != "" {
-		// follow the session's current schema (defaults to the login user,
-		// changes with ALTER SESSION SET CURRENT_SCHEMA)
-		conds = append(conds, fmt.Sprintf(formats.schema, "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')"))
+		// the current-schema expression is a single schema name, never a
+		// pattern — an exact match keeps look-alike owners (same length,
+		// differing at an underscore) out of the visible scope
+		conds = append(conds, fmt.Sprintf("%s = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')",
+			schemaColumn(formats.schema)))
 	}
 	if filter.Parent != "" && formats.parent != "" {
 		vals = append(vals, strings.ToUpper(filter.Parent))

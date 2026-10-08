@@ -16,8 +16,9 @@ import (
 var updatableTypes = []string{"TABLE", "BASE TABLE", "LOCAL TEMPORARY", "GLOBAL TEMPORARY", "VIEW"}
 
 // selectableTypes are the relation types offered in FROM/JOIN positions:
-// updatable types plus materialized views. Indexes are never selectable.
-var selectableTypes = append(updatableTypes, "MATERIALIZED VIEW")
+// updatable types plus materialized views and synonyms (Oracle reaches its
+// tables through them). Indexes are never selectable.
+var selectableTypes = append(updatableTypes, "MATERIALIZED VIEW", "SYNONYM")
 
 // booleanKeywords continue a column expression in a condition clause.
 var booleanKeywords = []string{
@@ -116,15 +117,16 @@ func callSignature(args, result string) string {
 }
 
 // functionCands builds the function tier for expression positions: the
-// current schema's catalog functions (L2; absent until their load lands)
-// followed by the static built-ins, deduplicated by upper-cased name so a
-// catalog function shadows its built-in twin. Candidates insert "name("
-// and carry the signature as dim detail.
+// current schema's catalog functions (L2; absent until their load lands),
+// then the dialect's registered functions, then the static built-ins,
+// deduplicated by upper-cased name so a catalog or dialect function shadows
+// its built-in twin. Candidates insert "name(" and carry the signature as
+// dim detail.
 func (c completer) functionCands() []rline.Cand {
 	seen := make(map[string]struct{}, 32)
 	out := make([]rline.Cand, 0, 32)
 	if cur, ok := c.currentSchema(); ok && cur != "" {
-		if objs, loaded := c.schemaObjects("", cur); loaded {
+		if objs, loaded := c.schemaObjects("", cur, true); loaded {
 			for _, o := range objs {
 				if o.kind != "function" {
 					continue
@@ -141,18 +143,31 @@ func (c completer) functionCands() []rline.Cand {
 			}
 		}
 	}
+	for _, f := range c.dialectFunctions {
+		if _, dup := seen[strings.ToUpper(f.Name)]; dup {
+			continue
+		}
+		seen[strings.ToUpper(f.Name)] = struct{}{}
+		out = appendBuiltinCand(out, f)
+	}
 	for _, f := range builtinFunctions {
-		if _, dup := seen[f.Name]; dup {
+		if _, dup := seen[strings.ToUpper(f.Name)]; dup {
 			continue
 		}
-		seen[f.Name] = struct{}{}
-		if f.Bare {
-			out = append(out, rline.Cand{Text: f.Name, Kind: "function"})
-			continue
-		}
-		out = append(out, functionCand(f.Name, f.Args+")"))
+		seen[strings.ToUpper(f.Name)] = struct{}{}
+		out = appendBuiltinCand(out, f)
 	}
 	return out
+}
+
+// appendBuiltinCand renders one static function completion: bare functions
+// take no parentheses, the rest insert "name(" with the signature as dim
+// detail.
+func appendBuiltinCand(out []rline.Cand, f builtinFunc) []rline.Cand {
+	if f.Bare {
+		return append(out, rline.Cand{Text: f.Name, Kind: "function"})
+	}
+	return append(out, functionCand(f.Name, f.Args+")"))
 }
 
 // scopeRE matches statements that change the session's default scope: a
@@ -164,6 +179,19 @@ var scopeRE = regexp.MustCompile(`(?is)^\s*(use\s|set\s+.*search_path|alter\s+se
 // default database/schema, so cached completion metadata must be dropped.
 func ScopeChanged(sqlstr string) bool {
 	return scopeRE.MatchString(sqlstr)
+}
+
+// localSetRE matches PostgreSQL's transaction-local SET (SET LOCAL ...) —
+// its scope dies with the transaction.
+var localSetRE = regexp.MustCompile(`(?is)^\s*set\s+local\s`)
+
+// ScopeReplayable reports whether sqlstr both changed the session scope and
+// can be replayed on the metadata connection. Replay is a plain
+// re-execution of the statement, so transaction-local forms (SET LOCAL) are
+// excluded: replaying one session-wide would leave the metadata
+// connection's scope diverged once the transaction ends.
+func ScopeReplayable(sqlstr string) bool {
+	return ScopeChanged(sqlstr) && !localSetRE.MatchString(sqlstr)
 }
 
 // Invalidate drops all cached completion metadata. The installed completer
@@ -230,6 +258,17 @@ func (cc *catalogCaps) forget() {
 	cc.unsupported = map[string]bool{}
 	cc.logged = map[string]bool{}
 	cc.mu.Unlock()
+}
+
+// WithBuiltinFunctions registers dialect-specific functions for expression
+// positions, offered ahead of the dialect-neutral core list — Oracle's
+// NVL/DECODE/TO_CHAR, for example. A dialect entry shadows a core entry of
+// the same name (deduplicated by upper-cased name); signatures ride as dim
+// detail like the core's.
+func WithBuiltinFunctions(funcs ...BuiltinFunc) Option {
+	return func(c *completer) {
+		c.dialectFunctions = append(c.dialectFunctions, funcs...)
+	}
 }
 
 // WithContextCompletion returns an Option that installs the lazy catalog
@@ -435,7 +474,7 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		cands := c.namespaceCands()
 		tablesOnly := ctx.Clause == "INTO" || ctx.Clause == "UPDATE"
 		if cur, ok := c.currentSchema(); ok && cur != "" {
-			if objs, loaded := c.schemaObjects("", cur); loaded {
+			if objs, loaded := c.schemaObjects("", cur, true); loaded {
 				cands = append(cands, candsObjs(selectableObjs(objs, tablesOnly))...)
 			}
 		}
@@ -460,6 +499,15 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		}
 		options = append(options, completeFromList(nil, clauseKeywords[ctx.Clause]...)...)
 		return options, true, false
+	case ctx.Clause == "" && ctx.AfterVerb && c.namesVerbs[ctx.First]:
+		// "USE <cursor>", "DETACH <cursor>": the namespace list as full
+		// words replacing the typed prefix — replace-style keeps the
+		// stored case, which case-sensitive engines (MySQL on Linux)
+		// require of the appended identifier
+		if objs, ok := c.schemas(); ok {
+			return candsObjs(objs), true, false
+		}
+		return nil, false, false // still loading: decline, kick re-renders
 	case ctx.Clause == "" && verbFollows[ctx.First] != "":
 		// a statement verb that must be followed by one keyword
 		return rline.Cands(verbFollows[ctx.First]), true, false
@@ -578,7 +626,7 @@ func (c completer) qualifiedOptions(ctx Context) []rline.Cand {
 		return options
 	}
 	schemaObjects := func(catalog, schema string, relationsOnly bool) []rline.Cand {
-		objs, ok := c.schemaObjects(catalog, schema)
+		objs, ok := c.schemaObjects(catalog, schema, false)
 		if !ok {
 			return nil // still loading: decline, kick re-renders
 		}
@@ -698,13 +746,18 @@ func (c completer) currentSchema() (string, bool) {
 	return objs[0].name, true
 }
 
-func (c completer) schemaObjects(catalog, schema string) ([]obj, bool) {
+// schemaObjects returns a namespace's cached objects. The current schema's
+// load (visible) is scoped by the readers' OnlyVisible restriction on top of
+// the name — pg_table_is_visible on PostgreSQL, the exact current-schema
+// match elsewhere — so look-alike schemas cannot leak into the bare-object
+// menu; a typed qualifier loads by name alone (it may target any schema).
+func (c completer) schemaObjects(catalog, schema string, visible bool) ([]obj, bool) {
 	if c.cache == nil || schema == "" {
 		return nil, false
 	}
 	key := catalog + "\x00" + schema
 	return c.cache.get(bucketObject, key, func() ([]obj, error) {
-		return c.loadSchemaObjects(catalog, schema)
+		return c.loadSchemaObjects(catalog, schema, visible)
 	})
 }
 
@@ -766,10 +819,10 @@ func (c completer) loadCurrentSchema() ([]obj, error) {
 // an engine without a catalog (MySQL has no information_schema.sequences)
 // skips that kind instead of failing the whole bucket, so the rest stays
 // cached.
-func (c completer) loadSchemaObjects(catalog, schema string) ([]obj, error) {
+func (c completer) loadSchemaObjects(catalog, schema string, visible bool) ([]obj, error) {
 	var out []obj
 	if r, ok := c.reader.(metadata.TableReader); ok && !c.caps.skip("tables") {
-		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: selectableTypes}
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: selectableTypes, OnlyVisible: visible}
 		if set, err := r.Tables(filter); err != nil {
 			c.caps.failed("tables", err, c.logger)
 		} else {
@@ -781,7 +834,7 @@ func (c completer) loadSchemaObjects(catalog, schema string) ([]obj, error) {
 		}
 	}
 	if r, ok := c.reader.(metadata.FunctionReader); ok && !c.caps.skip("functions") {
-		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, OnlyVisible: visible}
 		if set, err := r.Functions(filter); err != nil {
 			c.caps.failed("functions", err, c.logger)
 		} else {
@@ -797,7 +850,7 @@ func (c completer) loadSchemaObjects(catalog, schema string) ([]obj, error) {
 		}
 	}
 	if r, ok := c.reader.(metadata.SequenceReader); ok && !c.caps.skip("sequences") {
-		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true}
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, OnlyVisible: visible}
 		if set, err := r.Sequences(filter); err != nil {
 			c.caps.failed("sequences", err, c.logger)
 		} else {

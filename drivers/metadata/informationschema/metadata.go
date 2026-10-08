@@ -66,42 +66,47 @@ const (
 
 // New InformationSchema reader
 func New(opts ...metadata.ReaderOption) func(drivers.DB, ...metadata.ReaderOption) metadata.Reader {
-	s := &InformationSchema{
-		pf:                  func(n int) string { return fmt.Sprintf("$%d", n) },
-		hasFunctions:        true,
-		hasSequences:        true,
-		hasIndexes:          true,
-		hasConstraints:      true,
-		hasCheckConstraints: true,
-		hasTablePrivileges:  true,
-		hasColumnPrivileges: true,
-		hasUsagePrivileges:  true,
-		clauses: map[ClauseName]string{
-			ColumnsDataType:                 "data_type",
-			ColumnsColumnSize:               "COALESCE(character_maximum_length, numeric_precision, datetime_precision, 0)",
-			ColumnsNumericScale:             "COALESCE(numeric_scale, 0)",
-			ColumnsNumericPrecRadix:         "COALESCE(numeric_precision_radix, 10)",
-			ColumnsCharOctetLength:          "COALESCE(character_octet_length, 0)",
-			FunctionColumnsColumnSize:       "COALESCE(character_maximum_length, numeric_precision, datetime_precision, 0)",
-			FunctionColumnsNumericScale:     "COALESCE(numeric_scale, 0)",
-			FunctionColumnsNumericPrecRadix: "COALESCE(numeric_precision_radix, 10)",
-			FunctionColumnsCharOctetLength:  "COALESCE(character_octet_length, 0)",
-			FunctionsSecurityType:           "security_type",
-			ConstraintIsDeferrable:          "t.is_deferrable",
-			ConstraintInitiallyDeferred:     "t.initially_deferred",
-			SequenceColumnsIncrement:        "increment",
-			PrivilegesGrantor:               "grantor",
-		},
-		systemSchemas:     []string{"information_schema"},
-		dataTypeFormatter: func(col metadata.Column) string { return col.DataType },
-	}
-	// apply InformationSchema specific options
-	for _, o := range opts {
-		o(s)
-	}
+	// the reader must be built fresh per constructor call: a process can
+	// hold several readers on different databases at once (the completer,
+	// the \d commands, and a dedicated metadata connection), and a shared
+	// instance would silently rebind every earlier reader to the last
+	// reader's database
+	return func(db drivers.DB, callOpts ...metadata.ReaderOption) metadata.Reader {
+		s := &InformationSchema{
+			pf:                  func(n int) string { return fmt.Sprintf("$%d", n) },
+			hasFunctions:        true,
+			hasSequences:        true,
+			hasIndexes:          true,
+			hasConstraints:      true,
+			hasCheckConstraints: true,
+			hasTablePrivileges:  true,
+			hasColumnPrivileges: true,
+			hasUsagePrivileges:  true,
+			clauses: map[ClauseName]string{
+				ColumnsDataType:                 "data_type",
+				ColumnsColumnSize:               "COALESCE(character_maximum_length, numeric_precision, datetime_precision, 0)",
+				ColumnsNumericScale:             "numeric_scale",
+				ColumnsNumericPrecRadix:         "COALESCE(numeric_precision_radix, 10)",
+				ColumnsCharOctetLength:          "character_octet_length",
+				FunctionColumnsColumnSize:       "COALESCE(character_maximum_length, numeric_precision, datetime_precision, 0)",
+				FunctionColumnsNumericScale:     "numeric_scale",
+				FunctionColumnsNumericPrecRadix: "COALESCE(numeric_precision_radix, 10)",
+				FunctionColumnsCharOctetLength:  "character_octet_length",
+				FunctionsSecurityType:           "security_type",
+				ConstraintIsDeferrable:          "t.is_deferrable",
+				ConstraintInitiallyDeferred:     "t.initially_deferred",
+				SequenceColumnsIncrement:        "increment",
+				PrivilegesGrantor:               "grantor",
+			},
+			systemSchemas:     []string{"information_schema"},
+			dataTypeFormatter: func(col metadata.Column) string { return col.DataType },
+		}
+		// apply InformationSchema specific options
+		for _, o := range opts {
+			o(s)
+		}
 
-	return func(db drivers.DB, opts ...metadata.ReaderOption) metadata.Reader {
-		s.LoggingReader = metadata.NewLoggingReader(db, opts...)
+		s.LoggingReader = metadata.NewLoggingReader(db, callOpts...)
 		return s
 	}
 }
@@ -242,6 +247,11 @@ func (s InformationSchema) Columns(f metadata.Filter) (*metadata.ColumnSet, erro
 	for rows.Next() {
 		rec := metadata.Column{}
 		var defaultNS sql.NullString
+		// engines leave the numeric statistics NULL for types that do not
+		// carry them (character_octet_length for non-character types,
+		// numeric_scale for integers on some engines) — a failed scan here
+		// would fail the whole load and completion would retry it forever
+		var columnSize, decimalDigits, numPrecRadix, charOctetLength sql.NullInt64
 		err = rows.Scan(
 			&rec.Catalog,
 			&rec.Schema,
@@ -251,15 +261,17 @@ func (s InformationSchema) Columns(f metadata.Filter) (*metadata.ColumnSet, erro
 			&rec.DataType,
 			&defaultNS,
 			&rec.IsNullable,
-			&rec.ColumnSize,
-			&rec.DecimalDigits,
-			&rec.NumPrecRadix,
-			&rec.CharOctetLength,
+			&columnSize,
+			&decimalDigits,
+			&numPrecRadix,
+			&charOctetLength,
 		)
 		if err != nil {
 			return nil, err
 		}
 		rec.Default = defaultNS.String
+		rec.ColumnSize, rec.DecimalDigits = int(columnSize.Int64), int(decimalDigits.Int64)
+		rec.NumPrecRadix, rec.CharOctetLength = int(numPrecRadix.Int64), int(charOctetLength.Int64)
 		rec.DataType = s.dataTypeFormatter(rec)
 		results = append(results, rec)
 	}
@@ -354,9 +366,14 @@ FROM information_schema.schemata
 	// the OnlyVisible restriction filters the schema-name column, which the
 	// schemata query expresses through its name format, so conditions'
 	// schema-based OnlyVisible clause cannot apply; add it here, or
-	// OnlyVisible would be silently ignored
+	// OnlyVisible would be silently ignored. The match is exact: LIKE would
+	// treat underscores in the current schema's name as wildcards, and — for
+	// engines whose expression falls back to a catch-all ('%') when no
+	// schema is selected, e.g. MySQL's COALESCE(DATABASE(), '%') — would
+	// resolve the completer's "current schema" to the alphabetically first
+	// database instead of nothing.
 	if f.OnlyVisible && s.currentSchema != "" {
-		conds = append(conds, fmt.Sprintf("schema_name LIKE %s", s.currentSchema))
+		conds = append(conds, fmt.Sprintf("schema_name = %s", s.currentSchema))
 	}
 	rows, closeRows, err := s.query(qstr, conds, "catalog_name, schema_name", vals...)
 	if err != nil {
@@ -536,6 +553,8 @@ func (s InformationSchema) FunctionColumns(f metadata.Filter) (*metadata.Functio
 	for rows.Next() {
 		rec := metadata.FunctionColumn{}
 		var name, typ, dataType sql.NullString
+		// nullable statistics, same as Columns above
+		var columnSize, decimalDigits, numPrecRadix, charOctetLength sql.NullInt64
 		err = rows.Scan(
 			&rec.Catalog,
 			&rec.Schema,
@@ -544,15 +563,17 @@ func (s InformationSchema) FunctionColumns(f metadata.Filter) (*metadata.Functio
 			&rec.OrdinalPosition,
 			&typ,
 			&dataType,
-			&rec.ColumnSize,
-			&rec.DecimalDigits,
-			&rec.NumPrecRadix,
-			&rec.CharOctetLength,
+			&columnSize,
+			&decimalDigits,
+			&numPrecRadix,
+			&charOctetLength,
 		)
 		if err != nil {
 			return nil, err
 		}
 		rec.Name, rec.Type, rec.DataType = name.String, typ.String, dataType.String
+		rec.ColumnSize, rec.DecimalDigits = int(columnSize.Int64), int(decimalDigits.Int64)
+		rec.NumPrecRadix, rec.CharOctetLength = int(numPrecRadix.Int64), int(charOctetLength.Int64)
 		results = append(results, rec)
 	}
 	if rows.Err() != nil {
@@ -1111,7 +1132,13 @@ func (s InformationSchema) conditions(baseParam int, filter metadata.Filter, for
 		}
 	}
 	if filter.OnlyVisible && formats.schema != "" && s.currentSchema != "" {
-		conds = append(conds, fmt.Sprintf(formats.schema, s.currentSchema))
+		// the current-schema expression is a single schema name, never a
+		// pattern — an exact match keeps look-alike schemas (same length,
+		// differing at an underscore) out of the visible scope. The filter
+		// formats are uniformly "<column> LIKE %s", so the column comes
+		// from stripping that suffix.
+		conds = append(conds, fmt.Sprintf("%s = %s",
+			strings.TrimSuffix(formats.schema, " LIKE %s"), s.currentSchema))
 	}
 	if filter.Parent != "" && formats.parent != "" {
 		vals = append(vals, filter.Parent)

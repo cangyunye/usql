@@ -93,6 +93,14 @@ type Handler struct {
 	u *dburl.URL
 	// db is the active database connection.
 	db *sql.DB
+	// metadb is the metadata-only connection pool the interactive
+	// completer's catalog loads run on (nil when not interactive, or when
+	// the metadata pool could not be opened / failed and was dropped —
+	// completion then shares the statement connection). Same DSN as db,
+	// pinned to one connection; kept session-consistent by replaying scope
+	// statements (see Execute), because it must see the same session state
+	// (USE / search_path / CURRENT_SCHEMA) as the user pool.
+	metadb *sql.DB
 	// tx is the active transaction, if any.
 	tx *sql.Tx
 	// out file or pipe
@@ -543,6 +551,16 @@ func (h *Handler) Execute(ctx context.Context, w io.Writer, opt metacmd.Option, 
 	// a statement that changes the session scope invalidates the
 	// completer's cached metadata (USE, SET search_path, CURRENT_SCHEMA)
 	if h.completerInvalidate != nil && completer.ScopeChanged(sqlstr) {
+		// replay the scope statement on the metadata pool first, so its
+		// session state matches the user pool's and the post-invalidation
+		// loads resolve the new scope. A failed replay means the metadata
+		// pool's scope can no longer be trusted: degrade to the statement
+		// connection (contention returns, scope stays correct).
+		if h.metadb != nil && completer.ScopeReplayable(sqlstr) {
+			if _, err := h.metadb.ExecContext(ctx, sqlstr); err != nil {
+				h.degradeCompleter(ctx)
+			}
+		}
 		h.completerInvalidate()
 	}
 	if forceTrans {
@@ -907,6 +925,11 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	}
 	// open connection
 	var err error
+	// drop the previous connection's metadata pool (\connect re-entry)
+	if h.metadb != nil {
+		_ = h.metadb.Close()
+		h.metadb = nil
+	}
 	h.db, err = drivers.Open(ctx, h.u, h.GetOutput, h.l.Stderr)
 	if err != nil && !drivers.IsPasswordErr(h.u, err) {
 		defer h.Close()
@@ -918,22 +941,25 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 	if err == nil {
 		if err = drivers.Ping(ctx, h.u, h.db); err == nil {
 			if h.l.Interactive() {
-				// the completer's default 3s metadata timeout is too tight
-				// for databases with slow catalogs (e.g. OceanBase), so
-				// raise it; applied after the defaults, so it wins
-				opts := append(readerOpts(), metadata.WithTimeout(10*time.Second))
-				c := drivers.NewCompleter(ctx, h.u, h.db, opts,
-					// route the completer's diagnostic logging through the
-					// IO's stderr, so it is buffered during TUI reads
-					completer.WithLogger(log.New(h.l.Stderr(), "ERROR: ", log.LstdFlags)),
-					completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion(),
-					completer.WithAliasNames(env.Aliases().Names(h.u.Driver)))
-				// NewLive adds the typing-time fast path on top
-				live := completer.NewLive(c)
-				if inv, ok := live.(interface{ Invalidate() }); ok {
-					h.completerInvalidate = inv.Invalidate
+				// the completer loads its metadata on a dedicated pool (same
+				// DSN, pinned to one connection): the statement pool is pinned
+				// for session consistency, so without a second pool a slow
+				// in-flight statement queues the loads behind it — and a slow
+				// cold-catalog load (OceanBase ~10.5s) delays the user's
+				// Enter by as much. Execute keeps the metadata pool
+				// session-consistent by replaying scope statements; when the
+				// pool cannot be opened, completion shares the statement
+				// connection (contention returns, scope stays correct).
+				if metadb, merr := drivers.Open(ctx, h.u, h.GetOutput, h.l.Stderr); merr == nil {
+					h.metadb = metadb
+				} else {
+					fmt.Fprintf(h.l.Stderr(), "completion: metadata pool unavailable, sharing the statement connection: %v\n", merr)
 				}
-				h.l.Completer(live)
+				pool := h.metadb
+				if pool == nil {
+					pool = h.db
+				}
+				h.setCompleter(ctx, pool)
 			}
 			return h.Version(ctx)
 		}
@@ -960,6 +986,40 @@ func (h *Handler) Open(ctx context.Context, params ...string) error {
 // the argument of `\c`/`\conns`-style commands.
 func (h *Handler) connStrings() []string {
 	return slices.Sorted(maps.Keys(env.Vars().Conn()))
+}
+
+// setCompleter builds the interactive completer on pool and installs it.
+// pool is the metadata pool when available, else the statement connection
+// (see degradeCompleter).
+func (h *Handler) setCompleter(ctx context.Context, pool *sql.DB) {
+	// the completer's default 3s metadata timeout is too tight for
+	// databases with slow catalogs (e.g. OceanBase), so raise it; applied
+	// after the defaults, so it wins
+	opts := append(readerOpts(), metadata.WithTimeout(10*time.Second))
+	c := drivers.NewCompleter(ctx, h.u, pool, opts,
+		// route the completer's diagnostic logging through the IO's
+		// stderr, so it is buffered during TUI reads
+		completer.WithLogger(log.New(h.l.Stderr(), "ERROR: ", log.LstdFlags)),
+		completer.WithConnStrings(h.connStrings()), completer.WithContextCompletion(),
+		completer.WithAliasNames(env.Aliases().Names(h.u.Driver)))
+	// NewLive adds the typing-time fast path on top
+	live := completer.NewLive(c)
+	if inv, ok := live.(interface{ Invalidate() }); ok {
+		h.completerInvalidate = inv.Invalidate
+	}
+	h.l.Completer(live)
+}
+
+// degradeCompleter drops the metadata pool and rebuilds the completer on
+// the statement connection: connection contention returns, but the
+// completion scope stays correct. Used when the metadata pool's replay of
+// a scope statement fails — its session state can no longer be trusted.
+func (h *Handler) degradeCompleter(ctx context.Context) {
+	if h.metadb != nil {
+		_ = h.metadb.Close()
+		h.metadb = nil
+	}
+	h.setCompleter(ctx, h.db)
 }
 
 // forceParams forces connection parameters on a database URL, adding any
@@ -1038,6 +1098,10 @@ func (h *Handler) Close() error {
 	}
 	// the paged result belonged to the closed connection
 	h.page = nil
+	if h.metadb != nil {
+		_ = h.metadb.Close()
+		h.metadb = nil
+	}
 	if h.db != nil {
 		err := h.db.Close()
 		drv := h.u.Driver

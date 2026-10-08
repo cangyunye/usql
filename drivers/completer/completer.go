@@ -292,6 +292,10 @@ type completer struct {
 	// FROM/JOIN object positions alongside schema objects (see
 	// WithTableFunctions).
 	tableFunctions []builtinFunc
+	// dialectFunctions are the dialect's expression functions, offered in
+	// expression positions ahead of the neutral core list (see
+	// WithBuiltinFunctions).
+	dialectFunctions []builtinFunc
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context
@@ -652,9 +656,11 @@ func qualifiedIdentifier(filter metadata.Filter, catalog, schema, name string) s
 
 // completeFromListCands filters already-built candidates by the typed text
 // (case-insensitive prefix), returning the append-style suffix after the
-// typed text, keeping kinds. nil options decline (callers fall through);
-// non-nil options with no matches yield an empty result — nothing to
-// suggest, but the path was authoritative.
+// typed text, keeping kinds. Candidates that mirror typed case (see
+// mirrorsTypedCase) are lower-cased when the typed text starts lower-case.
+// nil options decline (callers fall through); non-nil options with no
+// matches yield an empty result — nothing to suggest, but the path was
+// authoritative.
 func completeFromListCands(text []rune, options []rline.Cand) []rline.Cand {
 	if options == nil {
 		return nil
@@ -667,7 +673,7 @@ func completeFromListCands(text []rune, options []rline.Cand) []rline.Cand {
 			continue
 		}
 		match := o.Text[len(text):]
-		if isLower {
+		if isLower && mirrorsTypedCase(o.Kind) {
 			match = strings.ToLower(match)
 		}
 		result = append(result, rline.Cand{Text: match, Kind: o.Kind, Detail: o.Detail})

@@ -63,12 +63,27 @@ func isBoundaryByte(b byte) bool {
 	return false
 }
 
+// mirrorsTypedCase reports whether a candidate mirrors the typed pattern's
+// case. Only relation and namespace candidates must keep their stored case:
+// on case-sensitive engines (MySQL on Linux with lower_case_table_names=0)
+// the stored table/database name is the only one that resolves, and file
+// paths are case-sensitive too. Keywords, functions and columns mirror the
+// typing habit — names in those classes are case-insensitive on every
+// supported engine.
+func mirrorsTypedCase(kind string) bool {
+	switch kind {
+	case "", "keyword", "function", "column":
+		return true
+	}
+	return false
+}
+
 // completeFuzzyFull returns the options that fuzzily match pattern as full
 // words — used by the replace-style context path, where candidates replace
 // the word at the cursor entirely (e.g. schema.table). Prefix matches rank
-// first, then fuzzy score, then length. When pattern starts with a
-// lower-case letter the whole candidate is lower-cased, mirroring
-// completeFromList's case behavior for keywords.
+// first, then fuzzy score, then length. Candidates that mirror typed case
+// (see mirrorsTypedCase) are lower-cased when the pattern starts with a
+// lower-case letter.
 func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 	lowerPattern := strings.ToLower(pattern)
 	type match struct {
@@ -94,7 +109,7 @@ func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
 	result := make([]rline.Cand, 0, len(matches))
 	for _, m := range matches {
-		if lower {
+		if lower && mirrorsTypedCase(m.cand.Kind) {
 			m.cand.Text = strings.ToLower(m.cand.Text)
 		}
 		result = append(result, m.cand)
@@ -108,8 +123,9 @@ func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 // insensitive), or — for a dotless pattern, so bare table names complete
 // against qualified candidates — when its last dot-separated segment does
 // ("film" matches "public.film"; "db" does not match "foo_db_bar").
-// Results keep a stable shortest-first order, and are lower-cased when the
-// pattern starts with a lower-case letter, mirroring completeFuzzyFull.
+// Results keep a stable shortest-first order, and candidates that mirror
+// typed case (see mirrorsTypedCase) are lower-cased when the pattern starts
+// with a lower-case letter.
 func completePrefixFull(pattern string, options []rline.Cand) []rline.Cand {
 	p := strings.ToLower(pattern)
 	dotted := strings.Contains(pattern, ".")
@@ -133,7 +149,7 @@ func completePrefixFull(pattern string, options []rline.Cand) []rline.Cand {
 	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
 	result := make([]rline.Cand, 0, len(matches))
 	for _, m := range matches {
-		if lower {
+		if lower && mirrorsTypedCase(m.Kind) {
 			m.Text = strings.ToLower(m.Text)
 		}
 		result = append(result, m)

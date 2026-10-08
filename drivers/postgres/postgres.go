@@ -14,15 +14,58 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/lib/pq" // DRIVER
 	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers"
+	"github.com/xo/usql/drivers/completer"
 	"github.com/xo/usql/drivers/metadata"
 	pgmeta "github.com/xo/usql/drivers/metadata/postgres"
 	"github.com/xo/usql/env"
+	"github.com/xo/usql/rline"
 	"github.com/xo/usql/text"
 )
+
+// pgExtraCommands are PostgreSQL keywords the common mid-statement fallback
+// lacks: pattern matching, upsert and window clauses.
+var pgExtraCommands = []string{
+	"ILIKE",
+	"ON CONFLICT",
+	"RETURNING",
+	"FILTER",
+	"WINDOW",
+	"LATERAL",
+	"FOR UPDATE",
+}
+
+// pgBuiltinFunctions are PostgreSQL's everyday expression functions the
+// dialect-neutral core list lacks. Static, so they serve at zero query cost.
+var pgBuiltinFunctions = []completer.BuiltinFunc{
+	{Name: "NOW"},
+	{Name: "DATE_TRUNC", Args: "unit, ts"},
+	{Name: "DATE_PART", Args: "field, ts"},
+	{Name: "TO_CHAR", Args: "ts, fmt"},
+	{Name: "TO_DATE", Args: "str, fmt"},
+	{Name: "TO_NUMBER", Args: "str, fmt"},
+	{Name: "TO_TIMESTAMP", Args: "str, fmt"},
+	{Name: "STRING_AGG", Args: "expr, delim"},
+	{Name: "ARRAY_AGG", Args: "expr"},
+	{Name: "ARRAY_TO_STRING", Args: "arr, sep"},
+	{Name: "GREATEST", Args: "expr, .."},
+	{Name: "LEAST", Args: "expr, .."},
+	{Name: "VERSION", Bare: true},
+	{Name: "CURRENT_DATABASE", Bare: true},
+	{Name: "CURRENT_SCHEMA", Bare: true},
+}
+
+// pgTableFunctions are PostgreSQL's set-returning functions, valid in
+// FROM/JOIN positions.
+var pgTableFunctions = []completer.BuiltinFunc{
+	{Name: "GENERATE_SERIES", Args: "start, stop"},
+	{Name: "UNNEST", Args: "array"},
+	{Name: "JSONB_TO_RECORDSET", Args: "jsonb"},
+}
 
 func init() {
 	openConn := func(stdout, stderr func() io.Writer, dsn string) (*sql.DB, error) {
@@ -106,6 +149,23 @@ func init() {
 			return false
 		},
 		NewMetadataReader: pgmeta.NewReader(),
+		NewCompleter: func(db drivers.DB, opts ...completer.Option) rline.Completer {
+			reader := pgmeta.NewReader()(db,
+				// completion is interactive; the same budget as the other
+				// drivers with slow-catalog tolerance
+				metadata.WithTimeout(20*time.Second),
+				metadata.WithLimit(100000),
+			)
+			opts = append([]completer.Option{
+				completer.WithReader(reader),
+				completer.WithDB(db),
+				completer.WithSchemaKind("schema"),
+				completer.WithExtraSQLCommands(pgExtraCommands...),
+				completer.WithBuiltinFunctions(pgBuiltinFunctions...),
+				completer.WithTableFunctions(pgTableFunctions...),
+			}, opts...)
+			return completer.NewDefaultCompleter(opts...)
+		},
 		NewMetadataWriter: func(db drivers.DB, w io.Writer, opts ...metadata.ReaderOption) metadata.Writer {
 			return metadata.NewDefaultWriter(pgmeta.NewReader()(db, opts...))(db, w)
 		},

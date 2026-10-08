@@ -34,6 +34,32 @@ func TestScopeChanged(t *testing.T) {
 	}
 }
 
+// TestScopeReplayable: statements eligible for replay on the metadata
+// connection are the session-scope changes minus transaction-local forms —
+// PostgreSQL's SET LOCAL dies with the transaction, and replaying it
+// session-wide would leave the metadata connection's scope diverged.
+func TestScopeReplayable(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want bool
+	}{
+		{"USE other", true},
+		{"  USE  `some-db`", true},
+		{"SET search_path TO alt, public", true},
+		{"set search_path=alt;", true},
+		{"ALTER SESSION SET CURRENT_SCHEMA = MIGSRC", true},
+		{"SET LOCAL search_path = alt", false},
+		{"set local search_path = alt;", false},
+		{"SELECT * FROM film", false},
+		{"UPDATE film SET name = 'USE'", false},
+	}
+	for _, c := range cases {
+		if got := ScopeReplayable(c.sql); got != c.want {
+			t.Errorf("ScopeReplayable(%q) = %v, want %v", c.sql, got, c.want)
+		}
+	}
+}
+
 // TestInvalidateDropsCache: after Invalidate, the same completion re-queries
 // the reader instead of serving stale entries.
 func TestInvalidateDropsCache(t *testing.T) {
@@ -44,15 +70,15 @@ func TestInvalidateDropsCache(t *testing.T) {
 		t.Fatal("WithContextCompletion did not install a cache")
 	}
 
-	c.schemaObjects("", "public")
+	c.schemaObjects("", "public", true)
 	waitFor(t, func() bool { return inner.calls("tables") >= 1 })
-	c.schemaObjects("", "public") // cached: no new query
+	c.schemaObjects("", "public", true) // cached: no new query
 	if n := inner.calls("tables"); n != 1 {
 		t.Fatalf("inner queried %d times before invalidate, want 1", n)
 	}
 
 	c.Invalidate()
-	c.schemaObjects("", "public") // re-arms the load
+	c.schemaObjects("", "public", true) // re-arms the load
 	waitFor(t, func() bool { return inner.calls("tables") >= 2 })
 }
 

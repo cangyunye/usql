@@ -16,8 +16,10 @@ import (
 	"github.com/go-sql-driver/mysql" // DRIVER
 	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers"
+	"github.com/xo/usql/drivers/completer"
 	"github.com/xo/usql/drivers/metadata"
 	mymeta "github.com/xo/usql/drivers/metadata/mysql"
+	"github.com/xo/usql/rline"
 )
 
 func init() {
@@ -54,7 +56,11 @@ func init() {
 		NewMetadataWriter: func(db drivers.DB, w io.Writer, opts ...metadata.ReaderOption) metadata.Writer {
 			return metadata.NewDefaultWriter(mymeta.NewReader(db, opts...))(db, w)
 		},
-		Copy:         drivers.CopyWithInsert(func(int) string { return "?" }),
-		NewCompleter: mymeta.NewCompleter,
+		Copy: drivers.CopyWithInsert(func(int) string { return "?" }),
+		NewCompleter: func(db drivers.DB, opts ...completer.Option) rline.Completer {
+			// the shared MySQL-family completer, with the MySQL dialect
+			// layered on top (DuckDB wires the shared one without it)
+			return mymeta.NewCompleter(db, append(mymeta.DialectOptions(), opts...)...)
+		},
 	}, "memsql", "vitess", "tidb", "oceanbase")
 }

@@ -1561,6 +1561,16 @@ CURRENT_SCHEMA` on Oracle-family servers), so the candidate list always
 reflects the current database/schema. Slow catalog sources (e.g. OceanBase)
 are queried off the input loop in the background, so typing never blocks.
 
+Completion is **privilege-aware**: only objects the login can access are
+offered — its own schema, the database's public namespace, and every schema
+it was granted a privilege on. A namespace that would complete into an empty
+menu is never suggested: on Oracle the schema tier is derived from
+`all_objects` (the privilege view) rather than `all_users`; on PostgreSQL
+relations are gated on `has_schema_privilege`/`has_table_privilege`; on
+MySQL `information_schema` is already server-side privilege filtered. The
+`\d`-style listing commands are unaffected — they keep listing everything
+the server exposes, so schemas remain discoverable.
+
 #### Input Engine (Bubbletea TUI)
 
 `usql` ships two interactive input engines. The default is the

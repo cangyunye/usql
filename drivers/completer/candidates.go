@@ -772,7 +772,9 @@ func (c completer) columns(ref TableRef) ([]obj, bool) {
 }
 
 // loadSchemas loads L1: every schema the login can reach, minus the system
-// schemas (the readers' WithSystem:false restriction).
+// schemas (the readers' WithSystem:false restriction) and minus the ones the
+// login has no privilege on (OnlyAccessible — an ungrantable namespace would
+// only ever complete into an empty menu).
 func (c completer) loadSchemas() ([]obj, error) {
 	r, ok := c.reader.(metadata.SchemaReader)
 	if !ok {
@@ -781,7 +783,7 @@ func (c completer) loadSchemas() ([]obj, error) {
 	if c.caps.skip("schemas") {
 		return []obj{}, nil
 	}
-	set, err := r.Schemas(metadata.Filter{WithSystem: false})
+	set, err := r.Schemas(metadata.Filter{WithSystem: false, OnlyAccessible: true})
 	if err != nil {
 		c.caps.failed("schemas", err, c.logger)
 		return nil, err
@@ -822,7 +824,7 @@ func (c completer) loadCurrentSchema() ([]obj, error) {
 func (c completer) loadSchemaObjects(catalog, schema string, visible bool) ([]obj, error) {
 	var out []obj
 	if r, ok := c.reader.(metadata.TableReader); ok && !c.caps.skip("tables") {
-		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: selectableTypes, OnlyVisible: visible}
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: selectableTypes, OnlyVisible: visible, OnlyAccessible: true}
 		if set, err := r.Tables(filter); err != nil {
 			c.caps.failed("tables", err, c.logger)
 		} else {
@@ -834,7 +836,7 @@ func (c completer) loadSchemaObjects(catalog, schema string, visible bool) ([]ob
 		}
 	}
 	if r, ok := c.reader.(metadata.FunctionReader); ok && !c.caps.skip("functions") {
-		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, OnlyVisible: visible}
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, OnlyVisible: visible, OnlyAccessible: true}
 		if set, err := r.Functions(filter); err != nil {
 			c.caps.failed("functions", err, c.logger)
 		} else {
@@ -850,7 +852,7 @@ func (c completer) loadSchemaObjects(catalog, schema string, visible bool) ([]ob
 		}
 	}
 	if r, ok := c.reader.(metadata.SequenceReader); ok && !c.caps.skip("sequences") {
-		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, OnlyVisible: visible}
+		filter := metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, OnlyVisible: visible, OnlyAccessible: true}
 		if set, err := r.Sequences(filter); err != nil {
 			c.caps.failed("sequences", err, c.logger)
 		} else {

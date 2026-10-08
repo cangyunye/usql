@@ -46,9 +46,9 @@ func (c completer) completeListObjects(text []rune, kindName string, types []str
 			return matches
 		}
 		// tier 2: the visible-scope object listing
-		return completeFuzzyFull(object, c.listingCands(kindName, metadata.Filter{OnlyVisible: true, Types: types}))
+		return completeFuzzyFull(object, c.listingCands(kindName, metadata.Filter{OnlyVisible: true, Types: types, OnlyAccessible: true}))
 	}
-	return completeFuzzyFull(string(text), c.listingCands(kindName, metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: types}))
+	return completeFuzzyFull(string(text), c.listingCands(kindName, metadata.Filter{Catalog: catalog, Schema: schema, WithSystem: true, Types: types, OnlyAccessible: true}))
 }
 
 // namespaceListCands lists every schema the login can reach: the L1 cache
@@ -311,10 +311,13 @@ func (c completer) querySchemaCands(filter metadata.Filter) []rline.Cand {
 			// name should already have a wildcard appended
 			return r.Schemas(metadata.Filter{Catalog: filter.Schema, Name: filter.Name, WithSystem: true})
 		}
-		// every schema the login can reach, not just the current one
+		// every schema the login can reach, not just the current one —
+		// and of those, only the ones it holds a privilege on (the cached
+		// L1 path applies the same restriction)
 		f := filter
 		f.OnlyVisible = false
 		f.WithSystem = false
+		f.OnlyAccessible = true
 		return r.Schemas(f)
 	}()
 	if err != nil {

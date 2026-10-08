@@ -88,6 +88,15 @@ FROM dba_db_links`,
 }
 
 func (r metaReader) Schemas(f metadata.Filter) (*metadata.SchemaSet, error) {
+	// OnlyAccessible derives the namespace list from the same privilege view
+	// the object tiers load from: an account appears in all_users as soon as
+	// it exists, but only owners of accessible objects can back their name
+	// with a non-empty menu — deriving from all_objects keeps the schema tier
+	// and the object tiers consistent by construction (the login user's own
+	// owner and every granted-to owner included; PUBLIC excluded, see below).
+	if f.OnlyAccessible {
+		return r.schemasFromAccessibleObjects(f)
+	}
 	qstr := `SELECT
   username
 FROM all_users
@@ -101,6 +110,51 @@ FROM all_users
 		name:       "username LIKE %s",
 		notSchemas: "UPPER(username) NOT IN (%s)",
 	})
+	if len(conds) != 0 {
+		qstr += " WHERE " + strings.Join(conds, " AND ")
+	}
+	qstr += `
+ORDER BY username`
+	rows, closeRows, err := r.Query(qstr, vals...)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return metadata.NewSchemaSet([]metadata.Schema{}), nil
+		}
+		return nil, err
+	}
+	defer closeRows()
+
+	results := []metadata.Schema{}
+	for rows.Next() {
+		rec := metadata.Schema{}
+		err = rows.Scan(&rec.Schema)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, rec)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return metadata.NewSchemaSet(results), nil
+}
+
+// schemasFromAccessibleObjects serves Schemas with OnlyAccessible: the
+// distinct owners of the objects the login can reach.
+func (r metaReader) schemasFromAccessibleObjects(f metadata.Filter) (*metadata.SchemaSet, error) {
+	qstr := `SELECT DISTINCT
+  owner AS username
+FROM all_objects
+`
+	conds, vals := r.conditions(f, formats{
+		schema:     "owner LIKE %s",
+		name:       "owner LIKE %s",
+		notSchemas: "UPPER(owner) NOT IN (%s)",
+	})
+	// PUBLIC owns the database-wide synonyms: "PUBLIC.x" is not valid SQL
+	// (ORA-00903), so it must not surface as a completable namespace —
+	// and its thousands of system synonyms would only flood the menus.
+	conds = append(conds, "UPPER(owner) != 'PUBLIC'")
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
 	}

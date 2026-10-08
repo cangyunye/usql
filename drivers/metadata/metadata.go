@@ -140,6 +140,14 @@ type Filter struct {
 	WithSystem bool
 	// OnlyVisible objects
 	OnlyVisible bool
+	// OnlyAccessible rows the login can access, privilege-checked server
+	// side. Completion sets it so menus never offer an object (or a schema
+	// with none) that would fail on use; listing commands (\dt, \dn, ...)
+	// leave it unset to keep everything discoverable. Readers whose backing
+	// catalogs are already privilege views (Oracle all_objects, MySQL
+	// information_schema) may honor it only where it changes semantics, and
+	// readers that cannot check privileges may ignore it.
+	OnlyAccessible bool
 }
 
 // Writer of database metadata in a human readable format.

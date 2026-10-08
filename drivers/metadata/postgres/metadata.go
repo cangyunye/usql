@@ -148,6 +148,16 @@ FROM pg_catalog.pg_class c
 	if f.OnlyVisible {
 		conds = append(conds, "pg_catalog.pg_table_is_visible(c.oid)")
 	}
+	if f.OnlyAccessible {
+		// pg catalogs are readable by every login, so pg_class on its own
+		// leaks: a relation only completes when the login holds USAGE on its
+		// schema AND any DML privilege on the relation itself
+		conds = append(conds, "pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND "+
+			"(pg_catalog.has_table_privilege(c.oid, 'SELECT') OR "+
+			"pg_catalog.has_table_privilege(c.oid, 'INSERT') OR "+
+			"pg_catalog.has_table_privilege(c.oid, 'UPDATE') OR "+
+			"pg_catalog.has_table_privilege(c.oid, 'DELETE'))")
+	}
 	if !f.WithSystem {
 		conds = append(conds, "n.nspname NOT IN ('pg_catalog', 'information_schema', 'db4ai', 'dbe_pldebugger', 'dbe_pldeveloper', 'pkg_service', 'sqladvisor', 'cstore', 'perf', 'llvm_orc')")
 	}

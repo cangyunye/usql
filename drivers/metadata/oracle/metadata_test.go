@@ -166,6 +166,98 @@ func TestSchemasOnlyVisibleFollowsCurrentSchema(t *testing.T) {
 	}
 }
 
+// openAccessibleDB opens an in-memory database standing in for a server
+// where the login (SCOTT) can reach ADAM's ORDERS and the PUBLIC synonyms,
+// while HR is an account it holds no privilege on. all_users lists every
+// account; all_objects only lists what the login can access.
+func openAccessibleDB(t *testing.T) *sql.DB {
+	t.Helper()
+	registerSysContextStub()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`CREATE TABLE all_users (username text)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE all_objects (owner text, object_name text, object_type text)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{"SYS", "CTXSYS", "ADAM", "SCOTT", "HR"} {
+		if _, err := db.Exec(`INSERT INTO all_users VALUES (?)`, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range [][3]string{
+		{"SCOTT", "EMPLOYEES", "TABLE"},
+		{"ADAM", "ORDERS", "TABLE"},
+		{"PUBLIC", "DUAL", "SYNONYM"},
+	} {
+		if _, err := db.Exec(`INSERT INTO all_objects VALUES (?, ?, ?)`, row[0], row[1], row[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db
+}
+
+// TestSchemasOnlyAccessibleDerivesFromAllObjects: the completer's schema
+// tier must offer only owners of accessible objects — an account with no
+// privileges (HR) would complete into an empty menu, and PUBLIC owns no
+// namespace at all ("PUBLIC.x" is ORA-00903). The default path keeps
+// listing every account.
+func TestSchemasOnlyAccessibleDerivesFromAllObjects(t *testing.T) {
+	r := NewReaderQ()(openAccessibleDB(t)).(metadata.SchemaReader)
+
+	set, err := r.Schemas(metadata.Filter{WithSystem: false, OnlyAccessible: true})
+	if err != nil {
+		t.Fatalf("Schemas: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		got = append(got, set.Get().Schema)
+	}
+	want := []string{"ADAM", "SCOTT"}
+	if len(got) != len(want) {
+		t.Fatalf("Schemas(OnlyAccessible) = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("Schemas(OnlyAccessible) = %v, want %v", got, want)
+		}
+	}
+
+	// the completer's current-schema resolution keeps working on the same
+	// filter shape
+	set2, err := r.Schemas(metadata.Filter{OnlyVisible: true, OnlyAccessible: true})
+	if err != nil {
+		t.Fatalf("Schemas: %v", err)
+	}
+	defer set2.Close()
+	var got2 []string
+	for set2.Next() {
+		got2 = append(got2, set2.Get().Schema)
+	}
+	if len(got2) != 1 || got2[0] != "SCOTT" {
+		t.Errorf("Schemas(OnlyVisible, OnlyAccessible) = %v, want [SCOTT]", got2)
+	}
+
+	// the default path is untouched: every account, system ones excluded
+	set3, err := r.Schemas(metadata.Filter{})
+	if err != nil {
+		t.Fatalf("Schemas: %v", err)
+	}
+	defer set3.Close()
+	var got3 []string
+	for set3.Next() {
+		got3 = append(got3, set3.Get().Schema)
+	}
+	if len(got3) != 3 || got3[0] != "ADAM" || got3[1] != "HR" || got3[2] != "SCOTT" {
+		t.Errorf("Schemas() = %v, want [ADAM HR SCOTT]", got3)
+	}
+}
+
 // openSequencesDB opens an in-memory database with an all_sequences catalog:
 // SCOTT.EMP_SEQ (the harness's current schema) and HR.CUSTOMERS_SEQ, plus
 // the ISEQ$$_ sequences Oracle generates behind every identity column.

@@ -26,3 +26,4 @@
 
 # zcode session files
 .zcode/
+.zcodeignore

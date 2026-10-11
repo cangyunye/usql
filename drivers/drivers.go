@@ -535,6 +535,12 @@ func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadat
 	if !ok {
 		return nil
 	}
+	// the folding-direction quoting hook applies to every completer —
+	// drivers with their own NewCompleter (the oracle family via orshared)
+	// receive it through opts as well
+	if q, ok := driverQuoteIdent[u.Driver]; ok {
+		opts = append(opts, completer.WithIdentifierQuoting(q))
+	}
 	if d.NewCompleter != nil {
 		return d.NewCompleter(db, opts...)
 	}
@@ -559,9 +565,6 @@ func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadat
 	}, opts...)
 	if kind, ok := driverSchemaKinds[u.Driver]; ok {
 		opts = append(opts, completer.WithSchemaKind(kind))
-	}
-	if q, ok := driverQuoteIdent[u.Driver]; ok {
-		opts = append(opts, completer.WithIdentifierQuoting(q))
 	}
 	return completer.NewDefaultCompleter(opts...)
 }

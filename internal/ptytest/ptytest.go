@@ -168,7 +168,18 @@ func New(t *testing.T, opts Options) *Terminal {
 
 	done := make(chan error, 1)
 	go func() { done <- tm.cmd.Wait() }()
-	tm.startReader(done)
+	// exit status is published as soon as Wait returns — not gated on the
+	// output reader hitting EOF: on some platforms (WSL2 ptys) the master
+	// never reports EOF while this process still holds the slave open, and
+	// gating on it made WaitExit time out against children that had exited
+	// long before.
+	go func() {
+		err := <-done
+		tm.mu.Lock()
+		tm.exited, tm.exitErr = true, err
+		tm.mu.Unlock()
+	}()
+	tm.startReader()
 	t.Cleanup(tm.KillIfRunning)
 	return tm
 }
@@ -199,7 +210,7 @@ func (tm *Terminal) KillIfRunning() {
 
 // startReader captures output, tracks the cursor and answers capability
 // queries until the output hits EOF.
-func (tm *Terminal) startReader(done chan error) {
+func (tm *Terminal) startReader() {
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -215,11 +226,6 @@ func (tm *Terminal) startReader(done chan error) {
 				break
 			}
 		}
-		err := <-done
-		tm.mu.Lock()
-		tm.exited = true
-		tm.exitErr = err
-		tm.mu.Unlock()
 	}()
 }
 

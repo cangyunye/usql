@@ -240,9 +240,10 @@ func TestPTYTruncationBoundaries(t *testing.T) {
 	}
 }
 
-// TerminalState: between reads the engine holds ECHO|ICANON off (and ISIG
-// on, so Ctrl-C cancels a running query), and when the session ends the
-// original line discipline is restored.
+// TerminalState: at the prompt the engine holds ECHO|ICANON off and ISIG
+// off too (the read takes Ctrl-C as a byte that clears the line; between
+// reads ISIG is back on, so Ctrl-C cancels a running query), and when the
+// session ends the original line discipline is restored.
 func TestPTYTerminalState(t *testing.T) {
 	dsn := newDB(t)
 	tm := newSession(t, dsn)
@@ -262,8 +263,8 @@ func TestPTYTerminalState(t *testing.T) {
 	if echo || icanon {
 		t.Fatalf("line discipline at prompt: echo=%v icanon=%v, want both off", echo, icanon)
 	}
-	if !isig {
-		t.Fatal("line discipline at prompt: isig off, want on (Ctrl-C must cancel queries)")
+	if isig {
+		t.Fatal("line discipline at prompt: isig on, want off (reads take Ctrl-C as a byte)")
 	}
 
 	tm.SendLine("\\q")
@@ -429,6 +430,40 @@ func TestPTYMetaPool(t *testing.T) {
 	}
 	tm.SendRaw("\t")
 	tm.WaitFor(`zed[_ ]marker`, 15*time.Second)
+
+	tm.SendLine("\\q")
+	if err := tm.WaitExit(10 * time.Second); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+}
+
+// MenuEnter: with the typing-time completion menu open, Enter must submit
+// the line. The menu-open route funneled Enter into handleEditKey, which set
+// done but never quit the bubbletea program: the session hung with the
+// prompt frozen and every later keystroke silently swallowed.
+func TestPTYMenuEnterSubmits(t *testing.T) {
+	dsn := newDB(t)
+	tm := newSession(t, dsn)
+	defer tm.WaitExit(10 * time.Second)
+
+	tm.WaitFor(`Type "help"`, 30*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	// type the full table name slowly so the typing-time completion menu
+	// pops open mid-word and is still open when Enter lands
+	for _, c := range "select * from invoices" {
+		tm.SendKeys(string(c))
+		time.Sleep(90 * time.Millisecond)
+	}
+	tm.WaitFor(`▸ main\.invoices`, 10*time.Second)
+
+	// Enter with the menu open: the line submits — the statement has no
+	// semicolon, so the continuation prompt must appear and typing must
+	// continue (pre-fix this wedged the session instead)
+	tm.SendKeys("\r")
+	tm.WaitFor(`->`, 10*time.Second)
+	tm.SendLine(";")
+	tm.WaitFor(`\(0 rows\)`, 30*time.Second)
 
 	tm.SendLine("\\q")
 	if err := tm.WaitExit(10 * time.Second); err != nil {

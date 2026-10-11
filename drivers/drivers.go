@@ -507,6 +507,7 @@ var driverQuoteIdent = map[string]func(string) string{
 	"oracle":    foldUpQuote,
 	"godror":    foldUpQuote,
 	"oboracle":  foldUpQuote,
+	"dameng":    foldUpQuote,
 	"opengauss": foldDownQuote,
 	"postgres":  foldDownQuote,
 }

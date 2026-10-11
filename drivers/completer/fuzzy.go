@@ -83,9 +83,12 @@ func mirrorsTypedCase(kind string) bool {
 // the word at the cursor entirely (e.g. schema.table). Prefix matches rank
 // first, then fuzzy score, then length. Candidates that mirror typed case
 // (see mirrorsTypedCase) are lower-cased when the pattern starts with a
-// lower-case letter.
+// lower-case letter — except quoted identifiers, whose case is significant
+// and must survive verbatim.
 func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
-	lowerPattern := strings.ToLower(pattern)
+	// the pattern may be a half-typed quoted identifier ("de): leading and
+	// trailing quotes are noise for matching either way
+	lowerPattern := strings.ToLower(strings.Trim(pattern, `"`))
 	type match struct {
 		cand   rline.Cand
 		score  int
@@ -93,8 +96,8 @@ func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 	}
 	matches := make([]match, 0, len(options))
 	for _, o := range options {
-		if s := fuzzyScore(pattern, o.Text); s >= 0 {
-			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(o.Text), lowerPattern)})
+		if s := fuzzyScore(pattern, bare(o.Text)); s >= 0 {
+			matches = append(matches, match{o, s, strings.HasPrefix(strings.ToLower(bare(o.Text)), lowerPattern)})
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
@@ -106,15 +109,39 @@ func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 		}
 		return len(matches[i].cand.Text) < len(matches[j].cand.Text)
 	})
+	// the keyword-case heuristic (typed lower-case, keyword echoed lower)
+	// applies to keywords and built-in functions only: catalog identifiers
+	// keep their stored case — it is either fold-safe or significant
+	// (quoted names, case-sensitive engines like MySQL with
+	// lower_case_table_names=0)
 	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
 	result := make([]rline.Cand, 0, len(matches))
 	for _, m := range matches {
-		if lower && mirrorsTypedCase(m.cand.Kind) {
+		// quoted identifiers (outer or embedded — public."AUDIT_SYNC") are
+		// case-significant: the mirror heuristic must leave them alone
+		if lower && mirrorsTypedCase(m.cand.Kind) && !strings.ContainsRune(m.cand.Text, '"') {
 			m.cand.Text = strings.ToLower(m.cand.Text)
 		}
 		result = append(result, m.cand)
 	}
 	return result
+}
+
+// isQuoted reports whether the identifier candidate is wrapped in engine
+// quotes (double quotes for the Oracle family) — its case is significant,
+// so keyword-case heuristics must leave it alone.
+func isQuoted(text string) bool {
+	return len(text) >= 2 && text[0] == '"' && text[len(text)-1] == '"'
+}
+
+// bare strips the engine quotes from an identifier candidate — outer quotes
+// on a simple name and inner quotes on a qualified one (public."AUDIT_SYNC")
+// — so matching runs against the name the user is typing.
+func bare(text string) string {
+	if !strings.ContainsRune(text, '"') {
+		return text
+	}
+	return strings.ReplaceAll(text, `"`, "")
 }
 
 // completePrefixFull returns the options matched from the start — anchored
@@ -127,11 +154,13 @@ func completeFuzzyFull(pattern string, options []rline.Cand) []rline.Cand {
 // typed case (see mirrorsTypedCase) are lower-cased when the pattern starts
 // with a lower-case letter.
 func completePrefixFull(pattern string, options []rline.Cand) []rline.Cand {
-	p := strings.ToLower(pattern)
+	// the pattern may be a half-typed quoted identifier ("de): leading and
+	// trailing quotes are noise for matching either way
+	p := strings.ToLower(strings.Trim(pattern, `"`))
 	dotted := strings.Contains(pattern, ".")
 	var matches []rline.Cand
 	for _, o := range options {
-		low := strings.ToLower(o.Text)
+		low := strings.ToLower(bare(o.Text))
 		if strings.HasPrefix(low, p) {
 			matches = append(matches, o)
 			continue
@@ -149,7 +178,7 @@ func completePrefixFull(pattern string, options []rline.Cand) []rline.Cand {
 	lower := len(pattern) > 0 && unicode.IsLower(rune(pattern[0]))
 	result := make([]rline.Cand, 0, len(matches))
 	for _, m := range matches {
-		if lower && mirrorsTypedCase(m.Kind) {
+		if lower && mirrorsTypedCase(m.Kind) && !strings.ContainsRune(m.Text, '"') {
 			m.Text = strings.ToLower(m.Text)
 		}
 		result = append(result, m)

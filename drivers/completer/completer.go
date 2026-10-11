@@ -191,6 +191,18 @@ func WithAliasNames(names []string) Option {
 	}
 }
 
+// WithIdentifierQuoting sets a transform applied to identifier candidates
+// built from the catalog (schemas, tables, views, columns): engines whose
+// unquoted identifiers fold to a fixed case (Oracle family folds to upper)
+// cannot reach names stored under any other case — quoted at creation — so
+// the hook wraps those in engine quotes, making every inserted candidate a
+// resolvable token. Matching stays case-insensitive against the raw name.
+func WithIdentifierQuoting(quote func(string) string) Option {
+	return func(c *completer) {
+		c.quoteIdent = quote
+	}
+}
+
 // WithSchemaKind sets the display kind reported for namespace (schema)
 // candidates. Databases name namespaces differently — "schema" (PostgreSQL),
 // "user" (Oracle, where schemas and users are the same thing) or "database"
@@ -296,6 +308,12 @@ type completer struct {
 	// expression positions ahead of the neutral core list (see
 	// WithBuiltinFunctions).
 	dialectFunctions []builtinFunc
+	// quoteIdent wraps catalog identifiers that would not survive unquoted
+	// identifier folding on the target engine (Oracle stores quoted
+	// lowercase names as-is; unquoted folding would uppercase them away),
+	// so inserting a candidate always yields a resolvable token. Nil for
+	// engines without the problem (see WithIdentifierQuoting).
+	quoteIdent func(string) string
 }
 
 // CompleteFunc returns patterns completing current text, using previous words as context
@@ -344,7 +362,7 @@ func (c completer) Do(line []rune, start int) ([]rline.Cand, int) {
 	// up to the reader timeout per Tab.
 	if n := len(previousWords); n > 0 && c.namesVerbs[strings.ToUpper(previousWords[n-1])] {
 		if objs, ok := c.schemas(); ok {
-			return completeFromListCands(text, candsObjs(objs)), len(text)
+			return completeFromListCands(text, c.candsObjs(objs)), len(text)
 		}
 		// still loading: decline, the kick re-renders when it lands
 		return nil, len(text)

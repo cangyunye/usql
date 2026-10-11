@@ -475,7 +475,7 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		tablesOnly := ctx.Clause == "INTO" || ctx.Clause == "UPDATE"
 		if cur, ok := c.currentSchema(); ok && cur != "" {
 			if objs, loaded := c.schemaObjects("", cur, true); loaded {
-				cands = append(cands, candsObjs(selectableObjs(objs, tablesOnly))...)
+				cands = append(cands, c.candsObjs(selectableObjs(objs, tablesOnly))...)
 			}
 		}
 		// the dialect's set-returning functions are valid relations here
@@ -505,7 +505,7 @@ func (c completer) contextOptions(ctx Context) ([]rline.Cand, bool, bool) {
 		// stored case, which case-sensitive engines (MySQL on Linux)
 		// require of the appended identifier
 		if objs, ok := c.schemas(); ok {
-			return candsObjs(objs), true, false
+			return c.candsObjs(objs), true, false
 		}
 		return nil, false, false // still loading: decline, kick re-renders
 	case ctx.Clause == "" && verbFollows[ctx.First] != "":
@@ -532,12 +532,29 @@ func candsText(words []string, kind string) []rline.Cand {
 }
 
 // candsObjs converts cached objects into candidates.
-func candsObjs(objs []obj) []rline.Cand {
+// candsObjs wraps catalog objects as candidates, applying the engine's
+// identifier quoting (see WithIdentifierQuoting) so every inserted name
+// resolves.
+func (c completer) candsObjs(objs []obj) []rline.Cand {
 	out := make([]rline.Cand, 0, len(objs))
 	for _, o := range objs {
-		out = append(out, rline.Cand{Text: o.name, Kind: o.kind, Detail: o.detail})
+		out = append(out, rline.Cand{Text: c.quote(o.name), Kind: o.kind, Detail: o.detail})
 	}
 	return out
+}
+
+// quote applies the engine's identifier-quoting hook (nil-safe); names
+// already carrying engine quotes are left alone. Qualified names
+// (schema.object) are quoted segment-wise — quoting the whole dotted name
+// would turn it into a single identifier containing a dot.
+func (c completer) quote(name string) string {
+	if c.quoteIdent == nil || isQuoted(name) {
+		return name
+	}
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[:i+1] + c.quote(name[i+1:])
+	}
+	return c.quoteIdent(name)
 }
 
 // tableFunctionCands renders the dialect's set-returning functions for
@@ -603,7 +620,7 @@ func (c completer) valuesFieldHints(ctx Context) []rline.Cand {
 		if o.detail != "" {
 			d = ":" + o.detail
 		}
-		out = append(out, rline.Cand{Text: o.name, Detail: d, Kind: "column"})
+		out = append(out, rline.Cand{Text: c.quote(o.name), Detail: d, Kind: "column"})
 	}
 	return out
 }
@@ -621,7 +638,7 @@ func (c completer) qualifiedOptions(ctx Context) []rline.Cand {
 	appendColumns := func(ref TableRef) []rline.Cand {
 		var options []rline.Cand
 		for _, col := range c.tableColumns(ref) {
-			options = append(options, rline.Cand{Text: qual + col, Kind: "column"})
+			options = append(options, rline.Cand{Text: qual + c.quote(col), Kind: "column"})
 		}
 		return options
 	}
@@ -630,7 +647,7 @@ func (c completer) qualifiedOptions(ctx Context) []rline.Cand {
 		if !ok {
 			return nil // still loading: decline, kick re-renders
 		}
-		return candsObjs(selectableObjs(objs, relationsOnly))
+		return c.candsObjs(selectableObjs(objs, relationsOnly))
 	}
 	switch n := len(parts); {
 	case n == 1 && tableClauses[ctx.Clause]:
@@ -666,7 +683,11 @@ func (c completer) insertColumnList(ctx Context) string {
 	if len(cols) == 0 {
 		return ""
 	}
-	return "(" + strings.Join(cols, ", ") + ")"
+	quoted := make([]string, len(cols))
+	for i, col := range cols {
+		quoted[i] = c.quote(col)
+	}
+	return "(" + strings.Join(quoted, ", ") + ")"
 }
 
 // scopeColumns returns the columns of every table in scope, in metadata
@@ -677,6 +698,7 @@ func (c completer) scopeColumns(ctx Context) []string {
 	seen := map[string]bool{}
 	for _, ref := range ctx.Tables {
 		for _, col := range c.tableColumns(ref) {
+			col = c.quote(col)
 			if !seen[col] {
 				seen[col] = true
 				options = append(options, col)
@@ -721,7 +743,7 @@ func (c completer) namespaceCands() []rline.Cand {
 	if !ok {
 		return nil
 	}
-	return candsObjs(objs)
+	return c.candsObjs(objs)
 }
 
 func (c completer) schemas() ([]obj, bool) {

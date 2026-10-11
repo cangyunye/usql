@@ -56,7 +56,7 @@ func (c completer) completeListObjects(text []rune, kindName string, types []str
 // direct query without one.
 func (c completer) namespaceListCands() []rline.Cand {
 	if objs, ok := c.schemas(); ok {
-		return candsObjs(objs)
+		return c.candsObjs(objs)
 	}
 	if c.cache != nil {
 		return nil
@@ -97,10 +97,10 @@ func (c completer) listingCands(kindName string, f metadata.Filter) []rline.Cand
 		if err != nil {
 			return nil
 		}
-		return candsObjs(objs)
+		return c.candsObjs(objs)
 	}
 	objs, _ := c.cache.get(bucketObject, listKey(kindName, f), load)
-	return candsObjs(objs)
+	return c.candsObjs(objs)
 }
 
 // listKey builds the cache key of a listing bucket: the family plus every
@@ -342,7 +342,7 @@ func (c completer) completeWithCatalogs(text []rune) []rline.Cand {
 		return completeFromListCands(text, c.queryCatalogCands())
 	}
 	objs, _ := c.cache.get(bucketObject, "catalogs", c.loadCatalogs)
-	return completeFromListCands(text, candsObjs(objs))
+	return completeFromListCands(text, c.candsObjs(objs))
 }
 
 func (c completer) loadCatalogs() ([]obj, error) {

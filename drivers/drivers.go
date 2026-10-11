@@ -498,6 +498,35 @@ var driverSchemaKinds = map[string]string{
 	"mymysql": "database",
 }
 
+// driverQuoteIdent maps the drivers whose unquoted identifiers fold to a
+// fixed case (Oracle family to upper, PostgreSQL family including
+// openGauss to lower) to the fold rule: catalog names stored under any
+// other case — quoted at creation, e.g. migrated schemas — are unreachable
+// unquoted, so their completion candidates must be inserted quoted.
+var driverQuoteIdent = map[string]func(string) string{
+	"oracle":    foldUpQuote,
+	"godror":    foldUpQuote,
+	"oboracle":  foldUpQuote,
+	"opengauss": foldDownQuote,
+	"postgres":  foldDownQuote,
+}
+
+// foldUpQuote quotes identifiers that would not survive upper-folding.
+func foldUpQuote(name string) string {
+	if name != strings.ToUpper(name) {
+		return `"` + name + `"`
+	}
+	return name
+}
+
+// foldDownQuote quotes identifiers that would not survive lower-folding.
+func foldDownQuote(name string) string {
+	if name != strings.ToLower(name) {
+		return `"` + name + `"`
+	}
+	return name
+}
+
 // NewCompleter creates a metadata completer for a driver and database
 // connection.
 func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadata.ReaderOption, opts ...completer.Option) rline.Completer {
@@ -529,6 +558,9 @@ func NewCompleter(ctx context.Context, u *dburl.URL, db DB, readerOpts []metadat
 	}, opts...)
 	if kind, ok := driverSchemaKinds[u.Driver]; ok {
 		opts = append(opts, completer.WithSchemaKind(kind))
+	}
+	if q, ok := driverQuoteIdent[u.Driver]; ok {
+		opts = append(opts, completer.WithIdentifierQuoting(q))
 	}
 	return completer.NewDefaultCompleter(opts...)
 }

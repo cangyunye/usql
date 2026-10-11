@@ -455,6 +455,11 @@ func (m *lineModel) handleEditKey(msg tea.KeyMsg, key string) (tea.Model, tea.Cm
 	case "enter", "ctrl+j":
 		m.done = true
 		m.ghost = nil
+		// reached via handleMenuKey's typing-opened-menu path (the direct
+		// path in handleKey quits on its own): the line is submitted, so
+		// the read session must end — without the quit the program keeps
+		// running with done set, swallowing every further keystroke
+		return m, tea.Quit
 	case "esc":
 		// clear the ghost, no-op otherwise; also cancel a pending debounced
 		// completion, so the dismissed suggestion does not pop back

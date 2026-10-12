@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"database/sql/driver"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -464,16 +465,24 @@ func openDescribeDB(t *testing.T) *sql.DB {
 			t.Fatal(err)
 		}
 	}
-	// the described table and its index
+	// the described table and its index (one unique, one not)
 	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'T1', 'TABLE')`)
 	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'T1', 'INDEX')`)
 	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'T1', 'TRIGGER')`)
 	ins(`INSERT INTO all_tab_columns VALUES ('SCOTT', 'T1', 'ID', 1, 'NUMBER', 'Y', 22, 0, 0, 0)`)
 	ins(`INSERT INTO all_tab_columns VALUES ('SCOTT', 'T1', 'NAME', 2, 'VARCHAR2', 'Y', 100, NULL, NULL, 100)`)
 	ins(`INSERT INTO all_indexes VALUES ('SCOTT', 'T1', 'T1_IDX', 'NONUNIQUE')`)
+	ins(`INSERT INTO all_indexes VALUES ('SCOTT', 'T1', 'T1_UQ', 'UNIQUE')`)
 	ins(`INSERT INTO all_ind_columns VALUES ('SCOTT', 'T1_IDX', 'T1', 'ID', 1)`)
-	// two sequences: one in the described schema, one elsewhere
+	ins(`INSERT INTO all_ind_columns VALUES ('SCOTT', 'T1_UQ', 'T1', 'NAME', 1)`)
+	// sequences: one plain, one the identity-column implementation detail —
+	// all_objects lists the latter, so \d and \ds need the same exclusion
+	// Sequences() applies
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'S1', 'SEQUENCE')`)
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'ISEQ$$_123', 'SEQUENCE')`)
 	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'T1_SEQ')`)
+	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'S1')`)
+	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'ISEQ$$_123')`)
 	ins(`INSERT INTO all_sequences VALUES ('HR', 'UNRELATED_SEQ')`)
 	return db
 }
@@ -547,4 +556,235 @@ func TestDescribeTableDetailsBounded(t *testing.T) {
 	if n := strings.Count(out, "TABLE \"SCOTT.T1\""); n != 1 {
 		t.Errorf("table T1 described %d times, want once:\n%s", n, out)
 	}
+}
+
+// TestTablesExcludesIdentitySequences: all_objects lists the ISEQ$$_
+// sequences behind every identity column — the Tables-based listings (\d
+// and \ds) must exclude them exactly like Sequences() does, or the listing
+// floods with implementation details.
+func TestTablesExcludesIdentitySequences(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.TableReader)
+
+	for _, types := range [][]string{nil, {"SEQUENCE"}} {
+		set, err := r.Tables(metadata.Filter{Types: types, WithSystem: true})
+		if err != nil {
+			t.Fatalf("Tables(types=%v): %v", types, err)
+		}
+		var got []string
+		for set.Next() {
+			row := set.Get()
+			got = append(got, row.Name)
+			if strings.HasPrefix(row.Name, "ISEQ$$_") {
+				t.Errorf("Tables(types=%v) listed identity sequence %s", types, row.Name)
+			}
+		}
+		set.Close()
+		if len(got) == 0 {
+			t.Fatalf("Tables(types=%v) returned nothing, want S1 and the relations", types)
+		}
+	}
+}
+
+// TestIndexesUniquenessNotInverted: the uniqueness decode must map a UNIQUE
+// index to YES — inverted, \d labels every NONUNIQUE index "UNIQUE" and the
+// \di+ Unique? column lies.
+func TestIndexesUniquenessNotInverted(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.IndexReader)
+	set, err := r.Indexes(metadata.Filter{Schema: "SCOTT", Parent: "T1", WithSystem: true})
+	if err != nil {
+		t.Fatalf("Indexes: %v", err)
+	}
+	defer set.Close()
+	got := map[string]string{}
+	for set.Next() {
+		i := set.Get()
+		got[i.Name] = string(i.IsUnique)
+	}
+	if got["T1_UQ"] != "YES" {
+		t.Errorf("unique index T1_UQ IsUnique = %q, want YES", got["T1_UQ"])
+	}
+	if got["T1_IDX"] != "NO" {
+		t.Errorf("non-unique index T1_IDX IsUnique = %q, want NO", got["T1_IDX"])
+	}
+}
+
+// openFunctionsDB opens an in-memory stand-in for an Oracle catalog with
+// functions, a procedure and a package: SCOTT.F1 (returns NUMBER, arg
+// A_IN), SCOTT.F2 (returns VARCHAR2, arg B_IN), SCOTT.P1 (IN OUT arg),
+// the package SCOTT.PKG1 with routines PK1 (returns DATE, arg X_IN) and
+// PK2 (returns NUMBER), plus ADAM.F3 in a second schema.
+func openFunctionsDB(t *testing.T) *sql.DB {
+	t.Helper()
+	registerSysContextStub()
+	registerDecodeStub()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, ddl := range []string{
+		`CREATE TABLE all_objects (owner text, object_name text, object_type text, object_id int)`,
+		`CREATE TABLE all_arguments (owner text, object_id int, object_name text, sequence int, position int, argument_name text, in_out text, data_type text, data_length int, data_precision int, data_scale int, radix int, data_level int)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins := func(q string, args ...interface{}) {
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'F1', 'FUNCTION', 10)`)
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'F2', 'FUNCTION', 11)`)
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'P1', 'PROCEDURE', 20)`)
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'PKG1', 'PACKAGE', 30)`)
+	ins(`INSERT INTO all_objects VALUES ('ADAM', 'F3', 'FUNCTION', 40)`)
+	// functions: the return row (position 0) carries sequence 1, so the
+	// Functions join sees exactly one row per function
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 10, 'F1', 1, 0, NULL, 'OUT', 'NUMBER', 22, NULL, NULL, 10, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 10, 'F1', 2, 1, 'A_IN', 'IN', 'NUMBER', 22, NULL, NULL, 10, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 11, 'F2', 1, 0, NULL, 'OUT', 'VARCHAR2', 100, NULL, NULL, 0, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 11, 'F2', 2, 1, 'B_IN', 'IN', 'VARCHAR2', 100, NULL, NULL, 0, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('ADAM', 40, 'F3', 1, 0, NULL, 'OUT', 'DATE', 7, NULL, NULL, 0, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('ADAM', 40, 'F3', 2, 1, 'C_IN', 'IN', 'DATE', 7, NULL, NULL, 0, 0)`)
+	// procedure: no return row, the first argument carries sequence 1
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 20, 'P1', 1, 1, 'P_IN', 'IN/OUT', 'DATE', 7, NULL, NULL, 0, 0)`)
+	// package: one return row per routine
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 30, 'PK1', 1, 0, NULL, 'OUT', 'DATE', 7, NULL, NULL, 0, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 30, 'PK1', 2, 1, 'X_IN', 'IN', 'NUMBER', 22, NULL, NULL, 10, 0)`)
+	ins(`INSERT INTO all_arguments VALUES ('SCOTT', 30, 'PK2', 1, 0, NULL, 'OUT', 'NUMBER', 22, NULL, NULL, 10, 0)`)
+	return db
+}
+
+// TestFunctionsServesStringTypesAndResults: the Functions rows must speak
+// the writer's conventions — Type is the object-type string (the JDBC-style
+// numeric codes rendered \df's Type column as "2") and ResultType carries
+// the return type (the "Result data type" column used to stay empty).
+func TestFunctionsServesStringTypesAndResults(t *testing.T) {
+	r := NewReaderQ()(openFunctionsDB(t)).(metadata.FunctionReader)
+	set, err := r.Functions(metadata.Filter{WithSystem: true})
+	if err != nil {
+		t.Fatalf("Functions: %v", err)
+	}
+	defer set.Close()
+	got := map[string]metadata.Function{}
+	for set.Next() {
+		fn := set.Get()
+		got[fn.Schema+"."+fn.SpecificName] = *fn
+	}
+	type want struct {
+		typ, result string
+	}
+	for name, w := range map[string]want{
+		"SCOTT.F1":       {"FUNCTION", "NUMBER"},
+		"SCOTT.F2":       {"FUNCTION", "VARCHAR2"},
+		"SCOTT.P1":       {"PROCEDURE", ""},
+		"SCOTT.PKG1.PK1": {"PACKAGE", "DATE"},
+		"SCOTT.PKG1.PK2": {"PACKAGE", "NUMBER"},
+		"ADAM.F3":        {"FUNCTION", "DATE"},
+	} {
+		fn, ok := got[name]
+		if !ok {
+			t.Errorf("Functions missing %s (got %v)", name, keys(got))
+			continue
+		}
+		if fn.Type != w.typ {
+			t.Errorf("%s Type = %q, want %q", name, fn.Type, w.typ)
+		}
+		if fn.ResultType != w.result {
+			t.Errorf("%s ResultType = %q, want %q", name, fn.ResultType, w.result)
+		}
+	}
+}
+
+// TestFunctionColumnsFiltersPerRoutine: the argument lookup must answer
+// with exactly the named routine's arguments — an unparenthesized type
+// predicate used to let every FUNCTION bypass the filters, so \df showed
+// all functions' arguments mashed into each row. Package routines are
+// addressed by their "PKG.FUNC" specific names and report IN/IN OUT as
+// strings, not JDBC numeric codes.
+func TestFunctionColumnsFiltersPerRoutine(t *testing.T) {
+	r := NewReaderQ()(openFunctionsDB(t)).(metadata.FunctionColumnReader)
+
+	// plain function: only its own argument
+	set, err := r.FunctionColumns(metadata.Filter{Schema: "SCOTT", Parent: "F1", WithSystem: true})
+	if err != nil {
+		t.Fatalf("FunctionColumns(F1): %v", err)
+	}
+	defer set.Close()
+	var args []string
+	for set.Next() {
+		c := set.Get()
+		if c.OrdinalPosition == 0 {
+			continue
+		}
+		args = append(args, c.Type+" "+c.Name+" "+c.DataType)
+	}
+	if len(args) != 1 || args[0] != "IN A_IN NUMBER" {
+		t.Errorf("F1 args = %v, want [IN A_IN NUMBER]", args)
+	}
+
+	// package routine: addressed as PKG.FUNC
+	set2, err := r.FunctionColumns(metadata.Filter{Schema: "SCOTT", Parent: "PKG1.PK1", WithSystem: true})
+	if err != nil {
+		t.Fatalf("FunctionColumns(PKG1.PK1): %v", err)
+	}
+	defer set2.Close()
+	args = nil
+	for set2.Next() {
+		c := set2.Get()
+		if c.OrdinalPosition == 0 {
+			continue
+		}
+		args = append(args, c.Type+" "+c.Name+" "+c.DataType)
+	}
+	if len(args) != 1 || args[0] != "IN X_IN NUMBER" {
+		t.Errorf("PKG1.PK1 args = %v, want [IN X_IN NUMBER]", args)
+	}
+}
+
+// TestDescribeFunctionsRendersOwnArgsOnly: the \df output end to end — each
+// row renders only its own arguments and type.
+func TestDescribeFunctionsRendersOwnArgsOnly(t *testing.T) {
+	db := openFunctionsDB(t)
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db))(db, &buf)
+	if err := w.DescribeFunctions(u, "f", "", false, false); err != nil {
+		t.Fatalf("DescribeFunctions: %v", err)
+	}
+	out := buf.String()
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.Contains(line, "| F1 "):
+			if !strings.Contains(line, "A_IN") || strings.Contains(line, "B_IN") || strings.Contains(line, "C_IN") {
+				t.Errorf("\\df F1 row shows foreign args: %s", strings.TrimSpace(line))
+			}
+		case strings.Contains(line, "| F2 "):
+			if strings.Contains(line, "A_IN") || !strings.Contains(line, "B_IN") {
+				t.Errorf("\\df F2 row shows foreign args: %s", strings.TrimSpace(line))
+			}
+		case strings.Contains(line, "| P1 "):
+			if !strings.Contains(line, "IN OUT P_IN DATE") {
+				t.Errorf("\\df P1 row missing IN OUT argument: %s", strings.TrimSpace(line))
+			}
+		case strings.Contains(line, "| PKG1.PK1 "):
+			if !strings.Contains(line, "X_IN") || strings.Contains(line, "P_IN") {
+				t.Errorf("\\df PKG1.PK1 row shows foreign args: %s", strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+func keys(m map[string]metadata.Function) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

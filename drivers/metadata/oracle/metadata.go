@@ -215,6 +215,11 @@ FROM all_objects o
 		}
 		conds = append(conds, fmt.Sprintf("o.object_type IN (%s)", strings.Join(pholders, ", ")))
 	}
+	// the ISEQ$$_ sequences Oracle generates behind every identity column
+	// are implementation details — Sequences() already excludes them, and
+	// without the same exclusion \d and \ds flood with them (all_objects
+	// lists one per identity column)
+	conds = append(conds, "o.object_name NOT LIKE 'ISEQ$$\\_%' ESCAPE '\\'")
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -343,8 +348,10 @@ func (r metaReader) Functions(f metadata.Filter) (*metadata.FunctionSet, error) 
   b.owner   as procedure_schem,
   decode (b.object_type,'PACKAGE',CONCAT(CONCAT(b.object_name,'.'), a.object_name)
          ,b.object_name) as procedure_name,
-  decode (b.object_type,'PACKAGE',decode(a.position,0,2,1,1,0),
-          decode(b.object_type,'PROCEDURE',1,'FUNCTION',2,0)) as procedure_type
+  COALESCE((SELECT MIN(x.data_type) FROM all_arguments x
+    WHERE x.object_id = b.object_id AND x.position = 0
+      AND x.object_name = a.object_name), '') as result_type,
+  b.object_type as procedure_type
 FROM all_arguments a
 JOIN all_objects b ON b.object_id = a.object_id AND a.sequence  = 1
 `
@@ -374,6 +381,7 @@ ORDER BY procedure_schem, procedure_name, procedure_type`
 			&rec.SpecificName,
 			&rec.Schema,
 			&rec.Name,
+			&rec.ResultType,
 			&rec.Type,
 		)
 		if err != nil {
@@ -394,7 +402,7 @@ func (r metaReader) FunctionColumns(f metadata.Filter) (*metadata.FunctionColumn
              b.object_name) as procedure_name,
      decode(a.position,0,'RETURN_VALUE',a.argument_name) as column_name,
      a.position       as ordinal_position,
-     decode(a.position,0,5,decode(a.in_out,'IN',1,'IN/OUT',2,'OUT',4)) as column_type,
+     decode(a.in_out,'IN','IN','IN/OUT','IN OUT','OUT') as column_type,
      a.data_type      as type_name,
      COALESCE(a.data_length, a.data_precision, 0) as column_size,
      COALESCE(a.data_scale, 0) as decimal_digits,
@@ -405,9 +413,21 @@ JOIN all_arguments a ON b.object_id = a.object_id AND a.data_level = 0
 	conds, vals := r.conditions(f, formats{
 		schema:     "a.owner LIKE %s",
 		notSchemas: "UPPER(a.owner) NOT IN (%s)",
-		parent:     "b.object_name LIKE %s",
 	})
-	conds = append(conds, "b.object_type = 'PROCEDURE' OR b.object_type = 'FUNCTION'")
+	// the parent is a specific name: plain functions and procedures carry
+	// the object name, package routines carry "PKG.FUNC" — match the
+	// package and the routine separately (b.object_name alone would never
+	// match "PKG.FUNC")
+	if pkg, fn, ok := strings.Cut(f.Parent, "."); ok {
+		vals = append(vals, strings.ToUpper(pkg), strings.ToUpper(fn))
+		conds = append(conds, fmt.Sprintf("b.object_name LIKE %s AND a.object_name LIKE %s",
+			r.pf(len(vals)-1), r.pf(len(vals))))
+	} else if f.Parent != "" {
+		vals = append(vals, strings.ToUpper(f.Parent))
+		conds = append(conds, fmt.Sprintf("b.object_name LIKE %s", r.pf(len(vals))))
+	}
+	// PACKAGE joins in so the argument lookup can reach package routines
+	conds = append(conds, "(b.object_type = 'PROCEDURE' OR b.object_type = 'FUNCTION' OR b.object_type = 'PACKAGE')")
 	qstr += " WHERE " + strings.Join(conds, " AND ")
 	qstr += `
 ORDER BY procedure_schem, procedure_name, ordinal_position`
@@ -450,7 +470,7 @@ func (r metaReader) Indexes(f metadata.Filter) (*metadata.IndexSet, error) {
   o.owner,
   o.table_name,
   o.index_name,
-  decode(o.uniqueness,'UNIQUE','NO','YES')
+  decode(o.uniqueness,'UNIQUE','YES','NO')
 FROM all_indexes o
 `
 	conds, vals := r.conditions(f, formats{

@@ -1,11 +1,14 @@
 package oracle
 
 import (
+	"bytes"
 	"database/sql"
 	"database/sql/driver"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers/metadata"
 
 	sqlite "modernc.org/sqlite"
@@ -405,5 +408,143 @@ func TestConditionsOnlyVisibleExact(t *testing.T) {
 	}
 	if len(vals) != 0 {
 		t.Errorf("vals = %v, want none", vals)
+	}
+}
+
+// decodeOnce registers the Oracle DECODE stub the index queries need.
+var decodeOnce sync.Once
+
+func registerDecodeStub() {
+	decodeOnce.Do(func() {
+		sqlite.MustRegisterDeterministicScalarFunction("DECODE", -1,
+			func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
+				// Oracle DECODE(expr, search, result [, search, result ...] [, default])
+				if len(args) < 3 {
+					return nil, nil
+				}
+				for i := 1; i+1 < len(args); i += 2 {
+					if args[0] == args[i] {
+						return args[i+1], nil
+					}
+				}
+				if len(args)%2 == 0 {
+					return args[len(args)-1], nil
+				}
+				return nil, nil
+			})
+	})
+}
+
+// openDescribeDB opens an in-memory stand-in for an Oracle catalog laid out
+// for a `\d T1`: the table itself with two columns, its index, and two
+// sequences — SCOTT.T1_SEQ and an unrelated one in HR.
+func openDescribeDB(t *testing.T) *sql.DB {
+	t.Helper()
+	registerSysContextStub()
+	registerDecodeStub()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, ddl := range []string{
+		`CREATE TABLE all_objects (owner text, object_name text, object_type text)`,
+		`CREATE TABLE all_synonyms (owner text, synonym_name text, table_owner text, table_name text, db_link text)`,
+		`CREATE TABLE all_tab_columns (owner text, table_name text, column_name text, column_id int, data_type text, nullable text, data_length int, data_precision int, data_scale int, char_col_decl_length int)`,
+		`CREATE TABLE all_sequences (sequence_owner text, sequence_name text)`,
+		`CREATE TABLE all_indexes (owner text, table_name text, index_name text, uniqueness text)`,
+		`CREATE TABLE all_ind_columns (index_owner text, index_name text, table_name text, column_name text, column_position int)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ins := func(q string, args ...interface{}) {
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// the described table and its index
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'T1', 'TABLE')`)
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'T1', 'INDEX')`)
+	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'T1', 'TRIGGER')`)
+	ins(`INSERT INTO all_tab_columns VALUES ('SCOTT', 'T1', 'ID', 1, 'NUMBER', 'Y', 22, 0, 0, 0)`)
+	ins(`INSERT INTO all_tab_columns VALUES ('SCOTT', 'T1', 'NAME', 2, 'VARCHAR2', 'Y', 100, NULL, NULL, 100)`)
+	ins(`INSERT INTO all_indexes VALUES ('SCOTT', 'T1', 'T1_IDX', 'NONUNIQUE')`)
+	ins(`INSERT INTO all_ind_columns VALUES ('SCOTT', 'T1_IDX', 'T1', 'ID', 1)`)
+	// two sequences: one in the described schema, one elsewhere
+	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'T1_SEQ')`)
+	ins(`INSERT INTO all_sequences VALUES ('HR', 'UNRELATED_SEQ')`)
+	return db
+}
+
+// TestTablesNoTypesDescribesRelationsOnly: with no explicit type filter (the
+// `\d name` path), all_objects matches must be restricted to relation kinds —
+// an index or trigger sharing the table's name is not a second object to
+// describe, and describing it would re-print the table's columns.
+func TestTablesNoTypesDescribesRelationsOnly(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.TableReader)
+	set, err := r.Tables(metadata.Filter{Name: "T1", WithSystem: true})
+	if err != nil {
+		t.Fatalf("Tables: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		row := set.Get()
+		got = append(got, row.Type)
+	}
+	if len(got) != 1 || got[0] != "TABLE" {
+		t.Errorf("Tables(Name T1) types = %v, want [TABLE] only", got)
+	}
+}
+
+// TestSequencesHonorsNameFilter: the \d path filters sequences by name —
+// a reader ignoring Filter.Name makes `\d some_table` print every accessible
+// sequence, one block per sequence.
+func TestSequencesHonorsNameFilter(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.SequenceReader)
+
+	set, err := r.Sequences(metadata.Filter{Name: "T1_SEQ", WithSystem: true})
+	if err != nil {
+		t.Fatalf("Sequences: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		seq := set.Get()
+		got = append(got, seq.Schema+"."+seq.Name)
+	}
+	if len(got) != 1 || got[0] != "SCOTT.T1_SEQ" {
+		t.Errorf("Sequences(Name T1_SEQ) = %v, want [SCOTT.T1_SEQ]", got)
+	}
+}
+
+// TestDescribeTableDetailsBounded drives the `\d T1` flow end to end through
+// the default writer: the described table's columns and its index print once,
+// and neither an unrelated schema's sequence nor a same-named non-relation
+// object leaks into the output. The reader used to ignore the sequence name
+// filter — on a login with broad visibility every sequence in the database
+// was printed, one block per sequence.
+func TestDescribeTableDetailsBounded(t *testing.T) {
+	db := openDescribeDB(t)
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db))(db, &buf)
+	if err := w.DescribeTableDetails(u, "T1", false, false); err != nil {
+		t.Fatalf("DescribeTableDetails: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "TABLE \"SCOTT.T1\"") {
+		t.Errorf("output missing the described table:\n%s", out)
+	}
+	if strings.Contains(out, "UNRELATED_SEQ") {
+		t.Errorf("\\d T1 printed unrelated sequence HR.UNRELATED_SEQ:\n%s", out)
+	}
+	if n := strings.Count(out, "TABLE \"SCOTT.T1\""); n != 1 {
+		t.Errorf("table T1 described %d times, want once:\n%s", n, out)
 	}
 }

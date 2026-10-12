@@ -184,6 +184,13 @@ ORDER BY username`
 	return metadata.NewSchemaSet(results), nil
 }
 
+// relationTypes are the object types \d describes when the caller passes no
+// explicit type filter: all_objects lists every object kind (indexes,
+// triggers, packages, jobs, ...), and without this restriction `\d name`
+// would dump the columns once per same-named non-relation object — the
+// psql-parity default is relations (plus synonyms and sequences) only.
+var relationTypes = []string{"TABLE", "VIEW", "MATERIALIZED VIEW", "SEQUENCE", "SYNONYM"}
+
 // Tables from selected catalog (or all, if empty), matching schemas, names and types
 func (r metaReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 	qstr := `SELECT
@@ -198,6 +205,16 @@ FROM all_objects o
 		name:       "o.object_name LIKE %s",
 		types:      "o.object_type IN (%s)",
 	})
+	if len(f.Types) == 0 {
+		// no type filter: still never describe non-relation objects —
+		// same-named indexes and triggers would re-print the table's columns
+		pholders := make([]string, len(relationTypes))
+		for i, t := range relationTypes {
+			vals = append(vals, t)
+			pholders[i] = r.pf(len(vals))
+		}
+		conds = append(conds, fmt.Sprintf("o.object_type IN (%s)", strings.Join(pholders, ", ")))
+	}
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
 	}
@@ -530,6 +547,10 @@ FROM all_sequences
 	conds, vals := r.conditions(f, formats{
 		schema:     "sequence_owner = %s",
 		notSchemas: "UPPER(sequence_owner) NOT IN (%s)",
+		// the \d path filters sequences by name (Filter.Name): without this
+		// predicate `\d some_table` printed every accessible sequence, one
+		// block per sequence
+		name: "sequence_name LIKE %s",
 	})
 	conds = append(conds, "sequence_name NOT LIKE 'ISEQ$$\\_%' ESCAPE '\\'")
 	if len(conds) != 0 {

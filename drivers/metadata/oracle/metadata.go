@@ -348,9 +348,9 @@ func (r metaReader) Functions(f metadata.Filter) (*metadata.FunctionSet, error) 
   b.owner   as procedure_schem,
   decode (b.object_type,'PACKAGE',CONCAT(CONCAT(b.object_name,'.'), a.object_name)
          ,b.object_name) as procedure_name,
-  COALESCE((SELECT MIN(x.data_type) FROM all_arguments x
+  (SELECT MIN(x.data_type) FROM all_arguments x
     WHERE x.object_id = b.object_id AND x.position = 0
-      AND x.object_name = a.object_name), '') as result_type,
+      AND x.object_name = a.object_name) as result_type,
   b.object_type as procedure_type
 FROM all_arguments a
 JOIN all_objects b ON b.object_id = a.object_id AND a.sequence  = 1
@@ -377,16 +377,21 @@ ORDER BY procedure_schem, procedure_name, procedure_type`
 	results := []metadata.Function{}
 	for rows.Next() {
 		rec := metadata.Function{}
+		// procedures have no return row, so result_type arrives NULL —
+		// and on Oracle-family servers COALESCE(NULL, '') is still NULL
+		// ('' IS NULL), so the empty case must be handled at scan time
+		var resultType sql.NullString
 		err = rows.Scan(
 			&rec.SpecificName,
 			&rec.Schema,
 			&rec.Name,
-			&rec.ResultType,
+			&resultType,
 			&rec.Type,
 		)
 		if err != nil {
 			return nil, err
 		}
+		rec.ResultType = resultType.String
 		results = append(results, rec)
 	}
 	if rows.Err() != nil {

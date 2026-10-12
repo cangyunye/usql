@@ -157,6 +157,19 @@ func (t *tuiRline) IsTUI() bool { return true }
 // reads.
 func (t *tuiRline) ConsoleReader() io.Reader { return t.respf }
 
+// ConsoleWriter is the terminal itself (optional IO extension for embedded
+// bubbletea programs). The renderer derives the window size only from a
+// terminal output file; rendering into the guarded Stdout writer leaves the
+// width unknown and soft-wraps every overwide frame into misaligned
+// repaints. Under a transcoding locale the returned writer is the encoded
+// wrapper, and the embedded program falls back to querying the size from
+// ConsoleFile.
+func (t *tuiRline) ConsoleWriter() io.Writer { return t.raw }
+
+// ConsoleFile is the console file backing terminal queries (nil when
+// unavailable; optional IO extension for embedded bubbletea programs).
+func (t *tuiRline) ConsoleFile() *os.File { return t.cons }
+
 // SetLine satisfies LineEditor: preset the next read's buffer and cursor.
 func (t *tuiRline) SetLine(text []rune, pos int) {
 	if pos < 0 || pos > len(text) {

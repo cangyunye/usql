@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/term"
 	"github.com/xo/dburl"
 	"github.com/xo/usql/drivers"
 	"github.com/xo/usql/env"
@@ -40,6 +42,13 @@ type connsModel struct {
 	names  []string // sorted named connections
 	rowsel int      // highlighted list row
 	err    string   // transient error line
+
+	// console geometry. width/height arrive with WindowSizeMsg; when the
+	// modal's output is not a terminal file (transcoded console output)
+	// bubbletea cannot observe the size itself, so cons backs a one-shot
+	// probe that seeds the first WindowSizeMsg.
+	width, height int
+	cons          *os.File
 
 	// delete confirmation
 	confirm string
@@ -88,11 +97,26 @@ var connsFormSpecs = []connsFieldSpec{
 // connsModal runs the bubbletea connection manager until quit or connect.
 func connsModal(h Handler, in io.Reader) error {
 	stdout, stderr := h.IO().Stdout(), h.IO().Stderr()
+	// render on the terminal itself when available: the renderer learns the
+	// window size at startup only from a terminal output file — through the
+	// guarded Stdout writer the width stays unknown and every overwide
+	// frame soft-wraps into misaligned, overlapping repaints
+	out := stdout
+	var cons *os.File
+	if co, ok := h.IO().(interface {
+		ConsoleWriter() io.Writer
+		ConsoleFile() *os.File
+	}); ok {
+		if w := co.ConsoleWriter(); w != nil {
+			out = w
+		}
+		cons = co.ConsoleFile()
+	}
 	for {
-		prog := tea.NewProgram(newConnsModel(h),
+		prog := tea.NewProgram(newConnsModel(h, cons),
 			tea.WithAltScreen(),
 			tea.WithInput(in),
-			tea.WithOutput(h.IO().Stdout()),
+			tea.WithOutput(out),
 			tea.WithoutSignalHandler(),
 		)
 		fm, err := prog.Run()
@@ -118,8 +142,8 @@ func connsModal(h Handler, in io.Reader) error {
 }
 
 // newConnsModel builds the list-mode model.
-func newConnsModel(h Handler) *connsModel {
-	m := &connsModel{h: h, mode: connsModeList, rowsel: -1}
+func newConnsModel(h Handler, cons *os.File) *connsModel {
+	m := &connsModel{h: h, mode: connsModeList, rowsel: -1, cons: cons}
 	m.reload()
 	return m
 }
@@ -135,14 +159,45 @@ func (m *connsModel) reload() {
 	}
 }
 
-// Init satisfies tea.Model.
-func (m *connsModel) Init() tea.Cmd { return nil }
+// sizeUnknown releases the first paint when the console size can't be
+// determined (the layout then renders unclamped, the pre-fix behavior).
+type sizeUnknown struct{}
+
+// pendingSize reports whether the layout is still waiting for the terminal
+// geometry it needs before it can paint.
+func (m *connsModel) pendingSize() bool {
+	return m.width == 0 && m.cons != nil
+}
+
+// Init satisfies tea.Model. The size probe runs as a command so the result
+// reaches Update through the message loop.
+func (m *connsModel) Init() tea.Cmd {
+	if m.pendingSize() {
+		return m.probeSize
+	}
+	return nil
+}
+
+// probeSize asks the console for its window size; a terminal output file
+// delivers WindowSizeMsg on its own (startup and SIGWINCH), so this only
+// backs the non-terminal output fallback.
+func (m *connsModel) probeSize() tea.Msg {
+	w, h, err := term.GetSize(m.cons.Fd())
+	if err != nil {
+		return sizeUnknown{}
+	}
+	return tea.WindowSizeMsg{Width: w, Height: h}
+}
 
 // Update dispatches a message.
 func (m *connsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+	case sizeUnknown:
+		m.cons = nil // paint best-effort from here on
 	}
 	return m, nil
 }
@@ -405,6 +460,11 @@ func sortedDrivers() []string {
 
 // View renders the modal.
 func (m *connsModel) View() string {
+	if m.pendingSize() {
+		// hold the first paint until the geometry is known: an unsized
+		// frame would soft-wrap before the width clamp exists
+		return ""
+	}
 	t := uitheme.Current()
 	var body string
 	switch m.mode {
@@ -421,13 +481,59 @@ func (m *connsModel) View() string {
 		b.WriteString("\n")
 		b.WriteString(t.ErrorMsg.Render(m.err))
 	}
-	return b.String()
+	out := b.String()
+	if m.width > 0 {
+		// backstop: no line of the frame may exceed the terminal width, or
+		// the renderer's repaints lose track of the wrapped rows
+		out = lipgloss.NewStyle().MaxWidth(m.width).Render(out)
+	}
+	return out
 }
 
-// listView renders the connection table and key hints.
+// listChrome is the screen rows the list view spends around the table:
+// top border, header, separator, bottom border, the blank line after the
+// table, and the hints line.
+const listChrome = 6
+
+// listRows returns how many connection rows fit under the chrome, at least
+// one. The transient error line, when shown, takes two more rows.
+func (m *connsModel) listRows() int {
+	avail := m.height - listChrome
+	if m.err != "" {
+		avail -= 2
+	}
+	if avail < 1 {
+		avail = 1
+	}
+	return avail
+}
+
+// listFirst returns the index of the topmost visible connection, keeping
+// the selected row inside the visible window.
+func (m *connsModel) listFirst(vis int) int {
+	lo := 0
+	if m.rowsel >= vis {
+		lo = m.rowsel - vis + 1
+	}
+	if max := len(m.names) - vis; lo > max {
+		lo = max
+	}
+	if lo < 0 {
+		lo = 0
+	}
+	return lo
+}
+
+// listView renders the connection table and key hints. When the connections
+// don't all fit, it shows a scrolling window with the selection in view.
 func (m *connsModel) listView() string {
 	var b strings.Builder
-	b.WriteString(connTable(m.names, m.rowsel))
+	rows, first := m.names, 0
+	if cap := m.listRows(); cap < len(m.names) {
+		first = m.listFirst(cap)
+		rows = m.names[first : first+cap]
+	}
+	b.WriteString(connTable(rows, m.rowsel-first, first, m.width))
 	b.WriteString("\n")
 	if len(m.names) == 0 {
 		b.WriteString("  (no named connections yet; press a to add one)\n")

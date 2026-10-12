@@ -11,6 +11,7 @@
 //	Truncation       scripted runs, \g file and filtered queries are never truncated
 //	TerminalState    the line discipline is restored when the session ends
 //	MenuAtBottom     Tab at the screen bottom still opens the candidate menu
+//	ConnsModal       the \conns modal learns the terminal size and repaints cleanly
 package main
 
 import (
@@ -26,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/xo/usql/internal/ptytest"
 )
 
@@ -467,6 +469,151 @@ func TestPTYMenuEnterSubmits(t *testing.T) {
 
 	tm.SendLine("\\q")
 	if err := tm.WaitExit(10 * time.Second); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+}
+
+// seedConnsConfig writes 24 named connections with wide host/database
+// values, so the \conns table's natural width (~150 columns) far exceeds
+// the 80-column test terminal. The config directory follows
+// os.UserConfigDir: $XDG_CONFIG_HOME/usql on unix, ~/Library/Application
+// Support/usql on darwin (XDG is ignored there).
+func seedConnsConfig(t *testing.T, home, xdg string) {
+	t.Helper()
+	dir := filepath.Join(xdg, "usql")
+	if runtime.GOOS == "darwin" {
+		dir = filepath.Join(home, "Library", "Application Support", "usql")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("connections:\n")
+	fmt.Fprintf(&b, "  book_sqlite: %q\n", "sqlite3:///Users/sinvigil/prog/usql/testdata/booktest/booktest.db")
+	for i := 1; i <= 16; i++ {
+		fmt.Fprintf(&b, "  conn%02d: %q\n", i, fmt.Sprintf("mysql://dev@mysql-%02d.corp.example.com:3306/testdb", i))
+	}
+	for _, c := range [][2]string{
+		{"csvq_report", "csvq:///tmp/sales_report"},
+		{"dm8_local", "mysql://SYSDBA@localhost:5236/DMSERVER"},
+		{"mysql_test", "mysql://dev@mysql-test.corp.example.com:3306/testdb"},
+		{"ob_oracle", "oracle://usqlora@10.20.30.41:1521/ORCLPDB1"},
+		{"obmysql", "mysql://root@10.20.30.40:2881/oceanbase"},
+		{"pg_local", "postgres://sinvigil@localhost:5432/postgres"},
+		{"pg_prod", "postgres://analytics@pg-prod-cluster.internal.example.com:5432/sales?sslmode=require"},
+	} {
+		fmt.Fprintf(&b, "  %s: %q\n", c[0], c[1])
+	}
+	if err := os.WriteFile(filepath.Join(dir, "connections.yaml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ConnsModal: the \conns TUI modal must learn the real terminal geometry.
+// It used to render into the guarded Stdout writer, so bubbletea never saw
+// the window size, skipped its overwide-line truncation, and soft-wrapped
+// the ~150-column table at 80 columns — every repaint then landed on
+// shifted rows and stacked stale fragments (the "garbled, overlapping
+// list" report). With the size known the table truncates with an ellipsis
+// and long lists scroll inside a height-fitting window.
+func TestPTYConnsModal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pty scenarios do not run on windows")
+	}
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg-config")
+	seedConnsConfig(t, home, xdg)
+	tm := ptytest.New(t, ptytest.Options{
+		Args: []string{binPath},
+		Env: append(os.Environ(),
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+xdg,
+			"USQL_HISTORY="+filepath.Join(home, "hist"),
+		),
+		Rows: 24, Cols: 80,
+	})
+	defer tm.WaitExit(20 * time.Second)
+	tm.WaitFor(`Type "help"`, 30*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	tm.SendLine("\\conns")
+	tm.WaitFor(`d delete  q quit`, 15*time.Second)
+	time.Sleep(500 * time.Millisecond) // modal settled
+
+	// sorted names: book_sqlite, conn01..conn16, csvq_report, dm8_local,
+	// mysql_test, ob_oracle, obmysql, pg_local, pg_prod — 24 rows, of which
+	// 18 fit in a 24-row terminal. 19 downs put the selection (index 19,
+	// mysql_test) on the last visible row and scroll conn01/book_sqlite off.
+	for i := 0; i < 19; i++ {
+		tm.SendRaw("\x1b[B")
+		time.Sleep(120 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// the renderer diffs frames and skips unchanged lines, so the raw bytes
+	// of the last incremental repaint don't carry the whole screen; toggle
+	// the delete confirmation (d opens it, n cancels) to force one full
+	// frame rewrite to snapshot against
+	tm.SendKeys("d")
+	time.Sleep(400 * time.Millisecond)
+	tm.SendKeys("n")
+	time.Sleep(500 * time.Millisecond)
+
+	raw := string(tm.Raw())
+	start := strings.Index(raw, "\x1b[?1049h")
+	if start < 0 {
+		t.Fatal("modal never entered the alt screen")
+	}
+	modal := raw[start:]
+
+	// no modal line may exceed the terminal width: a wider line would mean
+	// the width never reached the renderer and rows soft-wrap (the bug).
+	// Frames begin with a cursor-home, not a newline, so home positions
+	// become line breaks before stripping (otherwise the tail of one frame
+	// would concatenate with the head of the next)
+	flat := strings.ReplaceAll(modal, "\x1b[H", "\n")
+	for _, line := range strings.Split(ptytest.StripANSI(flat), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if w := ansi.StringWidth(line); w > 80 {
+			t.Fatalf("modal line is %d cells wide (> 80): %q", w, line)
+		}
+	}
+
+	// the last repaint must be a complete, windowed frame: full borders,
+	// hints, no scrolled-off rows, and the highlight on the selected row
+	final := modal[strings.LastIndex(modal, "\x1b[H"):]
+	text := ptytest.StripANSI(final)
+	for _, want := range []string{"╭", "╰", "a add"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("final frame lost %q after walking 19 rows:\n%s", want, ptytest.Tail(text, 800))
+		}
+	}
+	if strings.Contains(text, "book_sqlite") {
+		t.Fatal("final frame still shows rows scrolled off the window")
+	}
+	if !strings.Contains(text, "…") {
+		t.Fatal("final frame has no truncated cells; the width clamp did not engage")
+	}
+	var highlighted string
+	for _, line := range strings.Split(final, "\n") {
+		// the selected row's background (bold may merge into one SGR: 1;48;5;236)
+		if strings.Contains(line, "48;5;236m") {
+			highlighted += ptytest.StripANSI(line)
+		}
+	}
+	// row 20 (names[19], mysql_test; the name cell may be truncated) is the
+	// selected row after 19 downs, and it must carry the highlight style
+	if !strings.Contains(highlighted, "│20│mysql") {
+		t.Fatalf("selection highlight not on row 20 (mysql_test) after 19 downs (got %q)", strings.TrimSpace(highlighted))
+	}
+	if n := strings.Count(final, "\n"); n > 25 {
+		t.Fatalf("final frame is %d lines tall, exceeds the 24-row terminal", n)
+	}
+
+	tm.SendKeys("q") // leaves the manager, back at the prompt
+	time.Sleep(300 * time.Millisecond)
+	tm.SendLine("\\q")
+	if err := tm.WaitExit(15 * time.Second); err != nil {
 		t.Fatalf("exit: %v", err)
 	}
 }

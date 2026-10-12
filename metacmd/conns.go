@@ -55,8 +55,12 @@ var fileScheme = map[string]bool{
 const connsEncDefault = "utf-8"
 
 // connTable renders the named-connection list as a bordered table; selected
-// (-1 when none) highlights the cursor row for the TUI modal.
-func connTable(names []string, selected int) string {
+// (-1 when none) highlights the cursor row for the TUI modal, relative to
+// names. first is the row number shown for names[0] (rows are numbered
+// first+1..first+len(names)). maxWidth caps the table width when positive:
+// the widest columns contract and their cells truncate with an ellipsis
+// instead of soft-wrapping the frame (0 renders the natural width).
+func connTable(names []string, selected, first, maxWidth int) string {
 	headers := []string{"#", "name", "source", "driver", "user", "host", "port", "database", "encoding", "password"}
 	rows := make([][]string, 0, len(names))
 	for i, name := range names {
@@ -66,7 +70,7 @@ func connTable(names []string, selected int) string {
 			src = "session"
 		}
 		_, hasPw := env.Vars().GetSecret(name)
-		row := []string{strconv.Itoa(i + 1), name, src, "-", "", "", "", "", "", ""}
+		row := []string{strconv.Itoa(first + i + 1), name, src, "-", "", "", "", "", "", ""}
 		if v, ok := comps["protocol"]; ok {
 			row[3] = fmt.Sprint(v)
 		}
@@ -96,18 +100,26 @@ func connTable(names []string, selected int) string {
 		BorderStyle(style.Foreground(lipgloss.Color("240"))).
 		Headers(headers...).
 		Rows(rows...).
-		StyleFunc(func(row, col int) lipgloss.Style {
-			switch {
-			case row == 0:
-				return style.Bold(true)
-			case row == selected+1:
-				return style.Bold(true).Background(lipgloss.Color("236"))
-			case row%2 == 0:
-				return style.Background(lipgloss.Color("235"))
-			default:
-				return style
-			}
-		})
+		// cells must truncate (with an ellipsis) rather than wrap: a wrapped
+		// cell makes the table row taller than one terminal line, which the
+		// modal's repaint logic cannot track
+		Wrap(false)
+	if maxWidth > 0 {
+		t = t.Width(maxWidth)
+	}
+	t = t.StyleFunc(func(row, col int) lipgloss.Style {
+		// lipgloss passes -1 for the header row; data rows are 0-based
+		switch {
+		case row == table.HeaderRow:
+			return style.Bold(true)
+		case row == selected:
+			return style.Bold(true).Background(lipgloss.Color("236"))
+		case row%2 == 0:
+			return style.Background(lipgloss.Color("235"))
+		default:
+			return style
+		}
+	})
 	return t.Render()
 }
 
@@ -130,7 +142,7 @@ func connsManage(h Handler) error {
 	stdout, stderr := h.IO().Stdout(), h.IO().Stderr()
 	for {
 		names := slices.Sorted(maps.Keys(env.Vars().Conn()))
-		fmt.Fprintln(stdout, connTable(names, -1))
+		fmt.Fprintln(stdout, connTable(names, -1, 0, 0))
 		if len(names) == 0 {
 			fmt.Fprintln(stdout, "  (no named connections yet; type `a` to add one)")
 		}

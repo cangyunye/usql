@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	gitcode.com/opengauss/openGauss-connector-go-pq v1.0.8
+	gitee.com/chunanyong/dm v1.8.23
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
 	github.com/IBM/nzgo/v12 v12.0.10
 	github.com/MichaelS11/go-cql-driver v0.1.1
@@ -20,6 +21,8 @@ require (
 	github.com/chaisql/chai v0.18.0
 	github.com/charmbracelet/bubbletea v1.3.4
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/charmbracelet/x/ansi v0.8.0
+	github.com/charmbracelet/x/term v0.2.1
 	github.com/couchbase/go_n1ql v0.0.0-20220303011133-0ed4bf93e31d
 	github.com/databricks/databricks-sql-go v1.10.0
 	github.com/datafuselabs/databend-go v0.9.2
@@ -92,7 +95,6 @@ require (
 	cloud.google.com/go/spanner v1.88.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
-	gitee.com/chunanyong/dm v1.8.23 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/99designs/keyring v1.2.2 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.0 // indirect
@@ -161,9 +163,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
-	github.com/charmbracelet/x/ansi v0.8.0 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.13-0.20250311204145-2c3ea96c31dd // indirect
-	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
 	github.com/cockroachdb/crlib v0.0.0-20251122031428-fe658a2dbda1 // indirect

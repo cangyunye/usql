@@ -24,6 +24,8 @@ var _ metadata.BasicReader = &metaReader{}
 var _ metadata.IndexReader = &metaReader{}
 var _ metadata.IndexColumnReader = &metaReader{}
 var _ metadata.SequenceReader = &metaReader{}
+var _ metadata.TableRowsReader = &metaReader{}
+var _ metadata.IndexRowsReader = &metaReader{}
 
 // NewReader returns a metadata reader using ":N" bind placeholders, suitable
 // for Oracle native drivers (go-ora).
@@ -210,11 +212,45 @@ func (r metaReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
 }
 
 func (r metaReader) tables(f metadata.Filter) (*metadata.TableSet, error) {
-	qstr := `SELECT
+	qstr, vals := r.tablesSQL(f,
+		`SELECT
 o.owner AS table_schem,
 o.object_name AS table_name,
 o.object_type AS table_type
-FROM all_objects o
+`,
+		"table_schem, table_name, table_type")
+	rows, closeRows, err := r.Query(qstr, vals...)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return metadata.NewTableSet([]metadata.Table{}), nil
+		}
+		return nil, err
+	}
+	defer closeRows()
+
+	results := []metadata.Table{}
+	for rows.Next() {
+		rec := metadata.Table{}
+		err = rows.Scan(&rec.Schema, &rec.Name, &rec.Type)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, rec)
+	}
+	if rows.Err() != nil {
+		return nil, rows.Err()
+	}
+	return metadata.NewTableSet(results), nil
+}
+
+// tablesSQL builds the table listing query around the given SELECT list:
+// the materialized and the streaming (\dt from a live cursor) paths share
+// every predicate — types, system-schema exclusion, relation-types
+// default, ISEQ exclusion, the synonym union. orderBy references the
+// select list (aliases for the materialized form, positions for the
+// streaming form, whose aliases are quoted display headers).
+func (r metaReader) tablesSQL(f metadata.Filter, selectList, orderBy string) (string, []interface{}) {
+	qstr := selectList + `FROM all_objects o
 `
 	conds, vals := r.conditions(f, formats{
 		schema:     "o.owner LIKE %s",
@@ -267,30 +303,26 @@ FROM all_synonyms s
 			qstr += " WHERE " + strings.Join(conds, " AND ")
 		}
 	}
-	qstr += `
-ORDER BY table_schem, table_name, table_type`
+	qstr += "\nORDER BY " + orderBy
+	return qstr, vals
+}
+
+// TableRows serves \dt-style listings from a live cursor: rows reach the
+// encoder as the server produces them. The quoted aliases are the display
+// headers; every filter is pushed server-side, so the writer's SetFilter
+// step does not apply on this path.
+func (r metaReader) TableRows(f metadata.Filter) (*sql.Rows, func(), error) {
+	qstr, vals := r.tablesSQL(f,
+		`SELECT
+o.owner AS "Schema",
+o.object_name AS "Name",
+o.object_type AS "Type"
+`, "1, 2, 3")
 	rows, closeRows, err := r.Query(qstr, vals...)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return metadata.NewTableSet([]metadata.Table{}), nil
-		}
-		return nil, err
+		return nil, nil, err
 	}
-	defer closeRows()
-
-	results := []metadata.Table{}
-	for rows.Next() {
-		rec := metadata.Table{}
-		err = rows.Scan(&rec.Schema, &rec.Name, &rec.Type)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, rec)
-	}
-	if rows.Err() != nil {
-		return nil, rows.Err()
-	}
-	return metadata.NewTableSet(results), nil
+	return rows, closeRows, nil
 }
 
 func (r metaReader) Columns(f metadata.Filter) (*metadata.ColumnSet, error) {
@@ -502,25 +534,13 @@ func (r metaReader) Indexes(f metadata.Filter) (*metadata.IndexSet, error) {
 }
 
 func (r metaReader) indexes(f metadata.Filter) (*metadata.IndexSet, error) {
-	qstr := `SELECT
+	qstr, vals := r.indexesSQL(f,
+		`SELECT
   o.owner,
   o.table_name,
   o.index_name,
   decode(o.uniqueness,'UNIQUE','YES','NO')
-FROM all_indexes o
-`
-	conds, vals := r.conditions(f, formats{
-		schema:     "o.owner LIKE %s",
-		notSchemas: "UPPER(o.owner) NOT IN (%s)",
-		parent:     "o.table_name LIKE %s",
-		name:       "o.index_name LIKE %s",
-	})
-	if len(conds) != 0 {
-		qstr += " WHERE " + strings.Join(conds, " AND ")
-	}
-	qstr += `
-ORDER BY o.owner, o.table_name, o.index_name`
-
+`, "o.owner, o.table_name, o.index_name")
 	rows, closeRows, err := r.Query(qstr, vals...)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -543,6 +563,42 @@ ORDER BY o.owner, o.table_name, o.index_name`
 		return nil, rows.Err()
 	}
 	return metadata.NewIndexSet(results), nil
+}
+
+// indexesSQL builds the \di listing query around the given SELECT list —
+// shared by the materialized and streaming forms (see tablesSQL).
+func (r metaReader) indexesSQL(f metadata.Filter, selectList, orderBy string) (string, []interface{}) {
+	qstr := selectList + `FROM all_indexes o
+`
+	conds, vals := r.conditions(f, formats{
+		schema:     "o.owner LIKE %s",
+		notSchemas: "UPPER(o.owner) NOT IN (%s)",
+		parent:     "o.table_name LIKE %s",
+		name:       "o.index_name LIKE %s",
+	})
+	if len(conds) != 0 {
+		qstr += " WHERE " + strings.Join(conds, " AND ")
+	}
+	qstr += "\nORDER BY " + orderBy
+	return qstr, vals
+}
+
+// IndexRows serves \di from a live cursor, under the same rules as
+// TableRows; the index type column has no Oracle source and stays NULL
+// (the materialized form renders it empty as well).
+func (r metaReader) IndexRows(f metadata.Filter) (*sql.Rows, func(), error) {
+	qstr, vals := r.indexesSQL(f,
+		`SELECT
+  o.owner AS "Schema",
+  o.index_name AS "Name",
+  CAST(NULL AS VARCHAR2(1)) AS "Type",
+  o.table_name AS "Table"
+`, "1, 2, 3, 4")
+	rows, closeRows, err := r.Query(qstr, vals...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return rows, closeRows, nil
 }
 
 func (r metaReader) IndexColumns(f metadata.Filter) (*metadata.IndexColumnSet, error) {

@@ -570,6 +570,68 @@ func (w DefaultWriter) ListAllDbs(u *dburl.URL, pattern string, verbose bool) er
 	return tblfmt.EncodeAll(w.w, res, params)
 }
 
+// heldRows is a *sql.Rows whose first Next was already taken by the
+// writer's empty-cursor probe: Scan serves that row first, so the encoder
+// sees an uninterrupted stream.
+type heldRows struct {
+	*sql.Rows
+	first bool
+}
+
+func (r *heldRows) Next() bool {
+	if r.first {
+		r.first = false
+		return true
+	}
+	return r.Rows.Next()
+}
+
+// streamListTables renders the table listing straight from the live
+// cursor: rows are encoded as the server produces them. The caller has
+// verified the reader pushes every row filter into the WHERE clause (the
+// materialized path's SetFilter step does not run here). An empty cursor
+// is the relation-not-found case; the probe's row is held for the encoder.
+func (w DefaultWriter) streamListTables(tr TableRowsReader, f Filter, pattern string) error {
+	rows, closeRows, err := tr.TableRows(f)
+	if err != nil {
+		return fmt.Errorf("failed to list tables: %w", err)
+	}
+	defer closeRows()
+	rs := &heldRows{Rows: rows}
+	if !rs.probe() {
+		fmt.Fprintf(w.w, text.RelationNotFound, pattern)
+		fmt.Fprintln(w.w)
+		return nil
+	}
+	params := env.Vars().Print()
+	params["title"] = "List of relations"
+	return tblfmt.EncodeAll(w.w, rs, params)
+}
+
+func (r *heldRows) probe() bool {
+	r.first = r.Rows.Next()
+	return r.first
+}
+
+// streamListIndexes renders the \di listing straight from the live cursor,
+// under the same rules as streamListTables.
+func (w DefaultWriter) streamListIndexes(ir IndexRowsReader, f Filter, pattern string) error {
+	rows, closeRows, err := ir.IndexRows(f)
+	if err != nil {
+		return fmt.Errorf("failed to list indexes: %w", err)
+	}
+	defer closeRows()
+	rs := &heldRows{Rows: rows}
+	if !rs.probe() {
+		fmt.Fprintf(w.w, text.RelationNotFound, pattern)
+		fmt.Fprintln(w.w)
+		return nil
+	}
+	params := env.Vars().Print()
+	params["title"] = "List of indexes"
+	return tblfmt.EncodeAll(w.w, rs, params)
+}
+
 // ListTables matching pattern
 func (w DefaultWriter) ListTables(u *dburl.URL, tableTypes, pattern string, verbose, showSystem bool) error {
 	r, ok := w.r.(TableReader)
@@ -585,6 +647,14 @@ func (w DefaultWriter) ListTables(u *dburl.URL, tableTypes, pattern string, verb
 	sp, tp, err := parsePattern(pattern)
 	if err != nil {
 		return fmt.Errorf("failed to parse search pattern: %w", err)
+	}
+	// streaming path: rows reach the terminal as the server produces them
+	// (verbose needs the Rows/Size/Comment enrichment of the materialized
+	// set, which a live cursor cannot carry)
+	if !verbose {
+		if tr, ok := w.r.(TableRowsReader); ok {
+			return w.streamListTables(tr, Filter{Schema: sp, Name: tp, Types: types, WithSystem: showSystem}, pattern)
+		}
 	}
 	res, err := r.Tables(Filter{Schema: sp, Name: tp, Types: types, WithSystem: showSystem})
 	if err != nil {
@@ -655,6 +725,13 @@ func (w DefaultWriter) ListIndexes(u *dburl.URL, pattern string, verbose, showSy
 	sp, tp, err := parsePattern(pattern)
 	if err != nil {
 		return fmt.Errorf("failed to parse search pattern: %w", err)
+	}
+	// streaming path: rows reach the terminal as the server produces them
+	// (verbose needs the Primary?/Unique? enrichment of the materialized set)
+	if !verbose {
+		if ir, ok := w.r.(IndexRowsReader); ok {
+			return w.streamListIndexes(ir, Filter{Schema: sp, Name: tp, WithSystem: showSystem}, pattern)
+		}
 	}
 	res, err := r.Indexes(Filter{Schema: sp, Name: tp, WithSystem: showSystem})
 	if err != nil {

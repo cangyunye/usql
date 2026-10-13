@@ -693,3 +693,76 @@ func TestPTYPasteSingleLine(t *testing.T) {
 	tm.WaitFor(`\(1 row\)`, 10*time.Second)
 	tm.Ctrl('d')
 }
+
+// TestPTYListStreaming: a large \dt listing renders its rows and the
+// footer counts them; Ctrl-C during the listing leaves the session
+// operable. The streaming path encodes rows as the server produces them
+// instead of after the whole set is materialized.
+func TestPTYListStreaming(t *testing.T) {
+	dsn := newShortDB(t)
+	// 120 tables via one script file
+	sql := &strings.Builder{}
+	for i := 0; i < 120; i++ {
+		fmt.Fprintf(sql, "CREATE TABLE s%d(id int);\n", i)
+	}
+	f := filepath.Join(t.TempDir(), "setup.sql")
+	if err := os.WriteFile(f, []byte(sql.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(binPath, dsn, "-f", f).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+
+	tm := newSession(t, dsn)
+	defer tm.KillIfRunning()
+	tm.WaitFor(`sqlite`, 10*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	tm.SendLine("\\dt")
+	tm.WaitFor(`\(120 rows\)`, 30*time.Second)
+	out := ptytest.StripANSI(string(tm.Raw()))
+	for _, want := range []string{"s0", "s119", "List of relations"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("streamed \\dt missing %q", want)
+		}
+	}
+	if n := strings.Count(out, "(120 rows)"); n != 1 {
+		t.Errorf("footer rendered %d times, want once", n)
+	}
+
+	// the session stays operable after the listing
+	tm.SendLine("SELECT 4242")
+	tm.WaitFor(`4242`, 10*time.Second)
+	tm.Ctrl('d')
+}
+
+// TestPTYListInterrupt: Ctrl-C during a listing cancels it and the
+// session comes back with a working prompt.
+func TestPTYListInterrupt(t *testing.T) {
+	dsn := newShortDB(t)
+	sql := &strings.Builder{}
+	for i := 0; i < 300; i++ {
+		fmt.Fprintf(sql, "CREATE TABLE b%d(id int);\n", i)
+	}
+	f := filepath.Join(t.TempDir(), "setup.sql")
+	if err := os.WriteFile(f, []byte(sql.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(binPath, dsn, "-f", f).CombinedOutput(); err != nil {
+		t.Fatalf("setup: %v\n%s", err, out)
+	}
+
+	tm := newSession(t, dsn)
+	defer tm.KillIfRunning()
+	tm.WaitFor(`sqlite`, 10*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	tm.SendLine("\\dt")
+	time.Sleep(150 * time.Millisecond)
+	tm.Ctrl('c')
+	time.Sleep(500 * time.Millisecond)
+	// the prompt must be back and the session usable
+	tm.SendLine("SELECT 4242")
+	tm.WaitFor(`4242`, 10*time.Second)
+	tm.Ctrl('d')
+}

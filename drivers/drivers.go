@@ -480,6 +480,9 @@ func NewMetadataWriter(ctx context.Context, u *dburl.URL, db DB, w io.Writer, op
 	if !ok {
 		return nil, fmt.Errorf(text.NotSupportedByDriver, `describe commands`, u.Driver)
 	}
+	// the command's signal context scopes every reader query: Ctrl-C
+	// cancels a running (possibly streaming) listing
+	opts = append(opts, metadata.WithContext(ctx))
 	if d.NewMetadataWriter != nil {
 		return d.NewMetadataWriter(db, w, opts...), nil
 	}

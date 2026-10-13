@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"database/sql"
 	"strings"
 
 	"github.com/xo/dburl"
@@ -66,6 +67,26 @@ type ColumnStatReader interface {
 type IndexReader interface {
 	Reader
 	Indexes(Filter) (*IndexSet, error)
+}
+
+// TableRowsReader serves the table listings (\dt, \dv, \dm, \ds) from a
+// live SQL cursor: rows reach the encoder — and the terminal — as the
+// server produces them, instead of after the whole set has been
+// materialized. The SELECT must alias its columns to the display headers
+// in display order ("Schema", "Name", "Type"), and all row filtering
+// (system schemas, generated names, ...) must be pushed into the WHERE
+// clause: the materialized path's SetFilter step does not run here.
+type TableRowsReader interface {
+	// TableRows returns the live cursor and its closer (the closer wraps
+	// any query-context cancel alongside Rows.Close).
+	TableRows(Filter) (*sql.Rows, func(), error)
+}
+
+// IndexRowsReader serves the \di listing from a live SQL cursor, under the
+// same rules as TableRowsReader; columns in display order ("Schema",
+// "Name", "Type", "Table").
+type IndexRowsReader interface {
+	IndexRows(Filter) (*sql.Rows, func(), error)
 }
 
 // IndexColumnReader lists index columns.

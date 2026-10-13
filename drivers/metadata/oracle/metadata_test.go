@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"database/sql/driver"
 	"sort"
@@ -900,5 +901,123 @@ func TestIndexColumnsServesWithoutAllIndexes(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "SCOTT.T1_IDX=ID" {
 		t.Errorf("IndexColumns = %v, want [SCOTT.T1_IDX=ID]", got)
+	}
+}
+
+// TestStreamListTables: the \dt listing renders straight from the live
+// cursor — display headers come from the SELECT aliases, every fixture
+// row lands in the output, and the footer counts them.
+func TestStreamListTables(t *testing.T) {
+	db := openDescribeDB(t)
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db))(db, &buf)
+	if err := w.ListTables(u, "dt", "", false, false); err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Schema", "Name", "Type", "SCOTT", "T1", "ADAM", "T2", "(2 rows)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("streamed \\dt output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "ISEQ") {
+		t.Errorf("streamed \\dt listed identity sequences:\n%s", out)
+	}
+}
+
+// TestStreamListTablesEmpty: an empty cursor is the relation-not-found
+// case — the probe row must not leak into a broken render.
+func TestStreamListTablesEmpty(t *testing.T) {
+	registerSysContextStub()
+	registerDecodeStub()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, ddl := range []string{
+		`CREATE TABLE all_objects (owner text, object_name text, object_type text)`,
+		`CREATE TABLE all_synonyms (owner text, synonym_name text, table_owner text, table_name text, db_link text)`,
+	} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db))(db, &buf)
+	if err := w.ListTables(u, "dt", "", false, false); err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Did not find any relation") {
+		t.Errorf("empty listing missing relation-not-found note:\n%s", buf.String())
+	}
+}
+
+// TestStreamListIndexes: \di streams the same way, with the four display
+// columns in SELECT-alias order.
+func TestStreamListIndexes(t *testing.T) {
+	db := openDescribeDB(t)
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db))(db, &buf)
+	if err := w.ListIndexes(u, "", false, false); err != nil {
+		t.Fatalf("ListIndexes: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Schema", "Name", "Type", "Table", "T1_IDX", "T1_UQ", "(2 rows)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("streamed \\di output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestStreamListTablesVerboseFallsBack: \dt+ needs the Rows/Size/Comment
+// enrichment of the materialized set — the verbose path keeps the
+// materialized behavior.
+func TestStreamListTablesVerboseFallsBack(t *testing.T) {
+	db := openDescribeDB(t)
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db))(db, &buf)
+	if err := w.ListTables(u, "dt", "", true, false); err != nil {
+		t.Fatalf("ListTables(verbose): %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Rows", "Size", "Comment", "SCOTT", "(2 rows)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("verbose \\dt output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestStreamListTablesCanceledContext: the command's signal context scopes
+// the streaming queries — a canceled context surfaces as a listing error
+// instead of a hang.
+func TestStreamListTablesCanceledContext(t *testing.T) {
+	db := openDescribeDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	u, err := dburl.Parse("oracle://scott:tiger@localhost:1521/orcl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	w := metadata.NewDefaultWriter(NewReaderQ()(db, metadata.WithContext(ctx)))(db, &buf)
+	if err := w.ListTables(u, "dt", "", false, false); err == nil {
+		t.Fatalf("canceled context did not fail the listing:\n%s", buf.String())
 	}
 }

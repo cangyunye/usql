@@ -181,6 +181,10 @@ type LoggingReader struct {
 	logger  logger
 	dryRun  bool
 	timeout time.Duration
+	// ctx, when set, scopes every query: the describe commands build their
+	// writer (and readers) per invocation with the command's signal context,
+	// so a slow or streaming listing dies with Ctrl-C instead of running on
+	ctx context.Context
 }
 
 type logger interface {
@@ -221,6 +225,14 @@ func WithTimeout(t time.Duration) ReaderOption {
 	}
 }
 
+// WithContext scopes every query of the reader to ctx — Ctrl-C cancels a
+// running listing or describe instead of letting it run to completion.
+func WithContext(ctx context.Context) ReaderOption {
+	return func(r Reader) {
+		r.(loggerSetter).setContext(ctx)
+	}
+}
+
 // WithLimit for a single query, if the reader supports it
 func WithLimit(l int) ReaderOption {
 	return func(r Reader) {
@@ -234,6 +246,7 @@ type loggerSetter interface {
 	setLogger(logger)
 	setDryRun(bool)
 	setTimeout(t time.Duration)
+	setContext(context.Context)
 }
 
 type limiter interface {
@@ -252,6 +265,10 @@ func (r *LoggingReader) setTimeout(t time.Duration) {
 	r.timeout = t
 }
 
+func (r *LoggingReader) setContext(ctx context.Context) {
+	r.ctx = ctx
+}
+
 func (r LoggingReader) Query(q string, v ...interface{}) (*sql.Rows, CloseFunc, error) {
 	if r.logger != nil {
 		r.logger.Println(q)
@@ -260,13 +277,22 @@ func (r LoggingReader) Query(q string, v ...interface{}) (*sql.Rows, CloseFunc, 
 	if r.dryRun {
 		return nil, nil, sql.ErrNoRows
 	}
-	if r.timeout != 0 {
+	switch {
+	case r.ctx != nil && r.timeout != 0:
+		ctx, cancel := context.WithTimeout(r.ctx, r.timeout)
+		rows, err := r.db.QueryContext(ctx, q, v...)
+		return rows, func() { cancel(); rows.Close() }, err
+	case r.ctx != nil:
+		rows, err := r.db.QueryContext(r.ctx, q, v...)
+		return rows, func() { rows.Close() }, err
+	case r.timeout != 0:
 		ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 		rows, err := r.db.QueryContext(ctx, q, v...)
 		return rows, func() { cancel(); rows.Close() }, err
+	default:
+		rows, err := r.db.Query(q, v...)
+		return rows, func() { rows.Close() }, err
 	}
-	rows, err := r.db.Query(q, v...)
-	return rows, func() { rows.Close() }, err
 }
 
 // CloseFunc should be called when result won't be processed anymore

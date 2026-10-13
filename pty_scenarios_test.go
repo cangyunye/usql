@@ -12,6 +12,7 @@
 //	TerminalState    the line discipline is restored when the session ends
 //	MenuAtBottom     Tab at the screen bottom still opens the candidate menu
 //	ConnsModal       the \conns modal learns the terminal size and repaints cleanly
+//	ConnsWheel       the \conns modal owns the mouse wheel and scrolls the list
 package main
 
 import (
@@ -616,6 +617,102 @@ func TestPTYConnsModal(t *testing.T) {
 	if err := tm.WaitExit(15 * time.Second); err != nil {
 		t.Fatalf("exit: %v", err)
 	}
+}
+
+// ConnsWheel: the \conns modal must own the mouse wheel. Without mouse
+// reporting the terminal either translates wheel turns into arrow bursts at
+// the renderer or scrolls its own scrollback, dragging pre-modal screen
+// content over the alt screen (the "overlapping/lost rows on mouse move"
+// report). With reporting enabled the wheel arrives as SGR sequences and
+// scrolls the selection like the arrow keys do.
+func TestPTYConnsWheel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pty scenarios do not run on windows")
+	}
+	home := t.TempDir()
+	xdg := filepath.Join(home, "xdg-config")
+	seedConnsConfig(t, home, xdg)
+	tm := ptytest.New(t, ptytest.Options{
+		Args: []string{binPath},
+		Env: append(os.Environ(),
+			"HOME="+home,
+			"XDG_CONFIG_HOME="+xdg,
+			"USQL_HISTORY="+filepath.Join(home, "hist"),
+		),
+		Rows: 24, Cols: 80,
+	})
+	defer tm.WaitExit(20 * time.Second)
+	tm.WaitFor(`Type "help"`, 30*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	tm.SendLine("\\conns")
+	tm.WaitFor(`d delete  q quit`, 15*time.Second)
+	time.Sleep(500 * time.Millisecond)
+
+	// mouse reporting must be on, or real terminals keep the wheel for
+	// themselves (scrollback over the alt screen / arrow bursts)
+	if raw := string(tm.Raw()); !strings.Contains(raw, "\x1b[?1002h") {
+		t.Fatal("modal did not enable mouse reporting")
+	}
+
+	// sorted names: book_sqlite(0), conn01..conn16(1..16), ... — three
+	// wheel-down turns put the selection on index 3 (row 4, conn03)
+	for i := 0; i < 3; i++ {
+		tm.SendRaw("\x1b[<65;10;5M") // SGR wheel down
+		time.Sleep(150 * time.Millisecond)
+	}
+	// the renderer skips unchanged lines: toggle the delete confirm (d, n)
+	// to force a full-frame rewrite the assertions can read
+	tm.SendKeys("d")
+	time.Sleep(300 * time.Millisecond)
+	tm.SendKeys("n")
+	time.Sleep(500 * time.Millisecond)
+	if hl := connsHighlighted(tm); !strings.Contains(hl, "conn03") {
+		t.Fatalf("wheel-down selection not on row 4 (conn03), got %q", strings.TrimSpace(hl))
+	}
+
+	// two wheel-up turns: back to index 1 (row 2, conn01)
+	for i := 0; i < 2; i++ {
+		tm.SendRaw("\x1b[<64;10;5M") // SGR wheel up
+		time.Sleep(150 * time.Millisecond)
+	}
+	tm.SendKeys("d")
+	time.Sleep(300 * time.Millisecond)
+	tm.SendKeys("n")
+	time.Sleep(500 * time.Millisecond)
+	if hl := connsHighlighted(tm); !strings.Contains(hl, "conn01") {
+		t.Fatalf("wheel-up selection not on row 2 (conn01), got %q", strings.TrimSpace(hl))
+	}
+
+	// the wheel path repaints like any other: no line may exceed the width
+	raw := string(tm.Raw())
+	flat := strings.ReplaceAll(raw[strings.Index(raw, "\x1b[?1049h"):], "\x1b[H", "\n")
+	for _, line := range strings.Split(ptytest.StripANSI(flat), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if w := ansi.StringWidth(line); w > 80 {
+			t.Fatalf("modal line is %d cells wide (> 80): %q", w, line)
+		}
+	}
+
+	tm.SendKeys("q")
+	time.Sleep(300 * time.Millisecond)
+	tm.SendLine("\\q")
+	if err := tm.WaitExit(15 * time.Second); err != nil {
+		t.Fatalf("exit: %v", err)
+	}
+}
+
+// connsHighlighted returns the text of the last full repaint's highlighted
+// row (the d/n confirm toggle before the snapshot forces that repaint).
+func connsHighlighted(tm *ptytest.Terminal) string {
+	final := string(tm.Raw())[strings.LastIndex(string(tm.Raw()), "\x1b[H"):]
+	var hl string
+	for _, line := range strings.Split(final, "\n") {
+		if strings.Contains(line, "48;5;236m") {
+			hl += ptytest.StripANSI(line)
+		}
+	}
+	return hl
 }
 
 // newShortDB creates a sqlite3 database under a short directory: the prompt

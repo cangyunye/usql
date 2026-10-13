@@ -117,6 +117,11 @@ func connsModal(h Handler, in io.Reader) error {
 			tea.WithAltScreen(),
 			tea.WithInput(in),
 			tea.WithOutput(out),
+			// take over the mouse wheel: without mouse reporting the
+			// terminal either translates wheel turns into arrow-key bursts
+			// or scrolls its own scrollback, dragging pre-modal screen
+			// content over the alt screen
+			tea.WithMouseCellMotion(),
 			tea.WithoutSignalHandler(),
 		)
 		fm, err := prog.Run()
@@ -194,10 +199,27 @@ func (m *connsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case sizeUnknown:
 		m.cons = nil // paint best-effort from here on
+	}
+	return m, nil
+}
+
+// handleMouse scrolls the list with the wheel, with the same wrapping the
+// arrow keys use. Other buttons and the confirm/form modes ignore the mouse.
+func (m *connsModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.mode != connsModeList {
+		return m, nil
+	}
+	switch msg.Type {
+	case tea.MouseWheelUp:
+		return m.handleListKey(tea.KeyMsg(tea.Key{Type: tea.KeyUp}))
+	case tea.MouseWheelDown:
+		return m.handleListKey(tea.KeyMsg(tea.Key{Type: tea.KeyDown}))
 	}
 	return m, nil
 }

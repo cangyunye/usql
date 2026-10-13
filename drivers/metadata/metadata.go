@@ -148,6 +148,14 @@ type Filter struct {
 	// information_schema) may honor it only where it changes semantics, and
 	// readers that cannot check privileges may ignore it.
 	OnlyAccessible bool
+	// PreferVisible resolves an unscoped, name-filtered lookup
+	// (Schema == "", Name != "") against the session's current schema
+	// first, falling back to the tenant-wide scan only when the current
+	// schema has no such object — psql's search_path semantics for `\d
+	// name`. On shared servers (OceanBase Oracle tenants) the unscoped
+	// all_* dictionary scans are prohibitively slow, so the describe path
+	// sets it; listings keep the full scope.
+	PreferVisible bool
 }
 
 // Writer of database metadata in a human readable format.

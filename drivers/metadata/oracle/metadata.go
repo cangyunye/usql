@@ -193,6 +193,23 @@ var relationTypes = []string{"TABLE", "VIEW", "MATERIALIZED VIEW", "SEQUENCE", "
 
 // Tables from selected catalog (or all, if empty), matching schemas, names and types
 func (r metaReader) Tables(f metadata.Filter) (*metadata.TableSet, error) {
+	// PreferVisible: resolve the current schema first — on shared servers
+	// (OceanBase Oracle tenants) an unscoped all_objects scan is
+	// prohibitively slow, and the psql-shaped answer is the login's own
+	// object anyway; fall back to the tenant-wide scan when it has none.
+	if f.PreferVisible && f.Schema == "" && f.Name != "" {
+		vis := f
+		vis.OnlyVisible = true
+		vis.WithSystem = true // the owner predicate scopes the query already
+		set, err := r.tables(vis)
+		if err == nil && set.Len() > 0 {
+			return set, nil
+		}
+	}
+	return r.tables(f)
+}
+
+func (r metaReader) tables(f metadata.Filter) (*metadata.TableSet, error) {
 	qstr := `SELECT
 o.owner AS table_schem,
 o.object_name AS table_name,
@@ -471,6 +488,20 @@ ORDER BY procedure_schem, procedure_name, ordinal_position`
 }
 
 func (r metaReader) Indexes(f metadata.Filter) (*metadata.IndexSet, error) {
+	// PreferVisible: same current-schema-first resolution as Tables.
+	if f.PreferVisible && f.Schema == "" && f.Name != "" {
+		vis := f
+		vis.OnlyVisible = true
+		vis.WithSystem = true
+		set, err := r.indexes(vis)
+		if err == nil && set.Len() > 0 {
+			return set, nil
+		}
+	}
+	return r.indexes(f)
+}
+
+func (r metaReader) indexes(f metadata.Filter) (*metadata.IndexSet, error) {
 	qstr := `SELECT
   o.owner,
   o.table_name,
@@ -515,26 +546,29 @@ ORDER BY o.owner, o.table_name, o.index_name`
 }
 
 func (r metaReader) IndexColumns(f metadata.Filter) (*metadata.IndexColumnSet, error) {
+	// all_ind_columns alone: the all_indexes join only ever added the
+	// table-name filter, and joining two dictionary views is what kills
+	// shared servers (OceanBase Oracle tenants time the session out on
+	// it) — every column lives in this one view
 	qstr := `SELECT
-  o.owner,
-  o.table_name,
-  o.index_name,
-  b.column_name,
-  b.column_position
-FROM all_indexes o
-JOIN all_ind_columns b ON o.owner = b.index_owner AND o.index_name = b.index_name
+  index_owner,
+  table_name,
+  index_name,
+  column_name,
+  column_position
+FROM all_ind_columns
 `
 	conds, vals := r.conditions(f, formats{
-		schema:     "o.owner LIKE %s",
-		notSchemas: "UPPER(o.owner) NOT IN (%s)",
-		parent:     "o.table_name LIKE %s",
-		name:       "o.index_name LIKE %s",
+		schema:     "index_owner LIKE %s",
+		notSchemas: "UPPER(index_owner) NOT IN (%s)",
+		parent:     "table_name LIKE %s",
+		name:       "index_name LIKE %s",
 	})
 	if len(conds) != 0 {
 		qstr += " WHERE " + strings.Join(conds, " AND ")
 	}
 	qstr += `
-ORDER BY o.owner, o.table_name, o.index_name, b.column_position`
+ORDER BY index_owner, table_name, index_name, column_position`
 	rows, closeRows, err := r.Query(qstr, vals...)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -564,6 +598,20 @@ ORDER BY o.owner, o.table_name, o.index_name, b.column_position`
 // identity column are implementation details — completion menus would flood
 // with them — so they are excluded.
 func (r metaReader) Sequences(f metadata.Filter) (*metadata.SequenceSet, error) {
+	// PreferVisible: same current-schema-first resolution as Tables.
+	if f.PreferVisible && f.Schema == "" && f.Name != "" {
+		vis := f
+		vis.OnlyVisible = true
+		vis.WithSystem = true
+		set, err := r.sequences(vis)
+		if err == nil && set.Len() > 0 {
+			return set, nil
+		}
+	}
+	return r.sequences(f)
+}
+
+func (r metaReader) sequences(f metadata.Filter) (*metadata.SequenceSet, error) {
 	qstr := `SELECT
   sequence_owner,
   sequence_name

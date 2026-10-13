@@ -186,7 +186,10 @@ func (w DefaultWriter) DescribeTableDetails(u *dburl.URL, pattern string, verbos
 	tr, isTR := w.r.(TableReader)
 	_, isCR := w.r.(ColumnReader)
 	if isTR && isCR {
-		res, err := tr.Tables(Filter{Schema: sp, Name: tp, WithSystem: showSystem})
+		// PreferVisible: resolve current schema first, tenant-wide scan
+		// only on a miss — unscoped dictionary lookups time out on shared
+		// servers (OceanBase Oracle tenants)
+		res, err := tr.Tables(Filter{Schema: sp, Name: tp, WithSystem: showSystem, PreferVisible: true})
 		if err != nil {
 			return fmt.Errorf("failed to list tables: %w", err)
 		}
@@ -219,7 +222,7 @@ func (w DefaultWriter) DescribeTableDetails(u *dburl.URL, pattern string, verbos
 	ir, isIR := w.r.(IndexReader)
 	_, isICR := w.r.(IndexColumnReader)
 	if isIR && isICR {
-		res, err := ir.Indexes(Filter{Schema: sp, Name: tp, WithSystem: showSystem})
+		res, err := ir.Indexes(Filter{Schema: sp, Name: tp, WithSystem: showSystem, PreferVisible: true})
 		if err != nil && err != text.ErrNotSupported {
 			return fmt.Errorf("failed to list indexes for table %s: %w", tp, err)
 		}
@@ -490,7 +493,7 @@ func (w DefaultWriter) getConstraintColumns(c, s, t, n string) (string, string, 
 
 func (w DefaultWriter) describeSequences(sp, tp string, verbose, showSystem bool) (int, error) {
 	r := w.r.(SequenceReader)
-	res, err := r.Sequences(Filter{Schema: sp, Name: tp, WithSystem: showSystem})
+	res, err := r.Sequences(Filter{Schema: sp, Name: tp, WithSystem: showSystem, PreferVisible: true})
 	if err != nil && err != text.ErrNotSupported {
 		return 0, err
 	}

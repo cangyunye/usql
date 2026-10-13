@@ -480,6 +480,9 @@ func openDescribeDB(t *testing.T) *sql.DB {
 	// Sequences() applies
 	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'S1', 'SEQUENCE')`)
 	ins(`INSERT INTO all_objects VALUES ('SCOTT', 'ISEQ$$_123', 'SEQUENCE')`)
+	// a table only a second schema has: PreferVisible must resolve the
+	// current schema first and only fall back to the broad scan on a miss
+	ins(`INSERT INTO all_objects VALUES ('ADAM', 'T2', 'TABLE')`)
 	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'T1_SEQ')`)
 	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'S1')`)
 	ins(`INSERT INTO all_sequences VALUES ('SCOTT', 'ISEQ$$_123')`)
@@ -787,4 +790,115 @@ func keys(m map[string]metadata.Function) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestTablesPreferVisibleResolvesCurrentSchemaFirst: an unscoped, named
+// lookup resolves the login's own schema first — on shared servers
+// (OceanBase Oracle tenants) the tenant-wide all_objects scan is
+// prohibitively slow, and the current schema's object is the psql-shaped
+// answer anyway.
+func TestTablesPreferVisibleResolvesCurrentSchemaFirst(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.TableReader)
+	set, err := r.Tables(metadata.Filter{Name: "T1", PreferVisible: true})
+	if err != nil {
+		t.Fatalf("Tables: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		row := set.Get()
+		got = append(got, row.Schema+"."+row.Name)
+	}
+	if len(got) != 1 || got[0] != "SCOTT.T1" {
+		t.Errorf("Tables(PreferVisible, T1) = %v, want [SCOTT.T1]", got)
+	}
+}
+
+// TestTablesPreferVisibleFallsBackOnMiss: when the current schema has no
+// such object, the tenant-wide scan still runs — other schemas' objects
+// stay describable, just not at the cost of a broad scan on every \d.
+func TestTablesPreferVisibleFallsBackOnMiss(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.TableReader)
+	set, err := r.Tables(metadata.Filter{Name: "T2", PreferVisible: true})
+	if err != nil {
+		t.Fatalf("Tables: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		row := set.Get()
+		got = append(got, row.Schema+"."+row.Name)
+	}
+	if len(got) != 1 || got[0] != "ADAM.T2" {
+		t.Errorf("Tables(PreferVisible, T2) = %v, want [ADAM.T2]", got)
+	}
+}
+
+// TestSequencesPreferVisible: the \d sequence resolution follows the same
+// current-schema-first rule as tables.
+func TestSequencesPreferVisible(t *testing.T) {
+	r := NewReaderQ()(openDescribeDB(t)).(metadata.SequenceReader)
+
+	set, err := r.Sequences(metadata.Filter{Name: "T1_SEQ", PreferVisible: true})
+	if err != nil {
+		t.Fatalf("Sequences: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		seq := set.Get()
+		got = append(got, seq.Schema+"."+seq.Name)
+	}
+	if len(got) != 1 || got[0] != "SCOTT.T1_SEQ" {
+		t.Errorf("Sequences(PreferVisible, T1_SEQ) = %v, want [SCOTT.T1_SEQ]", got)
+	}
+
+	// a miss in the current schema falls back to the other schemas
+	set2, err := r.Sequences(metadata.Filter{Name: "UNRELATED_SEQ", PreferVisible: true})
+	if err != nil {
+		t.Fatalf("Sequences: %v", err)
+	}
+	defer set2.Close()
+	got = nil
+	for set2.Next() {
+		seq := set2.Get()
+		got = append(got, seq.Schema+"."+seq.Name)
+	}
+	if len(got) != 1 || got[0] != "HR.UNRELATED_SEQ" {
+		t.Errorf("Sequences(PreferVisible, UNRELATED_SEQ) = %v, want [HR.UNRELATED_SEQ]", got)
+	}
+}
+
+// TestIndexColumnsServesWithoutAllIndexes: the columns of an index come
+// from all_ind_columns alone — the all_indexes join is gone, so the query
+// must succeed on a server exposing only the ind-columns view (and on the
+// shared servers where that join timed sessions out).
+func TestIndexColumnsServesWithoutAllIndexes(t *testing.T) {
+	registerSysContextStub()
+	registerDecodeStub()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`CREATE TABLE all_ind_columns (index_owner text, index_name text, table_name text, column_name text, column_position int)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO all_ind_columns VALUES ('SCOTT', 'T1_IDX', 'T1', 'ID', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	r := NewReaderQ()(db).(metadata.IndexColumnReader)
+	set, err := r.IndexColumns(metadata.Filter{Schema: "SCOTT", Parent: "T1", Name: "T1_IDX", WithSystem: true})
+	if err != nil {
+		t.Fatalf("IndexColumns: %v", err)
+	}
+	defer set.Close()
+	var got []string
+	for set.Next() {
+		ic := set.Get()
+		got = append(got, ic.Schema+"."+ic.IndexName+"="+ic.Name)
+	}
+	if len(got) != 1 || got[0] != "SCOTT.T1_IDX=ID" {
+		t.Errorf("IndexColumns = %v, want [SCOTT.T1_IDX=ID]", got)
+	}
 }

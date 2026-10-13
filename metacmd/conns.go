@@ -9,6 +9,7 @@ package metacmd
 // at the menu prompt only:
 //
 //	a | add        add a new named connection (form)
+//	e <name|#>     edit a connection (form)
 //	<row number>   edit the connection in that table row (form)
 //	c <name|#>     connect to a named connection
 //	d <name|#>     delete a named connection (asks for confirmation)
@@ -146,7 +147,7 @@ func connsManage(h Handler) error {
 		if len(names) == 0 {
 			fmt.Fprintln(stdout, "  (no named connections yet; type `a` to add one)")
 		}
-		v, err := h.ReadVar("string", "\\conns> [a]dd  [1..n] edit  [c <name|#>]onnect  [d <name|#>]elete  [q]uit: ")
+		v, err := h.ReadVar("string", "\\conns> [a]dd  [e <name|#>]dit  [c <name|#>]onnect  [d <name|#>]elete  [q]uit: ")
 		if err != nil {
 			return nil // ^C / ^D / EOF leaves the manager
 		}
@@ -160,7 +161,7 @@ func connsManage(h Handler) error {
 			return nil
 		case cmd == "a" || cmd == "add":
 			connsAdd(h)
-		case cmd == "c" || cmd == "connect" || cmd == "d" || cmd == "delete":
+		case cmd == "e" || cmd == "edit" || cmd == "c" || cmd == "connect" || cmd == "d" || cmd == "delete":
 			target := ""
 			if len(fields) > 1 {
 				target = fields[1]
@@ -200,6 +201,9 @@ func connsManage(h Handler) error {
 					continue
 				}
 				fmt.Fprintln(stdout, "deleted connection", name)
+			default:
+				// e / edit
+				connsEdit(h, name)
 			}
 		default:
 			// row number shortcut for edit
@@ -497,7 +501,7 @@ func (w wordCompleter) Do(line []rune, pos int) ([]rline.Cand, int) {
 
 // connsMenuCompleter completes the \conns manager menu prompt: the first
 // word is one of the manager's operations (or a row number), the word after
-// connect/delete is a connection name.
+// edit/connect/delete is a connection name.
 type connsMenuCompleter struct{}
 
 // Do satisfies rline.Completer.
@@ -515,11 +519,11 @@ func (connsMenuCompleter) Do(line []rune, pos int) ([]rline.Cand, int) {
 	var options []string
 	switch {
 	case len(fields) == 0:
-		options = []string{"add", "connect", "delete", "quit"}
+		options = []string{"add", "connect", "delete", "edit", "quit"}
 		options = append(options, connNumbers()...)
 	case len(fields) == 1:
 		switch strings.ToLower(fields[0]) {
-		case "c", "connect", "d", "delete":
+		case "e", "edit", "c", "connect", "d", "delete":
 			options = slices.Sorted(maps.Keys(env.Vars().Conn()))
 		}
 	}

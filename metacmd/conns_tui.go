@@ -261,6 +261,11 @@ func (m *connsModel) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "a":
 		m.openForm("")
+	case "e", "enter":
+		if m.badSelection() {
+			return m, nil
+		}
+		m.openForm(m.names[m.rowsel])
 	case "c":
 		if m.badSelection() {
 			return m, nil
@@ -274,18 +279,6 @@ func (m *connsModel) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.confirm = m.names[m.rowsel]
 		m.mode = connsModeConfirm
 		m.err = ""
-	case "enter":
-		if m.badSelection() {
-			return m, nil
-		}
-		m.openForm(m.names[m.rowsel])
-	default:
-		// 1..9 edits the numbered row
-		if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-			if n := int(key[0] - '1'); n < len(m.names) {
-				m.openForm(m.names[n])
-			}
-		}
 	}
 	return m, nil
 }
@@ -560,7 +553,7 @@ func (m *connsModel) listView() string {
 	if len(m.names) == 0 {
 		b.WriteString("  (no named connections yet; press a to add one)\n")
 	}
-	b.WriteString(uitheme.Current().Dim.Render("a add  1..n/↵ edit  c connect  d delete  q quit"))
+	b.WriteString(uitheme.Current().Dim.Render("a add  e/↵ edit  c connect  d delete  q quit"))
 	return b.String()
 }
 

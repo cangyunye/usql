@@ -147,7 +147,7 @@ out of the config file):
 
 ```sh
 (not connected)=> \conns
-\conns> [a]dd  [1..n] edit  [c <name|#>]onnect  [d <name|#>]elete  [q]uit: a
+\conns> [a]dd  [e <name|#>]dit  [c <name|#>]onnect  [d <name|#>]elete  [q]uit: a
 ```
 
 In the form, fill:

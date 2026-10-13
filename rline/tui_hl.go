@@ -34,6 +34,12 @@ func (m *lineModel) highlight(plain string) string {
 	if plain == m.hlIn {
 		return m.hlOut
 	}
+	if m.done {
+		// final frame: it is what stays on screen after the read returns —
+		// never render the stale debounced form of a rapidly edited line
+		m.computeHL()
+		return m.hlOut
+	}
 	if !m.hlPend && time.Since(m.hlAt) >= hlDebounce {
 		m.computeHL()
 		return m.hlOut

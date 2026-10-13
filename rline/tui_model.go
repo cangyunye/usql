@@ -240,6 +240,13 @@ func (m *lineModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.done {
 		return m, nil
 	}
+	// bracketed paste arrives as one Runes batch with the newlines intact;
+	// it must never fall through to the per-key handlers (the single-line
+	// buffer would swallow the whole statement and the rendering would keep
+	// only its last line visible)
+	if msg.Paste {
+		return m.handlePaste(msg.Runes)
+	}
 	switch key := msg.String(); key {
 	case "ctrl+c":
 		m.done = true
@@ -284,6 +291,45 @@ func (m *lineModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// handlePaste inserts bracketed-paste text. The input model is a single
+// line, but a paste is a whole buffer: the first line enters the current
+// buffer at the cursor and submits (its newline was the paste's own), and
+// the remaining lines requeue in the input filter to replay one per read
+// session, each rendered with its own prompt — the same shape typing the
+// statement line by line produces. A paste ending without a newline leaves
+// its last line in the final session's buffer for the user's Enter.
+//
+// The typing-time completion is deliberately not scheduled for pasted
+// content: a statement's word boundary is not a completion position, and a
+// menu popping open mid-paste garbles the replay.
+func (m *lineModel) handlePaste(rs []rune) (tea.Model, tea.Cmd) {
+	plain := strings.ReplaceAll(string(rs), "\r\n", "\n")
+	plain = strings.ReplaceAll(plain, "\r", "\n")
+	segments := strings.Split(plain, "\n")
+	m.closeMenu()
+	m.ghost = nil
+	m.ed.insertRunes([]rune(segments[0]))
+	if len(segments) == 1 {
+		return m, nil
+	}
+	lines := make([][]byte, 0, len(segments)-1)
+	for i, seg := range segments[1:] {
+		switch {
+		case i == len(segments)-2 && seg == "":
+			// the paste ended with a newline: that newline is the final
+			// line's Enter
+			lines = append(lines, []byte("\n"))
+		case i == len(segments)-2:
+			lines = append(lines, []byte(seg))
+		default:
+			lines = append(lines, append([]byte(seg), '\n'))
+		}
+	}
+	m.t.respf.requeue(lines...)
+	m.done = true
+	return m, tea.Quit
 }
 
 // handleSearchKey processes keys during Ctrl-R / Ctrl-S search.

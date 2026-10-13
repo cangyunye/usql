@@ -617,3 +617,79 @@ func TestPTYConnsModal(t *testing.T) {
 		t.Fatalf("exit: %v", err)
 	}
 }
+
+// newShortDB creates a sqlite3 database under a short directory: the prompt
+// is the DSN, and the paste scenarios assert on full-line echoes, so the
+// prompt must leave terminal width for the statement.
+func newShortDB(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "up-*")
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	db := filepath.Join(dir, "p.db")
+	dsn := "sqlite3://" + db
+	if out, err := exec.Command(binPath, dsn,
+		"-c", "SELECT 1").CombinedOutput(); err != nil {
+		t.Fatalf("setup db: %v\n%s", err, out)
+	}
+	return dsn
+}
+
+// TestPTYPasteMultiline: a bracketed multi-line paste replays line by line —
+// every line echoes in full with its own prompt, and the pasted statements
+// execute in order. The regression: the whole paste used to land in the
+// single-line buffer, the rendering kept only its last line visible, and the
+// lines after the first newline were dropped entirely.
+func TestPTYPasteMultiline(t *testing.T) {
+	dsn := newShortDB(t)
+	tm := newSession(t, dsn)
+	defer tm.KillIfRunning()
+	tm.WaitFor(`sqlite`, 10*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	const stmts = "CREATE TABLE p1(v int);\nINSERT INTO p1 VALUES (4242);\nSELECT v FROM p1;\n"
+	tm.SendRaw("\x1b[200~" + stmts + "\x1b[201~")
+	tm.WaitFor(`\(1 row\)`, 10*time.Second)
+
+	out := ptytest.StripANSI(string(tm.Raw()))
+	for _, want := range []string{
+		"CREATE TABLE p1(v int);",
+		"INSERT INTO p1 VALUES (4242);",
+		"SELECT v FROM p1;",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("paste echo missing %q:\n%s", want, out)
+		}
+	}
+	// the statements executed in order: the table exists and holds the row
+	tm.SendLine("SELECT COUNT(*) FROM p1")
+	tm.WaitFor(`\(1 row\)`, 10*time.Second)
+	out = ptytest.StripANSI(string(tm.Raw()))
+	if !strings.Contains(out, "4242") || !strings.Contains(out, "2") {
+		t.Errorf("pasted statements did not execute in order:\n%s", out)
+	}
+	tm.Ctrl('d')
+}
+
+// TestPTYPasteSingleLine: a bracketed paste without a trailing newline
+// inserts into the buffer and waits — nothing executes until the user's
+// Enter.
+func TestPTYPasteSingleLine(t *testing.T) {
+	dsn := newShortDB(t)
+	tm := newSession(t, dsn)
+	defer tm.KillIfRunning()
+	tm.WaitFor(`sqlite`, 10*time.Second)
+	time.Sleep(300 * time.Millisecond)
+
+	tm.SendRaw("\x1b[200~SELECT 4242 AS v;\x1b[201~")
+	time.Sleep(500 * time.Millisecond)
+	if strings.Contains(ptytest.StripANSI(string(tm.Raw())), "(1 row)") {
+		t.Fatalf("paste without newline executed on its own:\n%s",
+			ptytest.StripANSI(string(tm.Raw())))
+	}
+	tm.SendKeys("\r")
+	tm.WaitFor(`\(1 row\)`, 10*time.Second)
+	tm.Ctrl('d')
+}

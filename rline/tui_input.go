@@ -51,6 +51,13 @@ type responseFilter struct {
 	// answer) seen in the stream: the prompt's cursor probe reads its row
 	// from here instead of touching the console.
 	rowCh chan int
+	// held carries requeued paste lines waiting for their own read sessions.
+	// A bracketed multi-line paste is split by the model: the first line
+	// enters the buffer, the rest requeue here and are delivered ONE per
+	// fresh read session — handing them to the dying session's program
+	// would drop everything after its Enter (the program quits on the key
+	// and discards whatever remained parsed in its last input batch).
+	held [][]byte
 	// pumpStarted gates the single pump goroutine
 	pumpStarted sync.Once
 	// dbg, when non-nil (USQL_INPUT_DEBUG=<file>), receives every raw
@@ -161,6 +168,20 @@ func (f *responseFilter) waitRow(d time.Duration) (int, bool) {
 	}
 }
 
+// requeue schedules paste lines for later read sessions. Each entry is one
+// line, newline included (a trailing partial line carries none, so its
+// session waits for the user's Enter). Safe to call while a program is
+// quitting: entries are only handed out by a FRESH session's first read
+// (see Read), never to the program that is on its way out.
+func (f *responseFilter) requeue(lines ...[]byte) {
+	if len(lines) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.held = append(f.held, lines...)
+}
+
 // closeSession ends the current read session: its parked reader (the
 // previous bubbletea program's read loop, which bubbletea cannot interrupt)
 // wakes and exits WITHOUT consuming — bytes queued meanwhile stay buffered
@@ -185,6 +206,15 @@ func (f *responseFilter) Read(p []byte) (int, error) {
 	f.generation++
 	f.cond.Broadcast()
 	gen := f.generation
+	// a fresh session's first read releases the next requeued paste line:
+	// exactly one line per session, so each renders with its own prompt.
+	// Later reads of the same session (gen > closedGen+1) must not pull
+	// more — the session's program quits on the line's Enter and would
+	// drop whatever else it had pulled.
+	if gen == f.closedGen+1 && len(f.held) > 0 {
+		f.out = append(f.out, f.held[0]...)
+		f.held = f.held[1:]
+	}
 	for {
 		// a session that has ended, or been superseded by a newer one, must
 		// never take bytes: its consumer (bubbletea's event loop) is gone

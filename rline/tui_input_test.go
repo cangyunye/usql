@@ -382,3 +382,35 @@ func TestReadPasswordFilteredInterrupt(t *testing.T) {
 		t.Fatalf("got %v, want ErrInterrupt", err)
 	}
 }
+
+// TestResponseFilterRequeuePace: requeued paste lines are delivered ONE per
+// fresh read session. Handing them out faster would let a session's program
+// consume lines beyond its own Enter — the program quits on that key and
+// discards whatever remained in its last parsed input batch (the dropped
+// lines of a multi-line paste).
+func TestResponseFilterRequeuePace(t *testing.T) {
+	f := newResponseFilter(newChanReader())
+	f.startPump()
+	f.requeue([]byte("FROM t\n"), []byte("WHERE x = 1"))
+
+	// first read after a session boundary: exactly the next line
+	f.closeSession()
+	if got := drainReadString(f); got != "FROM t\n" {
+		t.Fatalf("fresh session read = %q, want %q", got, "FROM t\n")
+	}
+
+	// a second read of the SAME session must not take the next line: it
+	// parks until the boundary passes
+	got := make(chan string, 1)
+	go func() { got <- drainReadString(f) }()
+	select {
+	case s := <-got:
+		t.Fatalf("same-session read took held line: %q", s)
+	case <-time.After(150 * time.Millisecond):
+	}
+	f.closeSession() // wakes the parked reader as superseded
+
+	if got := drainReadString(f); got != "WHERE x = 1" {
+		t.Fatalf("next session read = %q, want %q", got, "WHERE x = 1")
+	}
+}
